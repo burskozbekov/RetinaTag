@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RetinaTag",
+  "version": "1.1.0",
+  "identifier": "com.retinatag.app",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "RetinaTag",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "decorations": true,
+        "center": true,
+        "label": "main"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFCQ0M2MTdEMzJFNTJBRTUKUldUbEt1VXlmV0hNRy9JK05TNmxqTStJWUtlTldJN1VEMzVJTFFMVlZoK0xsMkw0aFdmbElacnoK",
+      "endpoints": [
+        "https://github.com/burskozbekov/RetinaTag/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

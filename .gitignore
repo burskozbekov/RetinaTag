@@ -1,0 +1,11 @@
+node_modules/
+*.key
+*.key.pub
+.ollama/
+src-tauri/target/
+src-tauri/target/
+dist/*.js.map
+.env
+*.db
+*.db-shm
+*.db-wal

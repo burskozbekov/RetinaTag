@@ -1,0 +1,1391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RetinaTag</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+/* ── Variables ──────────────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --ink:#0C0707;--ink2:#130B0B;--surface:#1A0F0F;--card:#211414;--card2:#2A1A1A;
+  --border:#3A1F1F;--border2:#4A2B2B;
+  --red:#B83A12;--red-light:#D4521A;--red-dark:#8A2A0A;
+  --red-glow:rgba(184,58,18,.18);--red-bg:rgba(184,58,18,.10);
+  --cream:#EDE0C4;--cream2:#D4C4A0;--cream3:#A08060;
+  --green:#4E9A6A;--green-bg:rgba(78,154,106,.12);
+  --amber:#C88A30;--amber-bg:rgba(200,138,48,.12);--blue:#5A7FA8;
+  --text:#EDE0C4;--text2:#B89A7A;--text3:#7A5A48;
+  --radius:12px;--radius-sm:7px;--radius-lg:18px;
+  --shadow:0 8px 32px rgba(0,0,0,.6);--shadow-red:0 4px 24px rgba(184,58,18,.25);
+  --sidebar-w:260px;--detail-w:340px;--cell-w:214px;--cell-h:234px;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',system-ui,sans-serif;
+}
+html,body{height:100%;overflow:hidden;background:var(--ink);color:var(--text);
+  font-family:var(--font);font-size:13px;-webkit-font-smoothing:antialiased}
+::selection{background:var(--red);color:var(--cream)}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--red-dark)}
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(ellipse 60% 50% at 30% 50%,rgba(184,58,18,.06) 0%,transparent 70%)}
+#app{display:flex;height:100vh;position:relative;z-index:1}
+.arc-deco{position:relative;overflow:hidden}
+.arc-deco::after{content:'';position:absolute;width:280px;height:280px;border-radius:50%;
+  border:1px solid rgba(184,58,18,.12);right:-80px;top:-80px;pointer-events:none}
+
+/* ── Sidebar ────────────────────────────────────────────────────────── */
+#sidebar{width:var(--sidebar-w);min-width:var(--sidebar-w);background:var(--surface);
+  border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;z-index:10}
+.sb-logo{padding:20px 18px 16px;display:flex;align-items:center;gap:13px;
+  border-bottom:1px solid var(--border);position:relative;overflow:hidden}
+.sb-logo::before,.sb-logo::after{content:'';position:absolute;border-radius:50%;
+  border:1px solid rgba(184,58,18,.15);pointer-events:none;right:-40px}
+.sb-logo::before{width:120px;height:120px;top:-20px}
+.sb-logo::after{width:180px;height:180px;top:-50px;border-color:rgba(184,58,18,.08)}
+.logo-mark{width:38px;height:38px;border-radius:10px;
+  background:linear-gradient(135deg,var(--red-dark),var(--red-light));
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  box-shadow:var(--shadow-red);position:relative;z-index:1}
+.logo-mark svg{width:22px;height:22px}
+.logo-text{position:relative;z-index:1}
+.logo-name{font-weight:800;font-size:17px;letter-spacing:-.5px;color:var(--cream)}
+.logo-ver{font-size:10px;color:var(--text3);margin-top:2px;letter-spacing:.3px}
+.sb-section{padding:14px 14px 6px}
+.sb-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin-bottom:8px;
+  display:flex;align-items:center;justify-content:space-between}
+
+/* Buttons */
+.btn{padding:8px 14px;border:none;border-radius:var(--radius-sm);font-size:12px;font-weight:700;
+  cursor:pointer;display:inline-flex;align-items:center;gap:7px;transition:all .18s;
+  font-family:var(--font);line-height:1.3;letter-spacing:.1px}
+.btn-primary{background:linear-gradient(135deg,var(--red-dark),var(--red));color:var(--cream);
+  box-shadow:0 2px 12px rgba(184,58,18,.3)}
+.btn-primary:hover{background:linear-gradient(135deg,var(--red),var(--red-light));
+  box-shadow:0 4px 20px rgba(184,58,18,.45);transform:translateY(-1px)}
+.btn-secondary{background:var(--card);color:var(--text2);border:1px solid var(--border2)}
+.btn-secondary:hover{border-color:var(--red-dark);color:var(--cream)}
+.btn-ghost{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;
+  line-height:1;padding:4px;transition:color .15s;font-family:var(--font)}
+.btn-ghost:hover{color:var(--cream)}
+.btn-block{width:100%}.btn-sm{padding:5px 10px;font-size:11px}
+.btn:disabled{opacity:.3;cursor:not-allowed;transform:none !important}
+.btn-xs{padding:3px 8px;font-size:10px;border-radius:5px}
+.btn-danger{background:rgba(192,64,64,.15);color:#E05050;border:1px solid rgba(192,64,64,.3)}
+.btn-danger:hover{background:rgba(192,64,64,.25)}
+
+/* Folder list */
+.sb-folders{overflow-y:auto;flex:1;padding:4px 10px}
+.folder-item{padding:7px 10px;border-radius:var(--radius-sm);cursor:pointer;display:flex;
+  align-items:center;gap:8px;font-size:12px;color:var(--text3);transition:all .14s;margin-bottom:2px}
+.folder-item:hover{background:var(--card);color:var(--text2)}
+.folder-item.active{background:var(--red-bg);color:var(--red-light);border-left:2px solid var(--red);padding-left:8px}
+.folder-item svg{width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.8}
+.folder-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.folder-count{font-size:10px;color:var(--text3);background:var(--card2);padding:1px 6px;border-radius:8px}
+
+/* Collections in sidebar */
+.collection-item{padding:6px 10px;border-radius:var(--radius-sm);cursor:pointer;display:flex;
+  align-items:center;gap:7px;font-size:11px;color:var(--text3);transition:all .14s;margin-bottom:2px}
+.collection-item:hover{background:var(--card);color:var(--text2)}
+.collection-item .ci-icon{font-size:12px;flex-shrink:0}
+.collection-item.smart .ci-icon{color:var(--amber)}
+
+/* Providers */
+.sb-providers{padding:10px 14px;border-top:1px solid var(--border)}
+.provider-row{display:flex;align-items:center;gap:7px;padding:4px 0;font-size:11px;color:var(--text3)}
+.prov-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.prov-dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}.prov-dot.off{background:var(--border2)}
+.prov-name{flex:1;color:var(--text2)}.prov-stat{font-size:10px;color:var(--text3)}
+
+/* Stats */
+.sb-stats{padding:10px 14px;border-top:1px solid var(--border);display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.stat{background:var(--card);border-radius:var(--radius-sm);padding:9px 11px;
+  border:1px solid var(--border);position:relative;overflow:hidden;cursor:pointer}
+.stat::after{content:'';position:absolute;width:60px;height:60px;border-radius:50%;
+  border:1px solid rgba(184,58,18,.08);right:-15px;bottom:-15px}
+.stat-val{font-size:19px;font-weight:800;line-height:1;color:var(--cream)}
+.stat-val.red{color:var(--red-light)}.stat-val.green{color:var(--green)}.stat-val.amber{color:var(--amber)}
+.stat-lbl{font-size:10px;color:var(--text3);margin-top:3px;font-weight:500}
+
+/* Progress */
+.sb-progress{padding:10px 14px;border-top:1px solid var(--border);display:none}
+.sb-progress.active{display:block}
+.progress-head{display:flex;justify-content:space-between;font-size:11px;color:var(--text2);margin-bottom:6px;font-weight:600}
+.progress-track{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+.progress-fill{height:100%;border-radius:2px;transition:width .4s ease;
+  background:linear-gradient(90deg,var(--red-dark),var(--red-light));box-shadow:0 0 8px rgba(184,58,18,.5)}
+.progress-sub{font-size:10px;color:var(--text3);margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-bottom{padding:10px 14px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:5px}
+
+/* ── Main ───────────────────────────────────────────────────────────── */
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.toolbar{padding:10px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;
+  background:var(--surface);flex-shrink:0}
+.search-box{flex:1;position:relative}
+.search-box svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);
+  width:14px;height:14px;stroke:var(--text3);fill:none;stroke-width:2}
+#searchInput{width:100%;padding:8px 12px 8px 34px;border-radius:20px;border:1px solid var(--border2);
+  background:var(--card);color:var(--text);font-size:13px;outline:none;transition:all .2s;font-family:var(--font)}
+#searchInput:focus{border-color:var(--red-dark);background:var(--card2);box-shadow:0 0 0 3px rgba(184,58,18,.12)}
+#searchInput::placeholder{color:var(--text3)}
+.search-hint{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:10px;color:var(--amber);pointer-events:none}
+select.tb-select{padding:7px 10px;border-radius:20px;border:1px solid var(--border2);background:var(--card);
+  color:var(--text2);font-size:12px;outline:none;cursor:pointer;font-family:var(--font);transition:border-color .2s}
+select.tb-select:focus{border-color:var(--red-dark)}
+.tb-count{font-size:12px;color:var(--text3);white-space:nowrap;font-weight:600}
+
+/* View tabs in toolbar */
+.view-tabs{display:flex;gap:2px;background:var(--card);border-radius:20px;padding:2px;border:1px solid var(--border)}
+.view-tab{padding:5px 12px;border-radius:18px;font-size:11px;font-weight:600;cursor:pointer;
+  color:var(--text3);transition:all .15s;border:none;background:none;font-family:var(--font)}
+.view-tab.active{background:var(--red);color:var(--cream);box-shadow:0 2px 8px rgba(184,58,18,.3)}
+.view-tab:hover:not(.active){color:var(--text2)}
+
+/* ── Virtual grid ───────────────────────────────────────────────────── */
+#gridWrap{flex:1;overflow-y:auto;overflow-x:hidden;position:relative}
+#gridScroller{position:relative;width:100%}
+.photo-card{position:absolute;width:204px;height:224px;background:var(--card);border-radius:var(--radius);
+  border:1.5px solid var(--border);overflow:hidden;cursor:pointer;transition:border-color .18s,transform .18s,box-shadow .18s}
+.photo-card:hover{border-color:var(--border2);transform:translateY(-3px) scale(1.01);
+  box-shadow:0 12px 36px rgba(0,0,0,.7),0 0 20px rgba(184,58,18,.12)}
+.photo-card.selected{border-color:var(--red);box-shadow:0 0 0 1px var(--red),0 8px 24px rgba(184,58,18,.3)}
+.photo-thumb{width:100%;height:170px;object-fit:cover;display:block}
+.thumb-placeholder{width:100%;height:170px;background:linear-gradient(135deg,var(--card) 0%,var(--card2) 100%);
+  display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+.thumb-placeholder::before,.thumb-placeholder::after{content:'';position:absolute;border-radius:50%;border:1px solid rgba(184,58,18,.1)}
+.thumb-placeholder::before{width:120px;height:120px;right:-30px;top:-30px}
+.thumb-placeholder::after{width:80px;height:80px;right:-10px;top:-10px;border-color:rgba(184,58,18,.06)}
+.thumb-placeholder svg{width:28px;height:28px;stroke:var(--border2);stroke-width:1.5;fill:none;position:relative;z-index:1}
+.photo-info{padding:7px 10px}
+.photo-name{font-size:11px;color:var(--cream2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.photo-meta{font-size:10px;color:var(--text3);margin-top:3px;display:flex;align-items:center;gap:6px}
+.status-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.status-dot.tagged{background:var(--green)}.status-dot.pending{background:var(--text3)}.status-dot.error{background:#C04040}
+.prov-badge{font-size:9px;padding:1px 5px;border-radius:6px;background:var(--red-bg);color:var(--red-light);
+  border:1px solid rgba(184,58,18,.2);letter-spacing:.2px}
+
+/* Empty */
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:18px;padding:60px;text-align:center}
+.empty-eye{width:80px;height:80px;border-radius:50%;border:2px solid var(--border2);
+  display:flex;align-items:center;justify-content:center;position:relative}
+.empty-eye::before,.empty-eye::after{content:'';position:absolute;border-radius:50%;border:1px solid var(--border)}
+.empty-eye::before{width:110px;height:110px}.empty-eye::after{width:140px;height:140px;border-color:rgba(58,31,31,.5)}
+.empty-eye svg{width:32px;height:32px;stroke:var(--border2);fill:none;stroke-width:1.5}
+.empty-title{font-size:22px;font-weight:800;color:var(--cream2);opacity:.5;letter-spacing:-.5px}
+.empty-sub{font-size:13px;color:var(--text3);max-width:340px;line-height:1.7}
+
+/* ── Detail panel ───────────────────────────────────────────────────── */
+#detailPanel{width:0;min-width:0;overflow:hidden;background:var(--surface);border-left:1px solid var(--border);
+  display:flex;flex-direction:column;transition:width .22s ease,min-width .22s ease}
+#detailPanel.open{width:var(--detail-w);min-width:var(--detail-w)}
+.detail-head{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.detail-title{font-weight:700;font-size:13px;color:var(--cream);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.detail-preview{width:100%;aspect-ratio:1;background:var(--ink);overflow:hidden;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;position:relative}
+.detail-preview::after{content:'';position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(ellipse 80% 80% at 50% 50%,transparent 60%,rgba(12,7,7,.6) 100%)}
+.detail-preview img{max-width:100%;max-height:100%;object-fit:contain;position:relative;z-index:1}
+.detail-meta{padding:10px 16px;border-bottom:1px solid var(--border);font-size:11px}
+.meta-row{display:flex;justify-content:space-between;margin-bottom:4px;align-items:center}
+.meta-key{color:var(--text3);font-weight:600;text-transform:uppercase;font-size:9px;letter-spacing:.5px}
+.meta-val{color:var(--cream2);font-weight:600;font-size:11px}
+.detail-body{flex:1;overflow-y:auto;padding:12px 16px}
+.section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--text3);
+  margin-bottom:9px;display:flex;justify-content:space-between;align-items:center}
+.tag-count-badge{background:var(--red-bg);color:var(--red-light);font-size:11px;font-weight:800;
+  padding:1px 8px;border-radius:10px;border:1px solid rgba(184,58,18,.2)}
+.tags-cloud{display:flex;flex-wrap:wrap;gap:5px}
+.tag-chip{padding:4px 9px;border-radius:20px;font-size:11px;background:var(--card2);color:var(--cream2);
+  border:1px solid var(--border2);display:flex;align-items:center;gap:4px;cursor:default;transition:all .14s}
+.tag-chip:hover{background:var(--red-bg);border-color:rgba(184,58,18,.3);color:var(--cream)}
+.tag-del{background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;line-height:1;
+  padding:0;transition:color .1s}.tag-del:hover{color:var(--red-light)}
+.add-row{display:flex;gap:6px;margin-top:12px}
+.add-input{flex:1;padding:7px 11px;border-radius:20px;border:1px solid var(--border2);background:var(--card);
+  color:var(--text);font-size:12px;outline:none;font-family:var(--font);transition:border-color .2s}
+.add-input:focus{border-color:var(--red-dark)}.add-input::placeholder{color:var(--text3)}
+
+/* Detail action buttons */
+.detail-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
+.detail-actions .btn{font-size:10px;padding:5px 10px}
+
+/* ── Modal ──────────────────────────────────────────────────────────── */
+.modal-overlay{position:fixed;inset:0;background:rgba(8,4,4,.85);display:flex;align-items:center;
+  justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:opacity .22s;backdrop-filter:blur(6px)}
+.modal-overlay.open{opacity:1;pointer-events:all}
+.modal-box{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-lg);
+  width:580px;max-width:92vw;max-height:86vh;overflow-y:auto;transform:translateY(24px) scale(.97);
+  transition:transform .25s ease;box-shadow:0 32px 80px rgba(0,0,0,.7),0 0 40px rgba(184,58,18,.08);
+  position:relative;overflow:hidden}
+.modal-overlay.open .modal-box{transform:translateY(0) scale(1)}
+.modal-box::before,.modal-box::after{content:'';position:absolute;border-radius:50%;pointer-events:none;
+  border:1px solid rgba(184,58,18,.06)}
+.modal-box::before{width:300px;height:300px;right:-80px;top:-80px}
+.modal-box::after{width:200px;height:200px;right:-40px;top:-40px;border-color:rgba(184,58,18,.04)}
+.modal-head{padding:22px 24px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;
+  justify-content:space-between;position:relative;z-index:1}
+.modal-head h2{font-size:18px;font-weight:800;color:var(--cream);letter-spacing:-.4px;display:flex;align-items:center;gap:10px}
+.modal-head h2 svg{stroke:var(--red-light)}
+.modal-body{padding:20px 24px;position:relative;z-index:1}
+.modal-foot{padding:14px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;
+  position:relative;z-index:1}
+
+/* Forms */
+.form-group{margin-bottom:16px}
+.form-label{display:block;font-size:10px;font-weight:700;color:var(--text3);margin-bottom:5px;
+  text-transform:uppercase;letter-spacing:.6px}
+.form-input{width:100%;padding:9px 12px;border-radius:var(--radius-sm);border:1px solid var(--border2);
+  background:var(--card);color:var(--text);font-size:13px;outline:none;font-family:var(--font);
+  transition:border-color .18s,box-shadow .18s}
+.form-input:focus{border-color:var(--red-dark);box-shadow:0 0 0 3px rgba(184,58,18,.1)}
+.form-input::placeholder{color:var(--text3)}
+.form-hint{font-size:10px;color:var(--text3);margin-top:4px;line-height:1.5}
+.form-select{width:100%;padding:9px 12px;border-radius:var(--radius-sm);border:1px solid var(--border2);
+  background:var(--card);color:var(--text);font-size:13px;outline:none;cursor:pointer;font-family:var(--font)}
+
+/* Provider cards */
+.provider-card{background:var(--card);border:1.5px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;margin-bottom:10px;transition:border-color .18s;position:relative;overflow:hidden}
+.provider-card.active-provider{border-color:var(--green)}
+.provider-card::after{content:'';position:absolute;width:120px;height:120px;border-radius:50%;
+  border:1px solid rgba(184,58,18,.06);right:-30px;top:-30px;pointer-events:none}
+.pc-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.pc-icon{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:800;flex-shrink:0;color:#fff}
+.pc-icon.claude{background:linear-gradient(135deg,#8B2500,#D4521A)}
+.pc-icon.openai{background:#0D7A5A}
+.pc-icon.gemini{background:linear-gradient(135deg,#1A4A8A,#2A7A4A)}
+.pc-icon.grok{background:#1A1010;border:1px solid var(--border2);color:var(--cream2)}
+.pc-icon.local{background:linear-gradient(135deg,#4A1A5A,#8A3A1A);font-size:16px}
+.pc-name{font-weight:700;font-size:13px;flex:1;color:var(--cream)}
+.pc-toggle{position:relative;width:38px;height:21px;cursor:pointer;flex-shrink:0}
+.pc-toggle input{display:none}
+.pc-toggle .track{position:absolute;inset:0;background:var(--border2);border-radius:11px;transition:background .2s}
+.pc-toggle input:checked+.track{background:var(--green)}
+.pc-toggle .knob{position:absolute;top:2.5px;left:2.5px;width:16px;height:16px;border-radius:50%;
+  background:var(--cream);transition:transform .2s;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.pc-toggle input:checked~.knob{transform:translateX(17px)}
+.pc-stats{display:flex;gap:14px;font-size:10px;color:var(--text3);margin-top:8px}
+.pc-stats span{display:flex;align-items:center;gap:3px}
+.key-wrap{position:relative;margin-top:8px}.key-wrap .form-input{padding-right:38px}
+.key-wrap .eye{position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;
+  border:none;color:var(--text3);cursor:pointer;font-size:14px;transition:color .15s}
+.key-wrap .eye:hover{color:var(--cream)}
+.ollama-status{display:flex;align-items:center;gap:8px;padding:8px 11px;border-radius:var(--radius-sm);font-size:11px;margin-top:8px}
+.ollama-status.ok{background:var(--green-bg);border:1px solid rgba(78,154,106,.25);color:var(--green)}
+.ollama-status.warn{background:var(--amber-bg);border:1px solid rgba(200,138,48,.25);color:var(--amber)}
+.ollama-status.err{background:rgba(192,64,64,.1);border:1px solid rgba(192,64,64,.25);color:#C04040}
+.model-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.model-pill{padding:2px 9px;border-radius:10px;font-size:10px;cursor:pointer;background:var(--red-bg);
+  color:var(--red-light);border:1px solid rgba(184,58,18,.2);transition:background .14s}
+.model-pill:hover{background:rgba(184,58,18,.2)}
+.install-hint{background:var(--ink2);border-radius:var(--radius-sm);padding:10px 12px;margin-top:8px;
+  font-size:11px;color:var(--text2);border-left:2px solid var(--red-dark)}
+.install-hint code{background:rgba(184,58,18,.15);color:var(--red-light);padding:1px 6px;border-radius:4px;font-family:monospace;font-size:11px}
+.install-hint p{margin-bottom:5px}
+.free-badge{font-size:9px;padding:2px 7px;border-radius:8px;background:var(--green-bg);color:var(--green);
+  border:1px solid rgba(78,154,106,.25);font-weight:700;letter-spacing:.3px;margin-right:6px}
+
+/* Welcome */
+.welcome{text-align:center;padding:10px 0 24px}
+.welcome-eye{width:72px;height:72px;border-radius:50%;background:var(--red-bg);border:2px solid rgba(184,58,18,.3);
+  display:flex;align-items:center;justify-content:center;margin:0 auto 20px;position:relative}
+.welcome-eye::before,.welcome-eye::after{content:'';position:absolute;border-radius:50%;border:1px solid rgba(184,58,18,.12)}
+.welcome-eye::before{width:100px;height:100px}.welcome-eye::after{width:130px;height:130px;border-color:rgba(184,58,18,.07)}
+.welcome-eye svg{width:30px;height:30px;stroke:var(--red-light);fill:none;stroke-width:1.8;position:relative;z-index:1}
+.welcome h1{font-size:28px;font-weight:900;letter-spacing:-1px;color:var(--cream);margin-bottom:8px}
+.welcome p{color:var(--text2);font-size:13px;margin-bottom:24px;line-height:1.7}
+.features{display:grid;grid-template-columns:1fr 1fr;gap:10px;text-align:left;margin-bottom:24px}
+.feature{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;
+  position:relative;overflow:hidden}
+.feature::after{content:'';position:absolute;width:70px;height:70px;border-radius:50%;
+  border:1px solid rgba(184,58,18,.07);right:-10px;bottom:-10px}
+.feature-icon{font-size:18px;margin-bottom:7px}
+.feature h3{font-size:12px;font-weight:700;margin-bottom:4px;color:var(--cream)}
+.feature p{font-size:11px;color:var(--text3);line-height:1.5}
+.steps{text-align:left;max-width:320px;margin:0 auto}
+.step{display:flex;align-items:flex-start;gap:11px;margin-bottom:12px}
+.step-num{width:24px;height:24px;border-radius:50%;flex-shrink:0;
+  background:linear-gradient(135deg,var(--red-dark),var(--red));color:var(--cream);
+  display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;
+  box-shadow:0 2px 8px rgba(184,58,18,.3)}
+.step-txt{font-size:12px;color:var(--text2);line-height:1.6;padding-top:2px}
+
+/* Toast */
+#toast{position:fixed;bottom:22px;right:22px;z-index:200;display:flex;flex-direction:column;gap:7px}
+.toast-item{padding:11px 16px;border-radius:var(--radius);font-size:12px;max-width:340px;
+  background:var(--card);border:1px solid var(--border2);box-shadow:var(--shadow);animation:tin .25s ease;
+  display:flex;align-items:center;gap:9px;font-weight:500}
+.toast-item.success{border-color:var(--green);border-left:3px solid var(--green)}
+.toast-item.error{border-color:#C04040;border-left:3px solid #C04040}
+.toast-item.info{border-color:var(--red-dark);border-left:3px solid var(--red-dark)}
+.toast-icon{font-size:13px;flex-shrink:0}
+@keyframes tin{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+
+/* ── Drag & Drop overlay ──────────────────────────────────────────── */
+#dropOverlay{position:fixed;inset:0;background:rgba(8,4,4,.92);z-index:300;display:none;
+  align-items:center;justify-content:center;flex-direction:column;gap:20px;backdrop-filter:blur(10px)}
+#dropOverlay.active{display:flex}
+#dropOverlay .drop-icon{width:120px;height:120px;border-radius:50%;border:3px dashed var(--red);
+  display:flex;align-items:center;justify-content:center;animation:pulse 1.5s infinite}
+#dropOverlay .drop-icon svg{width:48px;height:48px;stroke:var(--red-light);fill:none;stroke-width:1.5}
+#dropOverlay .drop-text{font-size:22px;font-weight:800;color:var(--cream);letter-spacing:-.5px}
+#dropOverlay .drop-sub{font-size:13px;color:var(--text3)}
+@keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.05);opacity:.8}}
+
+/* ── Context menu ──────────────────────────────────────────────────── */
+#ctxMenu{position:fixed;z-index:250;background:var(--surface);border:1px solid var(--border2);
+  border-radius:var(--radius);padding:5px 0;min-width:180px;box-shadow:var(--shadow);display:none}
+#ctxMenu.open{display:block}
+.ctx-item{padding:7px 14px;font-size:12px;color:var(--text2);cursor:pointer;display:flex;
+  align-items:center;gap:8px;transition:background .12s}
+.ctx-item:hover{background:var(--red-bg);color:var(--cream)}
+.ctx-sep{height:1px;background:var(--border);margin:4px 0}
+
+/* ── Map view ──────────────────────────────────────────────────────── */
+#mapView{flex:1;display:none;position:relative}
+#mapView.active{display:block}
+#mapContainer{width:100%;height:100%}
+.leaflet-popup-content{font-family:var(--font);font-size:12px;color:#333}
+
+/* ── Duplicates view ──────────────────────────────────────────────── */
+#dupView{flex:1;display:none;overflow-y:auto;padding:20px}
+#dupView.active{display:block}
+.dup-group{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px;margin-bottom:14px}
+.dup-header{font-size:12px;font-weight:700;color:var(--cream2);margin-bottom:10px}
+.dup-photos{display:flex;gap:10px;flex-wrap:wrap}
+.dup-photo{width:140px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border2);cursor:pointer;transition:border-color .15s}
+.dup-photo:hover{border-color:var(--red)}
+.dup-photo img{width:100%;height:100px;object-fit:cover;display:block}
+.dup-photo-info{padding:5px 8px;font-size:10px;color:var(--text3)}
+
+/* ── Dashboard view ───────────────────────────────────────────────── */
+#dashView{flex:1;display:none;overflow-y:auto;padding:24px}
+#dashView.active{display:block}
+.dash-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+.dash-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:18px;position:relative;overflow:hidden}
+.dash-card::after{content:'';position:absolute;width:80px;height:80px;border-radius:50%;
+  border:1px solid rgba(184,58,18,.08);right:-20px;bottom:-20px}
+.dash-val{font-size:28px;font-weight:900;color:var(--cream);letter-spacing:-1px}
+.dash-val.green{color:var(--green)}.dash-val.amber{color:var(--amber)}.dash-val.red{color:var(--red-light)}
+.dash-lbl{font-size:11px;color:var(--text3);margin-top:4px}
+.dash-section{margin-bottom:24px}
+.dash-section h3{font-size:14px;font-weight:700;color:var(--cream2);margin-bottom:12px}
+.provider-bar{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)}
+.provider-bar:last-child{border-bottom:none}
+.pb-name{width:80px;font-size:12px;font-weight:600;color:var(--cream2)}
+.pb-bar{flex:1;height:8px;background:var(--border);border-radius:4px;overflow:hidden}
+.pb-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--red-dark),var(--red-light));transition:width .5s}
+.pb-stats{width:120px;text-align:right;font-size:11px;color:var(--text3)}
+.budget-bar{margin-top:12px}
+.budget-track{height:12px;background:var(--border);border-radius:6px;overflow:hidden;position:relative}
+.budget-fill{height:100%;border-radius:6px;transition:width .5s}
+.budget-fill.ok{background:linear-gradient(90deg,var(--green),#6ABB8A)}
+.budget-fill.warn{background:linear-gradient(90deg,var(--amber),#E0A040)}
+.budget-fill.over{background:linear-gradient(90deg,#C04040,#E06060)}
+.budget-label{display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-top:4px}
+
+/* ── Tag Management modal ──────────────────────────────────────────── */
+.tag-mgmt-item{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+.tag-mgmt-name{flex:1;font-size:13px;color:var(--cream2);font-weight:600}
+.tag-mgmt-count{font-size:11px;color:var(--text3);min-width:50px;text-align:right}
+.tag-mgmt-actions{display:flex;gap:4px}
+#tagSearchInput{width:100%;padding:8px 12px;border-radius:20px;border:1px solid var(--border2);
+  background:var(--card);color:var(--text);font-size:13px;outline:none;font-family:var(--font);margin-bottom:12px}
+
+/* ── Keyboard shortcuts indicator ──────────────────────────────────── */
+.kbd{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:18px;
+  padding:0 5px;border-radius:3px;background:var(--card2);border:1px solid var(--border2);
+  font-size:10px;color:var(--text3);font-family:monospace;margin-left:auto}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ── Sidebar ──────────────────────────────────────────────────────── -->
+<aside id="sidebar">
+  <div class="sb-logo">
+    <div class="logo-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="var(--cream)" stroke-width="1.8" stroke-linecap="round">
+        <ellipse cx="12" cy="12" rx="10" ry="6.5"/><circle cx="12" cy="12" r="2.8" fill="var(--cream)" stroke="none"/>
+        <path d="M5 12 Q8 7 12 7 Q16 7 19 12" opacity=".4"/>
+      </svg>
+    </div>
+    <div class="logo-text">
+      <div class="logo-name">RetinaTag</div>
+      <div class="logo-ver">v1.1 · AI Photo Tagger</div>
+    </div>
+  </div>
+
+  <div class="sb-section">
+    <div class="sb-label">Library</div>
+    <button class="btn btn-primary btn-block" id="btnAddFolder">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+      Add Folder
+    </button>
+  </div>
+
+  <div class="sb-section"><div class="sb-label">Folders</div></div>
+  <div class="sb-folders" id="foldersList">
+    <div class="folder-item active" data-folder="">
+      <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+      <span class="folder-name">All Photos</span>
+    </div>
+  </div>
+
+  <!-- Collections -->
+  <div class="sb-section">
+    <div class="sb-label">Collections <button class="btn-ghost" style="font-size:14px;padding:0" id="btnNewCollection" title="New Collection">+</button></div>
+  </div>
+  <div id="collectionsList" style="padding:0 10px;max-height:120px;overflow-y:auto"></div>
+
+  <div class="sb-providers" id="providerArea">
+    <div class="sb-label">AI Providers</div>
+    <div id="providerList"></div>
+  </div>
+
+  <div class="sb-stats">
+    <div class="stat" id="statTotal"><div class="stat-val" id="stTotal">0</div><div class="stat-lbl">Photos</div></div>
+    <div class="stat" id="statTagged"><div class="stat-val green" id="stTagged">0</div><div class="stat-lbl">Tagged</div></div>
+    <div class="stat" id="statPending"><div class="stat-val amber" id="stPending">0</div><div class="stat-lbl">Pending</div></div>
+    <div class="stat" id="statCost" title="Click for dashboard"><div class="stat-val red" id="stCost">$0</div><div class="stat-lbl">Total Cost</div></div>
+  </div>
+
+  <div class="sb-progress" id="progressArea">
+    <div class="progress-head"><span id="progressLabel">Working…</span><span id="progressPct">0%</span></div>
+    <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+    <div class="progress-sub" id="progressSub"></div>
+  </div>
+
+  <div class="sb-bottom">
+    <button class="btn btn-secondary btn-block btn-sm" id="btnTagMgmt">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+      Tag Manager
+    </button>
+    <button class="btn btn-secondary btn-block btn-sm" id="btnSettings">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+      Settings
+    </button>
+  </div>
+</aside>
+
+<!-- ── Main ─────────────────────────────────────────────────────────── -->
+<div id="main">
+  <div class="toolbar" id="toolbar" style="display:none">
+    <div class="view-tabs">
+      <button class="view-tab active" data-view="gallery">Gallery</button>
+      <button class="view-tab" data-view="map">Map</button>
+      <button class="view-tab" data-view="duplicates">Dupes</button>
+      <button class="view-tab" data-view="dashboard">Dashboard</button>
+    </div>
+    <div class="search-box">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input type="text" id="searchInput" placeholder="Search tags… (any language, or describe what you see)">
+      <span class="search-hint" id="searchHint"></span>
+    </div>
+    <select class="tb-select" id="statusFilter">
+      <option value="">All status</option><option value="pending">Pending</option>
+      <option value="tagged">Tagged</option><option value="error">Errors</option>
+    </select>
+    <button class="btn btn-primary btn-sm" id="btnTagAll">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      Tag with AI
+    </button>
+    <button class="btn btn-secondary btn-sm" id="btnExport" title="Export data">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Export
+    </button>
+    <span class="tb-count" id="photoCount">0 photos</span>
+  </div>
+
+  <!-- Gallery view -->
+  <div id="gridWrap"><div id="gridScroller"></div></div>
+  <!-- Map view -->
+  <div id="mapView"><div id="mapContainer"></div></div>
+  <!-- Duplicates view -->
+  <div id="dupView"></div>
+  <!-- Dashboard view -->
+  <div id="dashView"></div>
+</div>
+
+<!-- ── Detail Panel ────────────────────────────────────────────────── -->
+<aside id="detailPanel">
+  <div class="detail-head">
+    <span class="detail-title" id="detailFilename">—</span>
+    <button class="btn-ghost" id="btnCloseDetail">&#10005;</button>
+  </div>
+  <div class="detail-preview"><img id="detailImg" alt=""></div>
+  <div class="detail-meta" id="detailMeta"></div>
+  <div class="detail-body">
+    <div class="section-label"><span>Tags</span><span class="tag-count-badge" id="detailTagCount">0</span></div>
+    <div class="tags-cloud" id="tagCloud"></div>
+    <div class="add-row">
+      <input class="add-input" id="addTagInput" placeholder="Add a tag…">
+      <button class="btn btn-primary btn-sm" id="addTagBtn">Add</button>
+    </div>
+    <div class="detail-actions" id="detailActions"></div>
+  </div>
+</aside>
+</div>
+
+<!-- ── Drop Overlay ───────────────────────────────────────────────── -->
+<div id="dropOverlay">
+  <div class="drop-icon">
+    <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+  </div>
+  <div class="drop-text">Drop folders or images here</div>
+  <div class="drop-sub">They'll be scanned and added to your library</div>
+</div>
+
+<!-- ── Context Menu ───────────────────────────────────────────────── -->
+<div id="ctxMenu">
+  <div class="ctx-item" data-action="open">📂 Open in Explorer</div>
+  <div class="ctx-item" data-action="openfile">🖼 Open Image</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="xmp">💾 Write XMP Sidecar</div>
+  <div class="ctx-item" data-action="exif">📷 View EXIF Data</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="addcol">📁 Add to Collection…</div>
+  <div class="ctx-item" data-action="retag">🔄 Re-tag with AI</div>
+</div>
+
+<!-- ── Settings Modal ──────────────────────────────────────────────── -->
+<div class="modal-overlay" id="settingsModal">
+  <div class="modal-box" style="width:640px">
+    <div class="modal-head">
+      <h2><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>Settings</h2>
+      <button class="btn-ghost" id="btnCloseSettings">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="sb-label" style="margin-bottom:6px">AI Providers</div>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:16px;line-height:1.6">
+        RetinaTag routes images to the <strong style="color:var(--cream2)">cheapest available provider</strong> automatically.
+      </p>
+      <div id="settingsProviders"></div>
+
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+        <div class="sb-label" style="margin-bottom:10px">Monthly Budget</div>
+        <div style="display:flex;gap:10px;align-items:center">
+          <label class="form-label" style="margin:0;min-width:60px">Limit USD</label>
+          <input class="form-input" id="budgetInput" type="number" step="0.01" min="0" placeholder="0 = unlimited" style="width:140px;font-size:12px">
+          <span style="font-size:11px;color:var(--text3)" id="budgetSpent"></span>
+        </div>
+        <div class="form-hint">Set 0 for unlimited. AI tagging stops when budget is exceeded.</div>
+      </div>
+
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+        <div class="sb-label" style="margin-bottom:10px">Watch Folders <button class="btn btn-xs btn-secondary" id="btnAddWatch">+ Add</button></div>
+        <div id="watchFoldersList" style="font-size:12px;color:var(--text3)"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-secondary" id="btnSettingsCancel">Cancel</button>
+      <button class="btn btn-primary" id="btnSettingsSave">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Welcome Modal ───────────────────────────────────────────────── -->
+<div class="modal-overlay" id="welcomeModal">
+  <div class="modal-box" style="width:560px">
+    <div class="modal-body" style="padding:28px 28px 20px">
+      <div class="welcome">
+        <div class="welcome-eye">
+          <svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="10" ry="6.5"/><circle cx="12" cy="12" r="3" fill="var(--red-light)" stroke="none"/></svg>
+        </div>
+        <h1>Welcome to RetinaTag</h1>
+        <p>AI-powered photo tagging with smart multi-provider routing.<br>Your library, analyzed — beautifully.</p>
+        <div class="features">
+          <div class="feature"><div class="feature-icon">🧠</div><h3>5 AI Providers</h3><p>Claude, GPT-4o, Gemini, Grok and local Qwen2.5-VL free.</p></div>
+          <div class="feature"><div class="feature-icon">🌍</div><h3>Any Language</h3><p>Search in Turkish, Japanese, Arabic — auto-translates.</p></div>
+          <div class="feature"><div class="feature-icon">⚡</div><h3>Smart Routing</h3><p>Always picks the cheapest provider. Near-zero cost.</p></div>
+          <div class="feature"><div class="feature-icon">🗺</div><h3>GPS Map & EXIF</h3><p>See where photos were taken. Full EXIF metadata.</p></div>
+        </div>
+        <div class="steps">
+          <div class="step"><div class="step-num">1</div><div class="step-txt">Add API keys in <strong style="color:var(--cream)">Settings</strong> or use free local Qwen2.5-VL</div></div>
+          <div class="step"><div class="step-num">2</div><div class="step-txt">Click <strong style="color:var(--cream)">Add Folder</strong> or drop images onto the window</div></div>
+          <div class="step"><div class="step-num">3</div><div class="step-txt">Hit <strong style="color:var(--cream)">Tag with AI</strong> and watch your library come alive</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot" style="justify-content:center;gap:10px;padding-bottom:20px">
+      <button class="btn btn-primary" id="btnWelcomeSetup" style="padding:10px 28px;font-size:13px">Set Up API Keys</button>
+      <button class="btn btn-secondary" id="btnWelcomeSkip" style="padding:10px 28px;font-size:13px">Skip for Now</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Tag Management Modal ───────────────────────────────────────── -->
+<div class="modal-overlay" id="tagMgmtModal">
+  <div class="modal-box" style="width:550px">
+    <div class="modal-head">
+      <h2>🏷 Tag Manager</h2>
+      <button class="btn-ghost" onclick="$('tagMgmtModal').classList.remove('open')">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <input type="text" id="tagSearchInput" placeholder="Search tags…">
+      <div id="tagMgmtList" style="max-height:400px;overflow-y:auto"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── EXIF Modal ──────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="exifModal">
+  <div class="modal-box" style="width:420px">
+    <div class="modal-head"><h2>📷 EXIF Data</h2><button class="btn-ghost" onclick="$('exifModal').classList.remove('open')">&#10005;</button></div>
+    <div class="modal-body" id="exifBody"></div>
+  </div>
+</div>
+
+<!-- ── Export Modal ─────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="exportModal">
+  <div class="modal-box" style="width:420px">
+    <div class="modal-head"><h2>📦 Export Library</h2><button class="btn-ghost" onclick="$('exportModal').classList.remove('open')">&#10005;</button></div>
+    <div class="modal-body">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:16px;line-height:1.6">Export all photos and tags to a file. Choose format:</p>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-primary" onclick="doExport('csv')">Export as CSV</button>
+        <button class="btn btn-primary" onclick="doExport('json')">Export as JSON</button>
+      </div>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+        <button class="btn btn-secondary btn-block" onclick="doXmpAll()">Write XMP sidecars for all tagged photos</button>
+        <div class="form-hint">Creates .xmp files next to each photo — compatible with Lightroom, Capture One, Bridge.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const{invoke}=window.__TAURI__.core;
+const{listen}=window.__TAURI__.event;
+
+// ── State ────────────────────────────────────────────────────────────────────
+let photos=[],totalPhotos=0,selectedId=null,selectedPath='';
+let curFolder='',curSearch='',curStatus='',curView='gallery';
+let thumbCache=new Map(),thumbQueue=[],thumbFlight=0;
+const THUMB_MAX=10,CELL_W=214,CELL_H=234,BUFFER=3;
+const $=id=>document.getElementById(id);
+const gridWrap=$('gridWrap'),gridScroll=$('gridScroller');
+let leafletMap=null,mapMarkers=[];
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg,type='info'){
+  const icons={success:'✓',error:'✕',info:'◎'};
+  const el=document.createElement('div');
+  el.className=`toast-item ${type}`;
+  el.innerHTML=`<span class="toast-icon">${icons[type]}</span><span>${msg}</span>`;
+  $('toast').appendChild(el);
+  setTimeout(()=>el.remove(),4500);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const fmt=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
+const fmtB=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
+const fmtC=c=>c<0.01?'<$0.01':'$'+c.toFixed(3);
+
+// ── View Tabs ────────────────────────────────────────────────────────────────
+document.querySelectorAll('.view-tab').forEach(tab=>{
+  tab.onclick=()=>{
+    curView=tab.dataset.view;
+    document.querySelectorAll('.view-tab').forEach(t=>t.classList.toggle('active',t===tab));
+    $('gridWrap').style.display=curView==='gallery'?'':'none';
+    $('mapView').className=curView==='map'?'active':'';
+    $('dupView').className=curView==='duplicates'?'active':'';
+    $('dashView').className=curView==='dashboard'?'active':'';
+    if(curView==='map')initMap();
+    if(curView==='duplicates')loadDuplicates();
+    if(curView==='dashboard')loadDashboard();
+  };
+});
+
+// ── Providers sidebar ─────────────────────────────────────────────────────────
+async function refreshProviders(){
+  try{
+    const list=await invoke('get_provider_statuses');
+    const el=$('providerList');el.innerHTML='';
+    for(const p of list){
+      const row=document.createElement('div');row.className='provider-row';
+      row.innerHTML=`<span class="prov-dot ${p.has_key&&p.enabled?'on':'off'}"></span>
+        <span class="prov-name">${p.name}</span>
+        <span class="prov-stat">${p.has_key?fmt(p.total_tagged)+' imgs':'—'}</span>`;
+      el.appendChild(row);
+    }
+  }catch(e){}
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+async function refreshStats(){
+  try{
+    const s=await invoke('get_stats');
+    $('stTotal').textContent=fmt(s.total_photos);$('stTagged').textContent=fmt(s.tagged_photos);
+    $('stPending').textContent=fmt(s.pending_photos);$('stCost').textContent=fmtC(s.total_cost_usd);
+    $('toolbar').style.display=s.total_photos>0?'flex':'none';
+  }catch(e){}
+}
+
+// ── Folders ───────────────────────────────────────────────────────────────────
+async function refreshFolders(){
+  try{
+    const folders=await invoke('get_folders');
+    const list=$('foldersList');
+    const allItem=list.querySelector('[data-folder=""]');
+    list.innerHTML='';list.appendChild(allItem);
+    allItem.classList.toggle('active',curFolder==='');
+    for(const[path,count]of folders){
+      const name=path.split(/[\\/]/).pop()||path;
+      const item=document.createElement('div');
+      item.className='folder-item'+(curFolder===path?' active':'');
+      item.dataset.folder=path;
+      item.innerHTML=`<svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+        <span class="folder-name" title="${path}">${name}</span><span class="folder-count">${count}</span>`;
+      item.onclick=()=>selectFolder(path);
+      list.appendChild(item);
+    }
+  }catch(e){}
+}
+function selectFolder(f){
+  curFolder=f;
+  document.querySelectorAll('.folder-item').forEach(el=>el.classList.toggle('active',el.dataset.folder===f));
+  loadPhotos();
+}
+
+// ── Collections ──────────────────────────────────────────────────────────────
+async function refreshCollections(){
+  try{
+    const cols=await invoke('get_collections');
+    const el=$('collectionsList');el.innerHTML='';
+    for(const c of cols){
+      const item=document.createElement('div');
+      item.className='collection-item'+(c.collection_type==='smart'?' smart':'');
+      item.innerHTML=`<span class="ci-icon">${c.collection_type==='smart'?'⚡':'📁'}</span>
+        <span class="folder-name">${c.name}</span><span class="folder-count">${c.photo_count}</span>`;
+      item.onclick=()=>loadCollectionPhotos(c);
+      el.appendChild(item);
+    }
+  }catch(e){}
+}
+
+async function loadCollectionPhotos(col){
+  if(col.collection_type==='smart'&&col.rules_json){
+    try{
+      const results=await invoke('get_smart_collection_photos',{rulesJson:col.rules_json});
+      photos=results;totalPhotos=results.length;
+      $('photoCount').textContent=totalPhotos+' photos in "'+col.name+'"';
+      renderGrid();
+    }catch(e){toast('Error: '+e,'error')}
+  }
+}
+
+$('btnNewCollection').onclick=()=>{
+  const name=prompt('Collection name:');
+  if(!name)return;
+  const isSmartChoice=confirm('Create as Smart Collection? (auto-fills based on rules)\n\nOK = Smart, Cancel = Manual');
+  if(isSmartChoice){
+    const tagVal=prompt('Tag filter (e.g. "sunset"):');
+    if(!tagVal)return;
+    const rules=JSON.stringify([{field:'tag',operator:'contains',value:tagVal}]);
+    invoke('create_collection',{name,collectionType:'smart',rulesJson:rules}).then(()=>{
+      toast('Smart collection created','success');refreshCollections();
+    }).catch(e=>toast('Error: '+e,'error'));
+  }else{
+    invoke('create_collection',{name,collectionType:'manual',rulesJson:null}).then(()=>{
+      toast('Collection created','success');refreshCollections();
+    }).catch(e=>toast('Error: '+e,'error'));
+  }
+};
+
+// ── Load photos ───────────────────────────────────────────────────────────────
+async function loadPhotos(){
+  try{
+    let resp;
+    if(curSearch){
+      resp=await invoke('search_photos',{query:curSearch});
+      if(Array.isArray(resp)){photos=resp;totalPhotos=resp.length}
+      else{photos=resp.photos;totalPhotos=resp.total}
+    }else{
+      resp=await invoke('get_photos',{offset:0,limit:100000,
+        folder:curFolder||null,tagFilter:null,statusFilter:curStatus||null});
+      photos=resp.photos;totalPhotos=resp.total;
+    }
+    $('photoCount').textContent=totalPhotos.toLocaleString()+' photo'+(totalPhotos!==1?'s':'');
+    $('toolbar').style.display='flex';thumbCache=new Map();thumbQueue=[];renderGrid();
+  }catch(e){toast('Load failed: '+e,'error')}
+}
+
+// ── Virtual grid ──────────────────────────────────────────────────────────────
+function getCols(){return Math.max(1,Math.floor(gridWrap.clientWidth/CELL_W))}
+function renderGrid(){
+  if(!photos.length){
+    gridScroll.innerHTML=`<div class="empty-state">
+      <div class="empty-eye"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="10" ry="6.5"/><circle cx="12" cy="12" r="3"/></svg></div>
+      <div class="empty-title">No photos yet</div>
+      <div class="empty-sub">Click <strong style="color:var(--cream2)">Add Folder</strong> or drop images onto this window.</div>
+    </div>`;gridScroll.style.height='100%';return;
+  }
+  const cols=getCols();gridScroll.style.height=(Math.ceil(photos.length/cols)*CELL_H)+'px';updateCards(cols);
+}
+let lastCols=0;
+function updateCards(cols){
+  cols=cols||getCols();
+  const st=gridWrap.scrollTop,vh=gridWrap.clientHeight;
+  const rows=Math.ceil(photos.length/cols);
+  const fr=Math.max(0,Math.floor(st/CELL_H)-BUFFER);
+  const lr=Math.min(rows-1,Math.ceil((st+vh)/CELL_H)+BUFFER-1);
+  const fi=fr*cols,li=Math.min(photos.length-1,(lr+1)*cols-1);
+  for(const c of gridScroll.querySelectorAll('.photo-card')){
+    const idx=+c.dataset.idx;if(idx<fi||idx>li||cols!==lastCols)c.remove();
+  }
+  const present=new Set([...gridScroll.querySelectorAll('.photo-card')].map(c=>+c.dataset.idx));
+  const frag=document.createDocumentFragment();
+  for(let i=fi;i<=li;i++){
+    if(present.has(i))continue;const p=photos[i];if(!p)continue;
+    const col=i%cols,row=Math.floor(i/cols);
+    const card=document.createElement('div');
+    card.className='photo-card'+(p.id===selectedId?' selected':'');
+    card.dataset.idx=i;card.dataset.id=p.id;card.dataset.path=p.path;
+    card.style.cssText=`left:${col*CELL_W+6}px;top:${row*CELL_H+6}px`;
+    const pb=p.provider_used?`<span class="prov-badge">${p.provider_used}</span>`:'';
+    card.innerHTML=`<div class="thumb-placeholder" data-tid="${p.id}">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      </div><div class="photo-info"><div class="photo-name" title="${p.filename}">${p.filename}</div>
+        <div class="photo-meta"><span class="status-dot ${p.status}"></span>${p.tag_count} tag${p.tag_count!==1?'s':''}${pb}</div></div>`;
+    card.onclick=()=>selectPhoto(p.id,p.path);
+    card.oncontextmenu=e=>{e.preventDefault();showCtxMenu(e,p.id,p.path)};
+    frag.appendChild(card);
+    if(!thumbCache.has(p.id))thumbQueue.push(p.id);else applyThumb(card,p.id);
+  }
+  gridScroll.appendChild(frag);lastCols=cols;drainThumbs();
+}
+function applyThumb(card,id){
+  const b=thumbCache.get(id);if(!b)return;
+  const ph=card.querySelector('.thumb-placeholder');if(!ph)return;
+  const img=document.createElement('img');img.className='photo-thumb';img.src='data:image/jpeg;base64,'+b;img.alt='';
+  ph.replaceWith(img);
+}
+function drainThumbs(){
+  while(thumbFlight<THUMB_MAX&&thumbQueue.length){
+    const id=thumbQueue.shift();if(thumbCache.has(id))continue;thumbFlight++;
+    invoke('get_thumbnail',{photoId:id}).then(b=>{
+      thumbCache.set(id,b);const card=gridScroll.querySelector(`[data-id="${id}"]`);
+      if(card)applyThumb(card,id);
+    }).catch(()=>{}).finally(()=>{thumbFlight--;drainThumbs()});
+  }
+}
+let scrollRaf=null;
+gridWrap.addEventListener('scroll',()=>{if(scrollRaf)return;scrollRaf=requestAnimationFrame(()=>{scrollRaf=null;updateCards()})});
+new ResizeObserver(()=>renderGrid()).observe(gridWrap);
+
+// ── Detail panel ──────────────────────────────────────────────────────────────
+async function selectPhoto(id,path){
+  selectedId=id;selectedPath=path||'';
+  document.querySelectorAll('.photo-card').forEach(c=>c.classList.toggle('selected',+c.dataset.id===id));
+  $('detailPanel').classList.add('open');
+  try{
+    const p=await invoke('get_photo_detail',{photoId:id});
+    selectedPath=p.path;
+    $('detailFilename').textContent=p.filename;
+    $('detailMeta').innerHTML=`
+      <div class="meta-row"><span class="meta-key">Size</span><span class="meta-val">${fmtB(p.size)}</span></div>
+      ${p.width?`<div class="meta-row"><span class="meta-key">Dimensions</span><span class="meta-val">${p.width} × ${p.height}</span></div>`:''}
+      <div class="meta-row"><span class="meta-key">Status</span><span class="meta-val">${p.status}</span></div>
+      ${p.provider_used?`<div class="meta-row"><span class="meta-key">Provider</span><span class="meta-val">${p.provider_used}</span></div>`:''}
+      <div class="meta-row"><span class="meta-key">Added</span><span class="meta-val">${p.created_at.slice(0,10)}</span></div>`;
+    $('detailTagCount').textContent=p.tags.length;renderTags(p.tags,id);
+    // Action buttons
+    $('detailActions').innerHTML=`
+      <button class="btn btn-secondary btn-xs" onclick="ctxOpenExplorer()">📂 Explorer</button>
+      <button class="btn btn-secondary btn-xs" onclick="ctxOpenFile()">🖼 Open</button>
+      <button class="btn btn-secondary btn-xs" onclick="ctxWriteXmp()">💾 XMP</button>
+      <button class="btn btn-secondary btn-xs" onclick="ctxShowExif()">📷 EXIF</button>`;
+    const b=thumbCache.get(id)||await invoke('get_thumbnail',{photoId:id});
+    thumbCache.set(id,b);$('detailImg').src='data:image/jpeg;base64,'+b;
+  }catch(e){toast('Error: '+e,'error')}
+}
+function renderTags(tags,pid){
+  const cloud=$('tagCloud');cloud.innerHTML='';
+  for(const t of tags){
+    const chip=document.createElement('span');chip.className='tag-chip';
+    chip.innerHTML=`${t.tag}<button class="tag-del" title="Remove">&times;</button>`;
+    chip.querySelector('.tag-del').onclick=async e=>{
+      e.stopPropagation();
+      try{await invoke('remove_tag',{photoId:pid,tag:t.tag});chip.remove();toast('Tag removed','success');refreshStats()}
+      catch(err){toast('Error: '+err,'error')}
+    };cloud.appendChild(chip);
+  }
+}
+$('btnCloseDetail').onclick=()=>{$('detailPanel').classList.remove('open');selectedId=null;selectedPath='';
+  document.querySelectorAll('.photo-card.selected').forEach(c=>c.classList.remove('selected'))};
+$('addTagBtn').onclick=async()=>{
+  const inp=$('addTagInput'),tag=inp.value.trim().toLowerCase();
+  if(!tag||!selectedId)return;
+  try{await invoke('add_tag',{photoId:selectedId,tag});inp.value='';
+    const d=await invoke('get_photo_detail',{photoId:selectedId});
+    renderTags(d.tags,selectedId);$('detailTagCount').textContent=d.tags.length;
+    toast('Tag added','success');refreshStats();
+  }catch(e){toast('Error: '+e,'error')}
+};
+$('addTagInput').onkeydown=e=>{if(e.key==='Enter')$('addTagBtn').click()};
+
+// ── Context Menu ──────────────────────────────────────────────────────────────
+let ctxPhotoId=null,ctxPhotoPath='';
+function showCtxMenu(e,id,path){
+  ctxPhotoId=id;ctxPhotoPath=path;
+  const menu=$('ctxMenu');menu.style.left=e.clientX+'px';menu.style.top=e.clientY+'px';menu.classList.add('open');
+}
+document.addEventListener('click',()=>$('ctxMenu').classList.remove('open'));
+document.querySelectorAll('.ctx-item').forEach(item=>{
+  item.onclick=()=>{
+    const a=item.dataset.action;
+    if(a==='open')invoke('open_in_explorer',{path:ctxPhotoPath}).catch(e=>toast(e,'error'));
+    if(a==='openfile')invoke('open_file',{path:ctxPhotoPath}).catch(e=>toast(e,'error'));
+    if(a==='xmp')invoke('write_xmp_for_photo',{photoId:ctxPhotoId}).then(p=>toast('XMP written: '+p,'success')).catch(e=>toast(e,'error'));
+    if(a==='exif')showExif(ctxPhotoId);
+    if(a==='addcol')addToCollectionPrompt(ctxPhotoId);
+    if(a==='retag'){/* re-tag: mark as pending then start tagging */
+      invoke('save_setting',{key:'_retag_'+ctxPhotoId,value:'1'}).catch(()=>{});toast('Re-tagging…','info');
+    }
+    $('ctxMenu').classList.remove('open');
+  };
+});
+
+// Context menu actions for detail panel buttons
+function ctxOpenExplorer(){if(selectedPath)invoke('open_in_explorer',{path:selectedPath}).catch(e=>toast(e,'error'))}
+function ctxOpenFile(){if(selectedPath)invoke('open_file',{path:selectedPath}).catch(e=>toast(e,'error'))}
+function ctxWriteXmp(){if(selectedId)invoke('write_xmp_for_photo',{photoId:selectedId}).then(p=>toast('XMP: '+p,'success')).catch(e=>toast(e,'error'))}
+function ctxShowExif(){if(selectedId)showExif(selectedId)}
+
+async function showExif(id){
+  try{
+    const exif=await invoke('get_photo_exif',{photoId:id});
+    const rows=[];
+    if(exif.camera)rows.push(['Camera',exif.camera]);
+    if(exif.lens)rows.push(['Lens',exif.lens]);
+    if(exif.focal_length)rows.push(['Focal Length',exif.focal_length]);
+    if(exif.aperture)rows.push(['Aperture',exif.aperture]);
+    if(exif.shutter_speed)rows.push(['Shutter',exif.shutter_speed]);
+    if(exif.iso)rows.push(['ISO',exif.iso]);
+    if(exif.date_taken)rows.push(['Date Taken',exif.date_taken]);
+    if(exif.gps_lat!=null)rows.push(['GPS',`${exif.gps_lat.toFixed(6)}, ${exif.gps_lon.toFixed(6)}`]);
+    if(exif.gps_alt!=null)rows.push(['Altitude',exif.gps_alt.toFixed(1)+' m']);
+    $('exifBody').innerHTML=rows.length?rows.map(([k,v])=>`<div class="meta-row"><span class="meta-key">${k}</span><span class="meta-val">${v}</span></div>`).join('')
+      :'<p style="color:var(--text3)">No EXIF data found in this file.</p>';
+    $('exifModal').classList.add('open');
+  }catch(e){toast('EXIF read failed: '+e,'error')}
+}
+
+async function addToCollectionPrompt(photoId){
+  try{
+    const cols=await invoke('get_collections');
+    if(!cols.length){toast('Create a collection first','info');return}
+    const names=cols.map((c,i)=>`${i+1}. ${c.name}`).join('\n');
+    const choice=prompt('Add to which collection?\n'+names);
+    if(!choice)return;
+    const idx=parseInt(choice)-1;
+    if(idx>=0&&idx<cols.length){
+      await invoke('add_to_collection',{collectionId:cols[idx].id,photoId});
+      toast('Added to '+cols[idx].name,'success');refreshCollections();
+    }
+  }catch(e){toast('Error: '+e,'error')}
+}
+
+// ── Add folder ────────────────────────────────────────────────────────────────
+$('btnAddFolder').onclick=async()=>{
+  try{const folder=await invoke('open_folder_dialog');
+    if(!folder)return;toast('Scanning '+folder.split(/[\\/]/).pop()+'…','info');
+    await invoke('scan_folder',{folder});
+  }catch(e){toast('Error: '+e,'error')}
+};
+
+// ── Drag & Drop ──────────────────────────────────────────────────────────────
+let dragCounter=0;
+document.addEventListener('dragenter',e=>{e.preventDefault();dragCounter++;$('dropOverlay').classList.add('active')});
+document.addEventListener('dragleave',e=>{e.preventDefault();dragCounter--;if(dragCounter<=0){dragCounter=0;$('dropOverlay').classList.remove('active')}});
+document.addEventListener('dragover',e=>e.preventDefault());
+document.addEventListener('drop',async e=>{
+  e.preventDefault();dragCounter=0;$('dropOverlay').classList.remove('active');
+  const items=e.dataTransfer?.files;if(!items||!items.length)return;
+  const paths=[...items].map(f=>f.path).filter(Boolean);
+  if(paths.length){
+    toast('Scanning dropped items…','info');
+    try{await invoke('scan_dropped_paths',{paths});
+      setTimeout(()=>{loadPhotos();refreshFolders();refreshStats()},2000);
+    }catch(err){toast('Error: '+err,'error')}
+  }
+});
+
+// ── Events ────────────────────────────────────────────────────────────────────
+listen('scan-progress',({payload:p})=>{
+  $('progressArea').classList.add('active');
+  const pct=p.total?Math.round(p.scanned/p.total*100):0;
+  $('progressLabel').textContent='Scanning…';$('progressPct').textContent=pct+'%';
+  $('progressFill').style.width=pct+'%';
+  $('progressSub').textContent=`${p.new_files} new · ${p.skipped} skipped · ${p.current_file}`;
+});
+listen('scan-complete',({payload:p})=>{
+  $('progressArea').classList.remove('active');
+  toast(`Scan done: ${p.new_files} new, ${p.skipped} unchanged`,'success');
+  loadPhotos();refreshFolders();refreshStats();
+});
+listen('scan-error',({payload:m})=>{$('progressArea').classList.remove('active');toast('Scan error: '+m,'error')});
+listen('tag-progress',({payload:p})=>{
+  $('progressArea').classList.add('active');
+  const pct=p.total?Math.round(p.completed/p.total*100):0;
+  $('progressLabel').textContent='Tagging…';$('progressPct').textContent=pct+'%';
+  $('progressFill').style.width=pct+'%';
+  $('progressSub').textContent=`${p.completed}/${p.total} via ${p.current_provider} · ${p.current_file}`;
+});
+listen('tag-complete',({payload:p})=>{
+  $('progressArea').classList.remove('active');
+  const parts=p.provider_breakdown.map(b=>`${b.provider}: ${b.count}`).join(' · ');
+  toast(`Tagged ${p.tagged} photos${p.failed?' ('+p.failed+' failed)':''}${parts?' — '+parts:''}`,'success');
+  loadPhotos();refreshStats();refreshProviders();
+});
+listen('tag-error',({payload:m})=>{$('progressArea').classList.remove('active');toast(m,'error')});
+listen('watch-new-files',({payload:p})=>{toast(`Watcher: ${p.count} new files detected`,'info');loadPhotos();refreshStats()});
+
+// ── Tag All ──────────────────────────────────────────────────────────────────
+$('btnTagAll').onclick=async()=>{
+  try{
+    // Budget check
+    const budget=await invoke('get_budget_status').catch(()=>null);
+    if(budget&&budget.is_over){toast('Monthly budget exceeded! Increase in Settings.','error');return}
+    const statuses=await invoke('get_provider_statuses');
+    if(!statuses.some(s=>s.has_key||s.enabled)){toast('No providers configured. Open Settings first.','error');openSettings();return}
+    await invoke('start_tagging');toast('AI tagging started…','info');
+  }catch(e){toast('Error: '+e,'error')}
+};
+
+// ── Search ────────────────────────────────────────────────────────────────────
+let searchTimer=null;
+$('searchInput').oninput=e=>{
+  clearTimeout(searchTimer);const q=e.target.value.trim();
+  const nonEn=q&&[...q].some(c=>c.charCodeAt(0)>127);
+  $('searchHint').textContent=nonEn?'Translating…':'';
+  searchTimer=setTimeout(()=>{curSearch=q;loadPhotos().then(()=>{$('searchHint').textContent=''})},nonEn?600:300);
+};
+$('statusFilter').onchange=e=>{curStatus=e.target.value;loadPhotos()};
+
+// ── Map View ──────────────────────────────────────────────────────────────────
+async function initMap(){
+  if(!leafletMap){
+    leafletMap=L.map('mapContainer').setView([40,30],3);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      attribution:'&copy; OpenStreetMap',maxZoom:19
+    }).addTo(leafletMap);
+  }
+  // Extract GPS first
+  toast('Extracting GPS data…','info');
+  await invoke('extract_all_gps').catch(()=>{});
+  const gps=await invoke('get_gps_photos').catch(()=>[]);
+  mapMarkers.forEach(m=>leafletMap.removeLayer(m));mapMarkers=[];
+  if(!gps.length){toast('No GPS data found in photos','info');return}
+  const bounds=[];
+  for(const p of gps){
+    const m=L.circleMarker([p.lat,p.lon],{radius:6,fillColor:'#B83A12',color:'#EDE0C4',weight:1,fillOpacity:.8})
+      .bindPopup(`<b>${p.filename}</b><br>${p.tag_count} tags`)
+      .addTo(leafletMap);
+    m.on('click',()=>selectPhoto(p.id,''));
+    mapMarkers.push(m);bounds.push([p.lat,p.lon]);
+  }
+  if(bounds.length)leafletMap.fitBounds(bounds,{padding:[30,30]});
+  toast(`${gps.length} photos on map`,'success');
+  setTimeout(()=>leafletMap.invalidateSize(),200);
+}
+
+// ── Duplicates View ──────────────────────────────────────────────────────────
+async function loadDuplicates(){
+  $('dupView').innerHTML='<p style="color:var(--text3);padding:20px">Computing visual hashes…</p>';
+  await invoke('compute_phashes').catch(()=>{});
+  const groups=await invoke('get_duplicates').catch(()=>[]);
+  if(!groups.length){$('dupView').innerHTML='<div class="empty-state"><div class="empty-title">No duplicates found</div><div class="empty-sub">All photos are unique!</div></div>';return}
+  let html='<h2 style="font-size:16px;font-weight:800;color:var(--cream);margin-bottom:16px">'+groups.length+' Duplicate Groups</h2>';
+  for(const g of groups){
+    html+=`<div class="dup-group"><div class="dup-header">${g.photos.length} similar photos</div><div class="dup-photos">`;
+    for(const p of g.photos){
+      html+=`<div class="dup-photo" onclick="selectPhoto(${p.id},'${p.path.replace(/\\/g,'\\\\')}')">
+        <div class="thumb-placeholder" style="height:100px" data-tid="${p.id}"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/></svg></div>
+        <div class="dup-photo-info">${p.filename}</div></div>`;
+    }
+    html+='</div></div>';
+  }
+  $('dupView').innerHTML=html;
+  // Load thumbnails for duplicates
+  for(const g of groups)for(const p of g.photos){
+    if(!thumbCache.has(p.id))invoke('get_thumbnail',{photoId:p.id}).then(b=>{
+      thumbCache.set(p.id,b);
+      const ph=$('dupView').querySelector(`[data-tid="${p.id}"]`);
+      if(ph){const img=document.createElement('img');img.style.cssText='width:100%;height:100px;object-fit:cover';img.src='data:image/jpeg;base64,'+b;ph.replaceWith(img)}
+    }).catch(()=>{});
+  }
+}
+
+// ── Dashboard View ───────────────────────────────────────────────────────────
+async function loadDashboard(){
+  try{
+    const d=await invoke('get_cost_dashboard');
+    const b=await invoke('get_budget_status').catch(()=>({monthly_limit_usd:0,spent_this_month:0,remaining:0,is_over:false}));
+    let maxCount=Math.max(...d.provider_costs.map(p=>p.count),1);
+    let html=`
+      <div class="dash-grid">
+        <div class="dash-card"><div class="dash-val">${d.total_tagged}</div><div class="dash-lbl">Photos Tagged</div></div>
+        <div class="dash-card"><div class="dash-val red">${fmtC(d.total_cost)}</div><div class="dash-lbl">Total Cost</div></div>
+        <div class="dash-card"><div class="dash-val amber">${d.avg_cost_per_image>0?'$'+d.avg_cost_per_image.toFixed(5):'$0'}</div><div class="dash-lbl">Avg / Image</div></div>
+        <div class="dash-card"><div class="dash-val green">${fmtC(d.estimated_savings)}</div><div class="dash-lbl">Estimated Savings</div></div>
+      </div>`;
+    if(b.monthly_limit_usd>0){
+      const pct=Math.min(100,(b.spent_this_month/b.monthly_limit_usd)*100);
+      const cls=pct>90?'over':pct>70?'warn':'ok';
+      html+=`<div class="dash-section"><h3>Monthly Budget</h3>
+        <div class="budget-bar"><div class="budget-track"><div class="budget-fill ${cls}" style="width:${pct}%"></div></div>
+        <div class="budget-label"><span>$${b.spent_this_month.toFixed(4)} spent</span><span>$${b.monthly_limit_usd.toFixed(2)} limit</span></div></div></div>`;
+    }
+    html+=`<div class="dash-section"><h3>Cost by Provider</h3>`;
+    for(const p of d.provider_costs){
+      const w=Math.round((p.count/maxCount)*100);
+      html+=`<div class="provider-bar"><span class="pb-name">${p.provider}</span>
+        <div class="pb-bar"><div class="pb-fill" style="width:${w}%"></div></div>
+        <span class="pb-stats">${p.count} imgs · $${p.cost.toFixed(4)}</span></div>`;
+    }
+    html+=`</div>`;
+    if(d.daily_costs.length){
+      const maxDaily=Math.max(...d.daily_costs.map(d=>d.count),1);
+      html+=`<div class="dash-section"><h3>Daily Activity (30 days)</h3>
+        <div style="display:flex;align-items:end;gap:3px;height:80px;padding-top:10px">`;
+      for(const day of d.daily_costs){
+        const h=Math.max(4,Math.round((day.count/maxDaily)*70));
+        html+=`<div title="${day.date}: ${day.count} imgs, $${day.cost.toFixed(4)}" style="flex:1;height:${h}px;background:linear-gradient(0deg,var(--red-dark),var(--red-light));border-radius:2px 2px 0 0;min-width:4px"></div>`;
+      }
+      html+=`</div></div>`;
+    }
+    $('dashView').innerHTML=html;
+  }catch(e){$('dashView').innerHTML='<p style="color:var(--text3);padding:20px">Failed to load dashboard</p>'}
+}
+
+$('statCost').onclick=()=>{
+  curView='dashboard';
+  document.querySelectorAll('.view-tab').forEach(t=>t.classList.toggle('active',t.dataset.view==='dashboard'));
+  $('gridWrap').style.display='none';$('dashView').className='active';
+  $('mapView').className='';$('dupView').className='';loadDashboard();
+};
+
+// ── Export ────────────────────────────────────────────────────────────────────
+$('btnExport').onclick=()=>$('exportModal').classList.add('open');
+async function doExport(format){
+  try{
+    const ext=format==='csv'?'csv':'json';
+    const folder=await invoke('open_folder_dialog');
+    if(!folder)return;
+    const path=folder+'\\RetinaTag_export.'+ext;
+    const result=await invoke('export_data',{format,outputPath:path});
+    toast(`Exported ${result.count} photos to ${ext.toUpperCase()}`,'success');
+    $('exportModal').classList.remove('open');
+  }catch(e){toast('Export failed: '+e,'error')}
+}
+async function doXmpAll(){
+  toast('Writing XMP sidecars…','info');
+  try{
+    const count=await invoke('write_xmp_all');
+    toast(`XMP sidecars written for ${count} photos`,'success');
+  }catch(e){toast('XMP failed: '+e,'error')}
+}
+
+// ── Tag Management ───────────────────────────────────────────────────────────
+$('btnTagMgmt').onclick=async()=>{
+  $('tagMgmtModal').classList.add('open');
+  try{
+    const tags=await invoke('get_tag_details');
+    renderTagMgmt(tags);
+  }catch(e){toast('Error: '+e,'error')}
+};
+function renderTagMgmt(tags){
+  const list=$('tagMgmtList');list.innerHTML='';
+  const search=$('tagSearchInput').value.toLowerCase();
+  const filtered=search?tags.filter(t=>t.tag.includes(search)):tags;
+  for(const t of filtered){
+    const item=document.createElement('div');item.className='tag-mgmt-item';
+    item.innerHTML=`<span class="tag-mgmt-name">${t.tag}</span>
+      <span class="tag-mgmt-count">${t.count} photos</span>
+      <div class="tag-mgmt-actions">
+        <button class="btn btn-xs btn-secondary" data-action="rename" title="Rename">✏</button>
+        <button class="btn btn-xs btn-secondary" data-action="merge" title="Merge into…">🔗</button>
+        <button class="btn btn-xs btn-danger" data-action="delete" title="Delete">✕</button>
+      </div>`;
+    item.querySelector('[data-action="rename"]').onclick=async()=>{
+      const newName=prompt('Rename "'+t.tag+'" to:',t.tag);
+      if(!newName||newName===t.tag)return;
+      await invoke('rename_tag_global',{oldName:t.tag,newName:newName.trim().toLowerCase()});
+      toast('Renamed','success');$('btnTagMgmt').click();
+    };
+    item.querySelector('[data-action="merge"]').onclick=async()=>{
+      const target=prompt('Merge "'+t.tag+'" into which tag?');
+      if(!target)return;
+      await invoke('merge_tags',{source:t.tag,target:target.trim().toLowerCase()});
+      toast('Merged','success');$('btnTagMgmt').click();
+    };
+    item.querySelector('[data-action="delete"]').onclick=async()=>{
+      if(!confirm('Delete tag "'+t.tag+'" from all '+t.count+' photos?'))return;
+      await invoke('delete_tag_global',{tag:t.tag});
+      toast('Deleted','success');$('btnTagMgmt').click();
+    };
+    list.appendChild(item);
+  }
+}
+$('tagSearchInput').oninput=()=>$('btnTagMgmt').click();
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+const PROVIDERS=[
+  {key:'claude',name:'Claude',sub:'Anthropic',icon:'C',iconClass:'claude',defaultModel:'claude-haiku-4-5-20251001',hint:'console.anthropic.com',needsKey:true},
+  {key:'openai',name:'GPT-4o',sub:'OpenAI',icon:'G',iconClass:'openai',defaultModel:'gpt-4o-mini',hint:'platform.openai.com',needsKey:true},
+  {key:'gemini',name:'Gemini',sub:'Google',icon:'G',iconClass:'gemini',defaultModel:'gemini-2.0-flash',hint:'aistudio.google.com — free tier',needsKey:true},
+  {key:'grok',name:'Grok',sub:'xAI',icon:'X',iconClass:'grok',defaultModel:'grok-2-vision-latest',hint:'console.x.ai',needsKey:true},
+  {key:'local',name:'Qwen2.5-VL',sub:'Local · Ollama',icon:'🤖',iconClass:'local',defaultModel:'qwen2.5vl:7b',hint:'Free, private, runs on your hardware.',needsKey:false},
+];
+let settingsData={};
+async function openSettings(){
+  try{const raw=await invoke('get_settings');settingsData={};for(const[k,v]of raw)settingsData[k]=v}catch(e){settingsData={}}
+  const statuses=await invoke('get_provider_statuses').catch(()=>[]);
+  const container=$('settingsProviders');container.innerHTML='';
+  for(const prov of PROVIDERS){
+    const st=statuses.find(s=>s.provider===prov.key)||{};
+    const model=settingsData[`model_${prov.key}`]||prov.defaultModel;
+    const enabled=prov.needsKey?(settingsData[`enabled_${prov.key}`]!=='false'&&!!settingsData[`api_key_${prov.key}`]):(settingsData[`enabled_${prov.key}`]==='true');
+    const hasKey=prov.needsKey?!!settingsData[`api_key_${prov.key}`]:enabled;
+    const card=document.createElement('div');card.className='provider-card'+(hasKey&&enabled?' active-provider':'');card.id=`pc_${prov.key}`;
+    if(prov.needsKey){
+      card.innerHTML=`<div class="pc-head"><div class="pc-icon ${prov.iconClass}">${prov.icon}</div>
+        <div style="flex:1"><div class="pc-name">${prov.name}</div><div style="font-size:10px;color:var(--text3)">${prov.sub}</div></div>
+        <label class="pc-toggle"><input type="checkbox" data-setting="enabled_${prov.key}" ${enabled?'checked':''}><span class="track"></span><span class="knob"></span></label></div>
+        <div class="key-wrap"><input class="form-input" type="password" data-setting="api_key_${prov.key}" value="${settingsData[`api_key_${prov.key}`]||''}" placeholder="API key">
+        <button class="eye" onclick="const i=this.previousElementSibling;i.type=i.type==='password'?'text':'password'">👁</button></div>
+        <div class="form-hint">${prov.hint}</div>
+        <div style="margin-top:10px"><label class="form-label">Model</label>
+        <input class="form-input" data-setting="model_${prov.key}" value="${model}" placeholder="${prov.defaultModel}" style="font-size:12px"></div>
+        ${st.total_tagged?`<div class="pc-stats"><span>✓ ${st.total_tagged}</span><span>✕ ${st.total_errors}</span><span>$ ${st.total_cost_usd?.toFixed(4)||'0'}</span></div>`:''}`;
+    }else{
+      const endpoint=settingsData['ollama_endpoint']||'http://localhost:11434';
+      card.innerHTML=`<div class="pc-head"><div class="pc-icon ${prov.iconClass}">${prov.icon}</div>
+        <div style="flex:1"><div class="pc-name">${prov.name}</div><div style="font-size:10px;color:var(--text3)">${prov.sub}</div></div>
+        <span class="free-badge">FREE</span>
+        <label class="pc-toggle"><input type="checkbox" data-setting="enabled_local" ${enabled?'checked':''}><span class="track"></span><span class="knob"></span></label></div>
+        <div class="form-hint" style="margin-bottom:10px">${prov.hint}</div>
+        <div><label class="form-label">Ollama Endpoint</label><input class="form-input" data-setting="ollama_endpoint" value="${endpoint}" style="font-size:12px"></div>
+        <div style="margin-top:8px"><label class="form-label">Model</label><input class="form-input" id="localModelInput" data-setting="model_local" value="${model}" style="font-size:12px"></div>
+        <div id="ollamaStatusBox"><div class="ollama-status warn">⟳ Checking…</div></div>`;
+      setTimeout(()=>checkOllamaStatus(card),80);
+    }
+    container.appendChild(card);
+  }
+  // Budget
+  $('budgetInput').value=settingsData['monthly_budget_usd']||'';
+  invoke('get_budget_status').then(b=>{$('budgetSpent').textContent=`This month: $${b.spent_this_month.toFixed(4)}`}).catch(()=>{});
+  // Watch folders
+  refreshWatchFolders();
+  $('settingsModal').classList.add('open');
+}
+async function checkOllamaStatus(card){
+  const box=card.querySelector('#ollamaStatusBox');const modelInp=card.querySelector('#localModelInput');if(!box)return;
+  try{const s=await invoke('check_ollama');
+    if(!s.running){box.innerHTML=`<div class="ollama-status err">✕ Ollama not running</div><div class="install-hint"><p>Install: <code>winget install Ollama.Ollama</code></p><p>Pull model: <code>ollama pull qwen2.5vl:7b</code></p></div>`;return}
+    if(!s.model_available){const m=modelInp?.value||'qwen2.5vl:7b';
+      box.innerHTML=`<div class="ollama-status warn">⚠ Model <strong>${m}</strong> not found</div>`;
+      if(s.available_models.length){box.innerHTML+=`<div class="model-list">${s.available_models.map(m=>`<span class="model-pill" onclick="document.getElementById('localModelInput').value='${m}'">${m}</span>`).join('')}</div>`}return}
+    box.innerHTML=`<div class="ollama-status ok">✓ Ollama ready · <strong>${modelInp?.value||'qwen2.5vl:7b'}</strong></div>`;
+  }catch(e){box.innerHTML=`<div class="ollama-status err">✕ Cannot reach Ollama</div>`}
+}
+
+// Watch folders management
+async function refreshWatchFolders(){
+  try{
+    const wf=await invoke('get_watch_folders');
+    const el=$('watchFoldersList');el.innerHTML='';
+    if(!wf.length){el.innerHTML='<p style="color:var(--text3);font-size:11px">No watch folders. Click + to add.</p>';return}
+    for(const w of wf){
+      const row=document.createElement('div');
+      row.style.cssText='display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)';
+      row.innerHTML=`<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${w.path}">${w.path.split(/[\\/]/).pop()}</span>
+        <span style="font-size:10px;color:var(--text3)">${w.photo_count} photos</span>
+        <button class="btn btn-xs btn-danger" onclick="removeWatch(${w.id})">✕</button>`;
+      el.appendChild(row);
+    }
+  }catch(e){}
+}
+$('btnAddWatch').onclick=async()=>{
+  const folder=await invoke('open_folder_dialog').catch(()=>null);
+  if(!folder)return;
+  await invoke('add_watch_folder',{path:folder,autoTag:true}).catch(e=>toast(e,'error'));
+  refreshWatchFolders();toast('Watch folder added','success');
+};
+async function removeWatch(id){
+  await invoke('remove_watch_folder',{id}).catch(e=>toast(e,'error'));refreshWatchFolders();
+}
+
+$('btnSettings').onclick=openSettings;
+$('btnCloseSettings').onclick=()=>$('settingsModal').classList.remove('open');
+$('btnSettingsCancel').onclick=()=>$('settingsModal').classList.remove('open');
+$('btnSettingsSave').onclick=async()=>{
+  const inputs=$('settingsProviders').querySelectorAll('[data-setting]');
+  try{
+    for(const inp of inputs){
+      const key=inp.dataset.setting;const val=inp.type==='checkbox'?String(inp.checked):inp.value.trim();
+      await invoke('save_setting',{key,value:val});
+    }
+    // Save budget
+    const budget=$('budgetInput').value.trim();
+    await invoke('save_setting',{key:'monthly_budget_usd',value:budget||'0'});
+    toast('Settings saved','success');$('settingsModal').classList.remove('open');
+    refreshProviders();refreshStats();
+    // Start watching if any watch folders
+    invoke('start_watching').catch(()=>{});
+  }catch(e){toast('Save failed: '+e,'error')}
+};
+
+// ── Keyboard Shortcuts ───────────────────────────────────────────────────────
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
+  if(e.key==='Escape'){
+    if($('settingsModal').classList.contains('open'))$('settingsModal').classList.remove('open');
+    else if($('tagMgmtModal').classList.contains('open'))$('tagMgmtModal').classList.remove('open');
+    else if($('exifModal').classList.contains('open'))$('exifModal').classList.remove('open');
+    else if($('exportModal').classList.contains('open'))$('exportModal').classList.remove('open');
+    else if($('detailPanel').classList.contains('open'))$('btnCloseDetail').click();
+  }
+  if(e.key==='/'&&!e.ctrlKey){e.preventDefault();$('searchInput').focus()}
+  if(e.key==='t'&&!e.ctrlKey&&!e.metaKey)$('btnTagAll').click();
+  if(e.key==='s'&&(e.ctrlKey||e.metaKey)){e.preventDefault();openSettings()}
+  if(e.key==='e'&&(e.ctrlKey||e.metaKey)){e.preventDefault();$('exportModal').classList.add('open')}
+  // Arrow nav
+  if((e.key==='ArrowRight'||e.key==='ArrowLeft')&&selectedId){
+    const idx=photos.findIndex(p=>p.id===selectedId);
+    const next=e.key==='ArrowRight'?idx+1:idx-1;
+    if(next>=0&&next<photos.length)selectPhoto(photos[next].id,photos[next].path);
+  }
+});
+
+// ── Welcome ───────────────────────────────────────────────────────────────────
+$('btnWelcomeSetup').onclick=()=>{$('welcomeModal').classList.remove('open');openSettings()};
+$('btnWelcomeSkip').onclick=()=>{$('welcomeModal').classList.remove('open');invoke('save_setting',{key:'welcome_shown',value:'true'}).catch(()=>{})};
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async function init(){
+  await Promise.all([refreshStats(),refreshFolders(),refreshProviders(),refreshCollections()]);
+  await loadPhotos();
+  // Start file watcher
+  invoke('start_watching').catch(()=>{});
+  try{
+    const settings=await invoke('get_settings');const map=Object.fromEntries(settings);
+    const hasKey=PROVIDERS.some(p=>map[`api_key_${p.key}`]||map[`enabled_${p.key}`]==='true');
+    if(!map.welcome_shown&&!hasKey)$('welcomeModal').classList.add('open');
+  }catch(e){$('welcomeModal').classList.add('open')}
+  // Check for updates silently
+  invoke('check_for_updates').then(v=>{if(v.update_available)toast(`Update available: v${v.latest}. Visit GitHub.`,'info')}).catch(()=>{});
+})();
+</script>
+</body>
+</html>
