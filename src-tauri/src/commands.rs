@@ -1612,7 +1612,7 @@ pub async fn scan_and_cluster_faces(
     // Get photos to process — careful scoping to satisfy borrow checker
     let photos: Vec<(i64, String)> = {
         let sql = if folder.is_empty() {
-            "SELECT id, path FROM photos WHERE status = 'tagged' OR status = 'pending'".to_string()
+            "SELECT id, path FROM photos".to_string()
         } else {
             format!(
                 "SELECT id, path FROM photos WHERE folder = '{}' OR path LIKE '{}%'",

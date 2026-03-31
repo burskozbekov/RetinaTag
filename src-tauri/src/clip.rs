@@ -110,12 +110,9 @@ unsafe impl Sync for ClipEngine {}
 pub fn load_engine(models_dir: &Path, tier: ClipTier) -> Result<ClipEngine> {
     let dir = models_dir.join(tier.dir_name());
 
-    // Fast tier uses quantized filenames; others use plain names
-    let visual_name  = if tier == ClipTier::Fast { "visual_quantized.onnx"  } else { "visual.onnx"  };
-    let textual_name = if tier == ClipTier::Fast { "textual_quantized.onnx" } else { "textual.onnx" };
-
-    let visual_path  = dir.join(visual_name);
-    let textual_path = dir.join(textual_name);
+    // All tiers stored as visual.onnx / textual.onnx in their respective subdirs
+    let visual_path  = dir.join("visual.onnx");
+    let textual_path = dir.join("textual.onnx");
 
     if !visual_path.exists() || !textual_path.exists() {
         bail!(

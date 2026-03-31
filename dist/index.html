@@ -1309,6 +1309,7 @@ $('btnTagAll').onclick=async()=>{
 // ── Search ────────────────────────────────────────────────────────────────────
 let searchTimer=null;
 $('searchInput').oninput=e=>{
+  if(typeof _clipMode!=='undefined'&&_clipMode==='semantic') return; // handled by semantic listener
   clearTimeout(searchTimer);const q=e.target.value.trim();
   const nonEn=q&&[...q].some(c=>c.charCodeAt(0)>127);
   $('searchHint').textContent=nonEn?'Translating…':'';
@@ -1793,7 +1794,25 @@ function initFaceRecognition() {
   };
 
   // Cluster faces button
-  $('btnClusterFaces').onclick = () => openClusterModal();
+  $('btnClusterFaces').onclick = async () => {
+    const modelOk = await invoke('check_face_models').catch(() => false);
+    if (!modelOk) {
+      const ok = confirm('Yüz tanıma modelleri indirilmemiş.\n\nŞimdi indirilsin mi? (~5 MB)');
+      if (!ok) return;
+      try {
+        const btn = $('btnClusterFaces');
+        btn.textContent = 'İndiriliyor…'; btn.disabled = true;
+        await invoke('download_face_models');
+        toast('Modeller indirildi', 'success');
+        btn.textContent = 'Grupla'; btn.disabled = false;
+      } catch (e) {
+        toast('Model indirilemedi: ' + e, 'error');
+        $('btnClusterFaces').textContent = 'Grupla'; $('btnClusterFaces').disabled = false;
+        return;
+      }
+    }
+    openClusterModal();
+  };
 
   // Recognize all button
   $('btnRecognizeAll').onclick = async () => {
