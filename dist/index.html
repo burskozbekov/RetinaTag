@@ -45,10 +45,11 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
   border:1px solid rgba(184,58,18,.15);pointer-events:none;right:-40px}
 .sb-logo::before{width:120px;height:120px;top:-20px}
 .sb-logo::after{width:180px;height:180px;top:-50px;border-color:rgba(184,58,18,.08)}
-.logo-mark{width:38px;height:38px;border-radius:10px;
-  background:linear-gradient(135deg,var(--red-dark),var(--red-light));
+.logo-mark{width:44px;height:44px;border-radius:0;background:none;
   display:flex;align-items:center;justify-content:center;flex-shrink:0;
-  box-shadow:var(--shadow-red);position:relative;z-index:1}
+  box-shadow:none;position:relative;z-index:1}
+.logo-mark img{width:44px;height:44px;object-fit:contain;
+  filter:drop-shadow(0 2px 8px rgba(184,58,18,.45))}
 .logo-mark svg{width:22px;height:22px}
 .logo-text{position:relative;z-index:1}
 .logo-name{font-weight:800;font-size:17px;letter-spacing:-.5px;color:var(--cream)}
@@ -212,6 +213,70 @@ select.tb-select:focus{border-color:var(--red-dark)}
 .detail-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
 .detail-actions .btn{font-size:10px;padding:5px 10px}
 
+/* Face Recognition */
+.face-section{margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
+.face-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:6px;margin-top:8px}
+.face-thumb{position:relative;cursor:pointer;border-radius:var(--radius-sm);overflow:hidden;
+  aspect-ratio:1;background:var(--card2);border:2px solid transparent;transition:all .14s}
+.face-thumb:hover,.face-thumb.selected{border-color:var(--red-dark);box-shadow:0 0 0 2px rgba(184,58,18,.3)}
+.face-thumb img{width:100%;height:100%;object-fit:cover}
+.face-label{position:absolute;bottom:0;left:0;right:0;background:rgba(12,7,7,.85);
+  font-size:9px;font-weight:700;color:var(--cream2);text-align:center;padding:2px 2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.face-label.named{color:var(--green)}
+.persons-section{padding:10px 14px;border-top:1px solid var(--border)}
+.person-item{display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;
+  border-radius:var(--radius-sm);transition:all .12s}
+.person-item:hover{background:var(--card)}
+.person-avatar{width:32px;height:32px;border-radius:50%;object-fit:cover;background:var(--card2);
+  flex-shrink:0;border:1px solid var(--border2);overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:13px}
+.person-info{flex:1;min-width:0}
+.person-name{font-size:12px;font-weight:700;color:var(--cream2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.person-count{font-size:10px;color:var(--text3)}
+.person-del{background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:2px 6px;opacity:.5;transition:all .1s;line-height:1}
+.person-del:hover{opacity:1;color:var(--red-light)}
+/* CLIP tier cards */
+.clip-tier-card{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:var(--radius-sm);
+  border:2px solid var(--border2);cursor:pointer;transition:all .14s;background:var(--card)}
+.clip-tier-card:hover{border-color:var(--red-dark)}
+.clip-tier-card.selected{border-color:var(--red-dark);background:var(--red-bg)}
+.clip-tier-icon{font-size:20px;flex-shrink:0}
+.clip-tier-info{flex:1;min-width:0}
+.clip-tier-name{font-size:12px;font-weight:700;color:var(--cream2)}
+.clip-tier-desc{font-size:10px;color:var(--text3);margin-top:2px;line-height:1.4}
+.clip-tier-badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;flex-shrink:0}
+.clip-tier-badge.ok{background:rgba(100,210,120,.15);color:var(--green)}
+.clip-tier-badge.dl{background:var(--red-bg);color:var(--red-light);cursor:pointer}
+/* Search mode toggle */
+.search-mode-toggle{display:flex;gap:0;border-radius:20px;overflow:hidden;border:1px solid var(--border2);flex-shrink:0}
+.search-mode-btn{padding:6px 12px;font-size:11px;font-weight:600;color:var(--text3);background:none;border:none;
+  cursor:pointer;transition:all .14s;font-family:var(--font)}
+.search-mode-btn.active{background:var(--red-dark);color:white}
+/* Cluster card */
+.cluster-card{background:var(--card);border:1px solid var(--border2);border-radius:var(--radius-sm);
+  padding:12px;transition:border-color .14s}
+.cluster-card:hover{border-color:var(--red-dark)}
+.cluster-thumbs{display:flex;gap:4px;margin-bottom:10px}
+.cluster-thumbs img{width:44px;height:44px;border-radius:6px;object-fit:cover;background:var(--card2)}
+.cluster-thumbs .more{width:44px;height:44px;border-radius:6px;background:var(--card2);
+  display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text3);font-weight:700}
+.cluster-count{font-size:10px;color:var(--text3);margin-bottom:7px}
+.cluster-name-row{display:flex;gap:5px}
+.cluster-name-input{flex:1;padding:5px 9px;border-radius:var(--radius-sm);border:1px solid var(--border2);
+  background:var(--ink);color:var(--text);font-size:12px;font-family:var(--font);outline:none;transition:border-color .2s}
+.cluster-name-input:focus{border-color:var(--red-dark)}
+.cluster-name-input.assigned{border-color:var(--green);color:var(--green)}
+.cluster-skip{background:none;border:none;color:var(--text3);cursor:pointer;font-size:11px;padding:4px;transition:color .1s}
+.cluster-skip:hover{color:var(--red-light)}
+
+/* Assign face modal */
+#assignFaceModal .modal-box{width:360px}
+.assign-face-preview{width:120px;height:120px;border-radius:12px;object-fit:cover;margin:0 auto 14px;display:block;border:2px solid var(--border2)}
+.person-pick-list{max-height:240px;overflow-y:auto;margin:10px 0}
+.person-pick-item{padding:8px 12px;border-radius:var(--radius-sm);cursor:pointer;display:flex;align-items:center;gap:8px;
+  transition:background .12s;margin-bottom:2px}
+.person-pick-item:hover{background:var(--card)}.person-pick-item.active{background:var(--red-bg);color:var(--red-light)}
+
 /* ── Modal ──────────────────────────────────────────────────────────── */
 .modal-overlay{position:fixed;inset:0;background:rgba(8,4,4,.85);display:flex;align-items:center;
   justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:opacity .22s;backdrop-filter:blur(6px)}
@@ -219,7 +284,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
 .modal-box{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-lg);
   width:580px;max-width:92vw;max-height:86vh;overflow-y:auto;transform:translateY(24px) scale(.97);
   transition:transform .25s ease;box-shadow:0 32px 80px rgba(0,0,0,.7),0 0 40px rgba(184,58,18,.08);
-  position:relative;overflow:hidden}
+  position:relative;}
 .modal-overlay.open .modal-box{transform:translateY(0) scale(1)}
 .modal-box::before,.modal-box::after{content:'';position:absolute;border-radius:50%;pointer-events:none;
   border:1px solid rgba(184,58,18,.06)}
@@ -411,7 +476,10 @@ select.tb-select:focus{border-color:var(--red-dark)}
 <aside id="sidebar">
   <div class="sb-logo">
     <div class="logo-mark">
-      <svg viewBox="0 0 24 24" fill="none" stroke="var(--cream)" stroke-width="1.8" stroke-linecap="round">
+      <img src="logo.png" alt="RetinaTag" id="appLogo"
+           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+      <svg viewBox="0 0 24 24" fill="none" stroke="var(--cream)" stroke-width="1.8" stroke-linecap="round"
+           style="display:none;width:22px;height:22px">
         <ellipse cx="12" cy="12" rx="10" ry="6.5"/><circle cx="12" cy="12" r="2.8" fill="var(--cream)" stroke="none"/>
         <path d="M5 12 Q8 7 12 7 Q16 7 19 12" opacity=".4"/>
       </svg>
@@ -443,6 +511,22 @@ select.tb-select:focus{border-color:var(--red-dark)}
     <div class="sb-label">Collections <button class="btn-ghost" style="font-size:14px;padding:0" id="btnNewCollection" title="New Collection">+</button></div>
   </div>
   <div id="collectionsList" style="padding:0 10px;max-height:120px;overflow-y:auto"></div>
+
+  <!-- Persons / Face Recognition -->
+  <div class="persons-section" id="personsSection">
+    <div class="sb-label" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Kişiler</span>
+      <div style="display:flex;gap:4px">
+        <button class="btn-ghost" id="btnClusterFaces" title="Yüzleri otomatik grupla" style="font-size:10px;padding:2px 6px;color:var(--amber)">Grupla</button>
+        <button class="btn-ghost" id="btnRecognizeAll" title="Tanımlı kişileri tüm fotoğraflarda ara" style="font-size:10px;padding:2px 6px">Tanı</button>
+        <button class="btn-ghost" id="btnNewPerson" title="Yeni kişi ekle" style="font-size:14px;padding:0 4px">+</button>
+      </div>
+    </div>
+    <div id="personsList" style="margin-top:4px"></div>
+    <div id="noPersonsHint" style="font-size:10px;color:var(--text3);padding:6px 4px;line-height:1.5">
+      Henüz kişi yok.<br>"Grupla" ile tüm yüzleri otomatik gruplandır.
+    </div>
+  </div>
 
   <div class="sb-providers" id="providerArea">
     <div class="sb-label">AI Providers</div>
@@ -483,9 +567,13 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <button class="view-tab" data-view="duplicates">Dupes</button>
       <button class="view-tab" data-view="dashboard">Dashboard</button>
     </div>
+    <div class="search-mode-toggle" id="searchModeToggle" title="Arama modunu değiştir">
+      <button class="search-mode-btn active" data-mode="tag" id="btnModeTag">🏷 Tag</button>
+      <button class="search-mode-btn" data-mode="semantic" id="btnModeSemantic">🧠 Semantic</button>
+    </div>
     <div class="search-box">
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input type="text" id="searchInput" placeholder="Search tags… (any language, or describe what you see)">
+      <input type="text" id="searchInput" placeholder="Search tags…">
       <span class="search-hint" id="searchHint"></span>
     </div>
     <select class="tb-select" id="statusFilter">
@@ -528,6 +616,16 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <input class="add-input" id="addTagInput" placeholder="Add a tag…">
       <button class="btn btn-primary btn-sm" id="addTagBtn">Add</button>
     </div>
+    <div class="face-section" id="faceSection" style="display:none">
+      <div class="section-label">
+        <span>Yüzler</span>
+        <button class="btn btn-secondary btn-sm" id="btnScanFaces" style="font-size:9px;padding:3px 8px">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="7" r="4"/><path d="M5 20v-2a7 7 0 0114 0v2"/></svg>
+          Yüzleri Tara
+        </button>
+      </div>
+      <div class="face-grid" id="faceGrid"></div>
+    </div>
     <div class="detail-actions" id="detailActions"></div>
   </div>
 </aside>
@@ -540,6 +638,56 @@ select.tb-select:focus{border-color:var(--red-dark)}
   </div>
   <div class="drop-text">Drop folders or images here</div>
   <div class="drop-sub">They'll be scanned and added to your library</div>
+</div>
+
+<!-- ── Cluster Faces Modal ────────────────────────────────────────── -->
+<div class="modal-overlay" id="clusterModal">
+  <div class="modal-box" style="width:720px;max-height:90vh;display:flex;flex-direction:column">
+    <div style="padding:22px 24px 0">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+        <div style="font-size:16px;font-weight:800;color:var(--cream)">Yüz Grupları</div>
+        <button class="btn-ghost" id="btnCloseClusterModal" style="font-size:18px">&times;</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:16px" id="clusterSubtitle">
+        Her gruba bir isim verin — aynı kişinin tüm fotoğrafları otomatik etiketlenecek.
+      </div>
+      <!-- progress bar shown during scanning -->
+      <div id="clusterProgress" style="display:none;margin-bottom:14px">
+        <div style="font-size:11px;color:var(--amber);margin-bottom:6px" id="clusterProgressLabel">Yüzler taranıyor…</div>
+        <div class="progress-track"><div class="progress-fill" id="clusterProgressFill" style="width:0%"></div></div>
+      </div>
+    </div>
+    <!-- Cluster grid -->
+    <div id="clusterGrid" style="flex:1;overflow-y:auto;padding:0 24px 20px;display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px"></div>
+    <!-- Footer -->
+    <div style="padding:14px 24px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
+      <span style="font-size:11px;color:var(--text3)" id="clusterCount"></span>
+      <div style="flex:1"></div>
+      <button class="btn btn-secondary btn-sm" id="btnCloseClusterModal2">Kapat</button>
+      <button class="btn btn-primary btn-sm" id="btnApplyClusters">Tüm İsimleri Uygula</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Assign Face Modal ──────────────────────────────────────────── -->
+<div class="modal-overlay" id="assignFaceModal">
+  <div class="modal-box" style="width:340px;padding:24px">
+    <div style="font-size:15px;font-weight:800;color:var(--cream);margin-bottom:16px;text-align:center">Yüzü Kişiye Ata</div>
+    <img id="assignFaceImg" class="assign-face-preview" src="" alt="Yüz">
+    <div style="font-size:11px;color:var(--text3);text-align:center;margin-bottom:10px" id="assignFaceScore"></div>
+    <!-- Existing persons list -->
+    <div class="person-pick-list" id="assignPersonList"></div>
+    <!-- New person input -->
+    <div style="display:flex;gap:6px;margin-top:10px">
+      <input class="add-input" id="newPersonInput" placeholder="Yeni kişi adı…" style="flex:1">
+      <button class="btn btn-primary btn-sm" id="btnCreateAndAssign">Ata</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-top:12px;justify-content:space-between">
+      <button class="btn btn-secondary btn-sm" id="btnUnassignFace">Atamayı Kaldır</button>
+      <button class="btn btn-secondary btn-sm" id="btnCloseAssignModal">İptal</button>
+    </div>
+  </div>
 </div>
 
 <!-- ── Context Menu ───────────────────────────────────────────────── -->
@@ -581,6 +729,22 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
         <div class="sb-label" style="margin-bottom:10px">Watch Folders <button class="btn btn-xs btn-secondary" id="btnAddWatch">+ Add</button></div>
         <div id="watchFoldersList" style="font-size:12px;color:var(--text3)"></div>
+      </div>
+
+      <!-- CLIP Semantic Search -->
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)" id="clipSettingsSection">
+        <div class="sb-label" style="margin-bottom:4px">
+          🔍 Semantic Arama (CLIP)
+          <span style="font-size:10px;font-weight:400;color:var(--text3);margin-left:8px">"Gün batımında deniz" gibi cümleyle ara</span>
+        </div>
+        <p style="font-size:11px;color:var(--text3);margin-bottom:12px;line-height:1.6">
+          Fotoğrafı görmeden anlayan AI — tag olmasa bile bulur. Bir model seç ve fotoğrafları indeksle.
+        </p>
+        <div style="display:flex;flex-direction:column;gap:8px" id="clipTierList"></div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          <button class="btn btn-secondary btn-sm" id="btnClipIndex">⚡ Semantic İndeksle</button>
+          <span style="font-size:11px;color:var(--text3)" id="clipIndexStatus">—</span>
+        </div>
       </div>
     </div>
     <div class="modal-foot">
@@ -906,6 +1070,9 @@ async function selectPhoto(id,path){
       <button class="btn btn-secondary btn-xs" onclick="ctxShowExif()">📷 EXIF</button>`;
     const b=thumbCache.get(id)||await invoke('get_thumbnail',{photoId:id});
     thumbCache.set(id,b);$('detailImg').src='data:image/jpeg;base64,'+b;
+    // Face section
+    $('faceSection').style.display='block';
+    loadFacesForPhoto(id);
   }catch(e){toast('Error: '+e,'error')}
 }
 function renderTags(tags,pid){
@@ -1037,29 +1204,106 @@ listen('scan-error',({payload:m})=>{$('progressArea').classList.remove('active')
 listen('tag-progress',({payload:p})=>{
   $('progressArea').classList.add('active');
   const pct=p.total?Math.round(p.completed/p.total*100):0;
-  $('progressLabel').textContent='Tagging…';$('progressPct').textContent=pct+'%';
+  $('progressLabel').textContent='Etiketleniyor…';$('progressPct').textContent=pct+'%';
   $('progressFill').style.width=pct+'%';
-  $('progressSub').textContent=`${p.completed}/${p.total} via ${p.current_provider} · ${p.current_file}`;
+  $('progressSub').textContent=`${p.completed}/${p.total} · ${p.current_provider} · ${p.current_file}`;
 });
 listen('tag-complete',({payload:p})=>{
   $('progressArea').classList.remove('active');
+  _lastProviderErrors=[];
   const parts=p.provider_breakdown.map(b=>`${b.provider}: ${b.count}`).join(' · ');
-  toast(`Tagged ${p.tagged} photos${p.failed?' ('+p.failed+' failed)':''}${parts?' — '+parts:''}`,'success');
+  const failMsg=p.failed?` · ${p.failed} hatalı`:'';
+  if(p.tagged===0 && p.failed===0){
+    toast('Etiketlenecek fotoğraf bulunamadı','warn');
+  } else {
+    toast(`${p.tagged} fotoğraf etiketlendi${failMsg}${parts?' — '+parts:''}`,'success');
+  }
+  if(p.tagged>0) toast('GPU belleği serbest bırakıldı','info');
   loadPhotos();refreshStats();refreshProviders();
 });
-listen('tag-error',({payload:m})=>{$('progressArea').classList.remove('active');toast(m,'error')});
-listen('watch-new-files',({payload:p})=>{toast(`Watcher: ${p.count} new files detected`,'info');loadPhotos();refreshStats()});
+listen('tag-error',({payload:m})=>{
+  $('progressArea').classList.remove('active');
+  const tr=translateError(m);
+  toast(tr,'error');
+});
+listen('tag-auth-error',({payload:p})=>{
+  toast(`⚠ ${p.message}`,'error');
+  // Highlight settings button
+  document.querySelector('[data-action="settings"]')?.classList.add('pulse-error');
+  setTimeout(()=>document.querySelector('[data-action="settings"]')?.classList.remove('pulse-error'),4000);
+});
+listen('tag-rate-limit',({payload:p})=>{
+  toast(`⏱ ${p.provider} rate limit — ${p.wait_secs}sn bekleniyor…`,'warn');
+});
+let _lastProviderErrors=[];
+listen('tag-provider-error',({payload:p})=>{
+  console.warn('Provider error:',p);
+  _lastProviderErrors.push(p);
+  // Show first few errors as toast so user knows what's happening
+  if(_lastProviderErrors.length<=3){
+    toast(`⚠ ${p.file}: ${p.error.slice(0,80)}`,'warn');
+  }
+});
+listen('scan-file-error',({payload:p})=>{
+  console.warn('Scan error:',p.file,p.error);
+});
+listen('watch-new-files',({payload:p})=>{toast(`İzleme: ${p.count} yeni dosya algılandı`,'info');loadPhotos();refreshStats()});
+
+// Global hata yakalayıcı
+window.addEventListener('unhandledrejection',e=>{
+  console.error('Unhandled rejection:',e.reason);
+  const msg=e.reason?.message||e.reason?.toString()||'Bilinmeyen hata';
+  toast('Hata: '+translateError(msg),'error');
+  e.preventDefault();
+});
+window.addEventListener('error',e=>{
+  console.error('Global error:',e.message);
+});
+
+function translateError(msg){
+  if(!msg) return 'Bilinmeyen hata';
+  if(msg.includes('401')||msg.includes('Unauthorized')||msg.includes('invalid api key')) return 'API anahtarı geçersiz. Ayarlar\'dan kontrol edin.';
+  if(msg.includes('429')||msg.includes('rate limit')||msg.includes('Too Many')) return 'İstek limiti aşıldı. Biraz bekleyin.';
+  if(msg.includes('timeout')||msg.includes('timed out')) return 'Bağlantı zaman aşımı. İnternet bağlantınızı kontrol edin.';
+  if(msg.includes('network')||msg.includes('fetch')) return 'Ağ hatası. İnternet bağlantınızı kontrol edin.';
+  if(msg.includes('No AI providers')) return 'AI sağlayıcı tanımlı değil. Ayarlar\'dan API anahtarı ekleyin.';
+  if(msg.includes('budget')) return 'Aylık bütçe aşıldı. Ayarlar\'dan limiti artırın.';
+  if(msg.includes('not found')||msg.includes('404')) return 'Dosya veya model bulunamadı.';
+  if(msg.includes('disk full')||msg.includes('No space')) return 'Disk dolu. Alan açın.';
+  if(msg.includes('permission')||msg.includes('Access denied')) return 'İzin hatası. Klasöre erişim yok.';
+  return msg;
+}
+
+async function retryFailedPhotos(){
+  try{
+    const count=await invoke('retry_failed_photos');
+    if(count>0){
+      toast(`${count} hatalı fotoğraf tekrar kuyruğa alındı`,'info');
+      await invoke('start_tagging');
+      toast('Yeniden etiketleme başlatıldı…','info');
+    } else {
+      toast('Yeniden denenecek fotoğraf yok','info');
+    }
+  }catch(e){toast('Hata: '+translateError(e),'error');}
+}
 
 // ── Tag All ──────────────────────────────────────────────────────────────────
 $('btnTagAll').onclick=async()=>{
   try{
-    // Budget check
     const budget=await invoke('get_budget_status').catch(()=>null);
-    if(budget&&budget.is_over){toast('Monthly budget exceeded! Increase in Settings.','error');return}
-    const statuses=await invoke('get_provider_statuses');
-    if(!statuses.some(s=>s.has_key||s.enabled)){toast('No providers configured. Open Settings first.','error');openSettings();return}
-    await invoke('start_tagging');toast('AI tagging started…','info');
-  }catch(e){toast('Error: '+e,'error')}
+    if(budget&&budget.is_over){toast('Aylık bütçe aşıldı! Ayarlar\'dan limiti artırın.','error');return;}
+    const statuses=await invoke('get_provider_statuses').catch(()=>[]);
+    if(!statuses.some(s=>s.has_key||s.enabled)){
+      toast('Hiç AI sağlayıcı tanımlı değil. Önce Ayarlar\'ı açın.','error');
+      openSettings();return;
+    }
+    const stats=await invoke('get_library_stats').catch(()=>null);
+    if(stats&&stats.pending===0&&stats.error===0){
+      toast('Etiketlenecek fotoğraf yok. Önce bir klasör tara.','info');return;
+    }
+    await invoke('start_tagging');
+    toast('AI etiketleme başlatıldı…','info');
+  }catch(e){toast('Hata: '+translateError(String(e)),'error');}
 };
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -1272,12 +1516,25 @@ async function openSettings(){
       const endpoint=settingsData['ollama_endpoint']||'http://localhost:11434';
       card.innerHTML=`<div class="pc-head"><div class="pc-icon ${prov.iconClass}">${prov.icon}</div>
         <div style="flex:1"><div class="pc-name">${prov.name}</div><div style="font-size:10px;color:var(--text3)">${prov.sub}</div></div>
-        <span class="free-badge">FREE</span>
+        <span class="free-badge">ÜCRETSİZ</span>
         <label class="pc-toggle"><input type="checkbox" data-setting="enabled_local" ${enabled?'checked':''}><span class="track"></span><span class="knob"></span></label></div>
-        <div class="form-hint" style="margin-bottom:10px">${prov.hint}</div>
-        <div><label class="form-label">Ollama Endpoint</label><input class="form-input" data-setting="ollama_endpoint" value="${endpoint}" style="font-size:12px"></div>
-        <div style="margin-top:8px"><label class="form-label">Model</label><input class="form-input" id="localModelInput" data-setting="model_local" value="${model}" style="font-size:12px"></div>
-        <div id="ollamaStatusBox"><div class="ollama-status warn">⟳ Checking…</div></div>`;
+        <div class="form-hint" style="margin-bottom:10px">Tamamen ücretsiz, internet bağlantısı gerektirmez. Fotoğraflarınız cihazınızda kalır.</div>
+        <div><label class="form-label">Ollama Adresi</label><input class="form-input" data-setting="ollama_endpoint" value="${endpoint}" style="font-size:12px"></div>
+        <div style="margin-top:8px"><label class="form-label">Model</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input class="form-input" id="localModelInput" data-setting="model_local" value="${model}" style="font-size:12px;flex:1">
+            <button class="btn-sm btn-ghost" onclick="pullOllamaModel()" title="Modeli indir">⬇ İndir</button>
+          </div>
+          <div style="font-size:10px;color:var(--text3);margin-top:3px">Önerilen modeller: qwen2.5vl:7b · qwen2.5vl:3b</div>
+        </div>
+        <div id="ollamaStatusBox" style="margin-top:10px"><div class="ollama-status warn">⟳ Kontrol ediliyor…</div></div>
+        <div id="ollamaControls" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <button class="btn-sm btn-primary" id="btnOllamaStart" onclick="startOllama()" style="flex:1">▶ Başlat</button>
+          <button class="btn-sm btn-ghost" id="btnOllamaStop" onclick="stopOllama()" style="flex:1">■ Durdur</button>
+          <button class="btn-sm btn-ghost" onclick="testOllamaRaw()" style="flex:1">🧪 Test Et</button>
+          <button class="btn-sm btn-ghost" onclick="checkOllamaStatus(document.querySelector('[data-local]'))" title="Yenile">↻</button>
+        </div>`;
+      card.setAttribute('data-local','1');
       setTimeout(()=>checkOllamaStatus(card),80);
     }
     container.appendChild(card);
@@ -1287,17 +1544,109 @@ async function openSettings(){
   invoke('get_budget_status').then(b=>{$('budgetSpent').textContent=`This month: $${b.spent_this_month.toFixed(4)}`}).catch(()=>{});
   // Watch folders
   refreshWatchFolders();
+  // CLIP semantic search
+  initClipSettings();
   $('settingsModal').classList.add('open');
 }
 async function checkOllamaStatus(card){
-  const box=card.querySelector('#ollamaStatusBox');const modelInp=card.querySelector('#localModelInput');if(!box)return;
-  try{const s=await invoke('check_ollama');
-    if(!s.running){box.innerHTML=`<div class="ollama-status err">✕ Ollama not running</div><div class="install-hint"><p>Install: <code>winget install Ollama.Ollama</code></p><p>Pull model: <code>ollama pull qwen2.5vl:7b</code></p></div>`;return}
-    if(!s.model_available){const m=modelInp?.value||'qwen2.5vl:7b';
-      box.innerHTML=`<div class="ollama-status warn">⚠ Model <strong>${m}</strong> not found</div>`;
-      if(s.available_models.length){box.innerHTML+=`<div class="model-list">${s.available_models.map(m=>`<span class="model-pill" onclick="document.getElementById('localModelInput').value='${m}'">${m}</span>`).join('')}</div>`}return}
-    box.innerHTML=`<div class="ollama-status ok">✓ Ollama ready · <strong>${modelInp?.value||'qwen2.5vl:7b'}</strong></div>`;
-  }catch(e){box.innerHTML=`<div class="ollama-status err">✕ Cannot reach Ollama</div>`}
+  if(!card) card=document.querySelector('[data-local]');
+  if(!card) return;
+  const box=card.querySelector('#ollamaStatusBox');
+  const modelInp=card.querySelector('#localModelInput');
+  const btnStart=card.querySelector('#btnOllamaStart');
+  const btnStop=card.querySelector('#btnOllamaStop');
+  if(!box) return;
+  box.innerHTML=`<div class="ollama-status warn">⟳ Kontrol ediliyor…</div>`;
+  try{
+    const s=await invoke('get_ollama_status');
+    if(!s.running){
+      box.innerHTML=`<div class="ollama-status err">✕ Ollama çalışmıyor</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:4px">
+          Ollama yüklü değilse: <strong>ollama.com</strong> adresinden indirin<br>
+          Yüklüyse "▶ Ollama'yı Başlat" butonuna basın
+        </div>`;
+      if(btnStart){btnStart.disabled=false;btnStop.disabled=true;}
+      return;
+    }
+    if(!s.model_loaded){
+      const m=modelInp?.value||'qwen2.5vl:7b';
+      box.innerHTML=`<div class="ollama-status warn">⚠ '${m}' modeli bulunamadı</div>`;
+      if(s.models&&s.models.length){
+        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">Yüklü modeller:</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${s.models.map(m=>`<span style="background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer" onclick="document.getElementById('localModelInput').value='${m}'">${m}</span>`).join('')}</div>`;
+      } else {
+        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">"⬇ İndir" butonuna basarak modeli indirin</div>`;
+      }
+      if(btnStart){btnStart.disabled=true;btnStop.disabled=false;}
+      return;
+    }
+    box.innerHTML=`<div class="ollama-status ok">✓ Hazır — <strong>${modelInp?.value||'qwen2.5vl:7b'}</strong> yüklü</div>`;
+    if(btnStart){btnStart.disabled=true;btnStop.disabled=false;}
+  }catch(e){
+    box.innerHTML=`<div class="ollama-status err">✕ Ollama'ya bağlanılamadı</div>`;
+    if(btnStart){btnStart.disabled=false;btnStop&&(btnStop.disabled=true);}
+  }
+}
+
+async function startOllama(){
+  const card=document.querySelector('[data-local]');
+  const box=card?.querySelector('#ollamaStatusBox');
+  const btn=document.getElementById('btnOllamaStart');
+  if(btn){btn.disabled=true;btn.textContent='⟳ Başlatılıyor…';}
+  try{
+    await invoke('start_ollama_service');
+    // Wait 3 seconds then check
+    setTimeout(()=>{
+      if(btn){btn.textContent='▶ Ollama\'yı Başlat';}
+      checkOllamaStatus(card);
+    },3000);
+  }catch(e){
+    if(box) box.innerHTML=`<div class="ollama-status err">✕ ${e}</div>`;
+    if(btn){btn.disabled=false;btn.textContent='▶ Ollama\'yı Başlat';}
+  }
+}
+
+async function stopOllama(){
+  const card=document.querySelector('[data-local]');
+  try{
+    await invoke('stop_ollama_service');
+    toast('Ollama durduruldu','info');
+    setTimeout(()=>checkOllamaStatus(card),1000);
+  }catch(e){toast('Durdurulamadı: '+e,'error');}
+}
+
+async function testOllamaRaw(){
+  const card=document.querySelector('[data-local]');
+  const box=card?.querySelector('#ollamaStatusBox');
+  if(box) box.innerHTML=`<div class="ollama-status warn">⟳ Test ediliyor… (30-60sn sürebilir)</div>`;
+  try{
+    const raw=await invoke('test_ollama_raw');
+    // Parse and show result
+    let parsed={};
+    try{ parsed=JSON.parse(raw.split('\n').slice(2).join('\n')); }catch(e){}
+    const content=parsed?.message?.content||raw;
+    const modal=document.createElement('div');
+    modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:9999;display:flex;align-items:center;justify-content:center';
+    modal.innerHTML=`<div style="background:#1A0F0F;border:1px solid #3A1F1F;border-radius:12px;padding:24px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <strong style="color:#EDE0C4">🧪 Ollama Ham Yanıt</strong>
+        <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none;border:none;color:#B89A7A;cursor:pointer;font-size:18px">✕</button>
+      </div>
+      <pre style="background:#0C0707;padding:12px;border-radius:8px;font-size:11px;color:#EDE0C4;white-space:pre-wrap;word-break:break-all">${content.replace(/</g,'&lt;')}</pre>
+    </div>`;
+    document.body.appendChild(modal);
+    if(box) checkOllamaStatus(card);
+  }catch(e){
+    if(box) box.innerHTML=`<div class="ollama-status err">✕ Test hatası: ${e}</div>`;
+  }
+}
+
+async function pullOllamaModel(){
+  const m=document.getElementById('localModelInput')?.value||'qwen2.5vl:7b';
+  try{
+    const msg=await invoke('pull_ollama_model',{model:m});
+    toast(msg,'info');
+  }catch(e){toast('Hata: '+e,'error');}
 }
 
 // Watch folders management
@@ -1385,7 +1734,532 @@ $('btnWelcomeSkip').onclick=()=>{$('welcomeModal').classList.remove('open');invo
   }catch(e){$('welcomeModal').classList.add('open')}
   // Check for updates silently
   invoke('check_for_updates').then(v=>{if(v.update_available)toast(`Update available: v${v.latest}. Visit GitHub.`,'info')}).catch(()=>{});
+  // Init face recognition
+  initFaceRecognition();
 })();
+
+// ── Face Recognition ──────────────────────────────────────────────────────────
+
+let _assignFaceId = null;
+let _assignFacePhotoId = null;
+let _personsCache = [];
+
+function initFaceRecognition() {
+  // Show persons section always (has "Grupla" hint text)
+  invoke('get_persons').then(persons => {
+    _personsCache = persons;
+    renderPersonsSidebar(persons);
+  }).catch(() => {});
+
+  // Scan faces button in detail panel
+  $('btnScanFaces').onclick = async () => {
+    if (!selectedId) return;
+    const btn = $('btnScanFaces');
+    const modelOk = await invoke('check_face_models').catch(() => false);
+    if (!modelOk) {
+      const ok = confirm('Yüz tanıma modelleri indirilmemiş.\n\nŞimdi indirilsin mi? (~5 MB)');
+      if (!ok) return;
+      btn.textContent = 'İndiriliyor…';
+      btn.disabled = true;
+      try {
+        const msg = await invoke('download_face_models');
+        toast(msg, 'success');
+      } catch (e) {
+        toast('Model indirilemedi: ' + e, 'error');
+        btn.textContent = 'Yüzleri Tara'; btn.disabled = false; return;
+      }
+    }
+    btn.textContent = 'Taranıyor…'; btn.disabled = true;
+    try {
+      const faces = await invoke('detect_faces_in_photo', { photoId: selectedId });
+      toast(`${faces.length} yüz bulundu`, faces.length > 0 ? 'success' : 'info');
+      renderFaceGrid(faces, selectedId);
+      refreshPersonsSidebar();
+    } catch (e) {
+      toast('Hata: ' + e, 'error');
+    } finally {
+      btn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="7" r="4"/><path d="M5 20v-2a7 7 0 0114 0v2"/></svg> Yüzleri Tara';
+      btn.disabled = false;
+    }
+  };
+
+  // New person button
+  $('btnNewPerson').onclick = () => {
+    const name = prompt('Kişi adı:');
+    if (!name || !name.trim()) return;
+    invoke('create_person', { name: name.trim() })
+      .then(() => { toast('Kişi eklendi', 'success'); refreshPersonsSidebar(); })
+      .catch(e => toast('Hata: ' + e, 'error'));
+  };
+
+  // Cluster faces button
+  $('btnClusterFaces').onclick = () => openClusterModal();
+
+  // Recognize all button
+  $('btnRecognizeAll').onclick = async () => {
+    const btn = $('btnRecognizeAll');
+    btn.textContent = 'Tanıyor…'; btn.disabled = true;
+    try {
+      const count = await invoke('recognize_all_faces');
+      toast(`${count} yüz tanındı ve etiketlendi`, 'success');
+      if (selectedId) loadFacesForPhoto(selectedId);
+      refreshPersonsSidebar();
+      await loadPhotos(); // refresh tags
+    } catch (e) {
+      toast(e.toString(), 'error');
+    } finally {
+      btn.textContent = 'Tanı'; btn.disabled = false;
+    }
+  };
+
+  // Assign face modal — close
+  $('btnCloseAssignModal').onclick = closeAssignModal;
+  $('assignFaceModal').onclick = e => { if (e.target === $('assignFaceModal')) closeAssignModal(); };
+
+  // Unassign face
+  $('btnUnassignFace').onclick = async () => {
+    if (_assignFaceId == null) return;
+    await invoke('assign_face_to_person', { faceId: _assignFaceId, personId: null }).catch(() => {});
+    toast('Atama kaldırıldı', 'info');
+    closeAssignModal();
+    if (selectedId) loadFacesForPhoto(selectedId);
+    refreshPersonsSidebar();
+  };
+
+  // Create new person and assign
+  $('btnCreateAndAssign').onclick = async () => {
+    const name = $('newPersonInput').value.trim();
+    if (!name || _assignFaceId == null) return;
+    try {
+      const personId = await invoke('create_person', { name });
+      await invoke('assign_face_to_person', { faceId: _assignFaceId, personId });
+      toast(`"${name}" olarak işaretlendi`, 'success');
+      closeAssignModal();
+      if (selectedId) loadFacesForPhoto(selectedId);
+      refreshPersonsSidebar();
+    } catch (e) { toast('Hata: ' + e, 'error'); }
+  };
+
+  $('newPersonInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') $('btnCreateAndAssign').click();
+  });
+}
+
+async function loadFacesForPhoto(photoId) {
+  try {
+    const faces = await invoke('get_faces_for_photo', { photoId });
+    renderFaceGrid(faces, photoId);
+  } catch (e) {
+    $('faceGrid').innerHTML = '';
+  }
+}
+
+function renderFaceGrid(faces, photoId) {
+  const grid = $('faceGrid');
+  grid.innerHTML = '';
+  if (!faces || faces.length === 0) {
+    grid.innerHTML = '<div style="font-size:10px;color:var(--text3);text-align:center;padding:8px 0">Yüz bulunamadı — "Yüzleri Tara" butonuna basın</div>';
+    return;
+  }
+  for (const f of faces) {
+    const div = document.createElement('div');
+    div.className = 'face-thumb';
+    div.dataset.faceId = f.id;
+    if (f.thumbnail_b64) {
+      div.innerHTML = `<img src="data:image/jpeg;base64,${f.thumbnail_b64}" alt="yüz">`;
+    } else {
+      div.style.background = 'var(--card2)';
+    }
+    const label = document.createElement('div');
+    label.className = 'face-label' + (f.person_name ? ' named' : '');
+    label.textContent = f.person_name || '?';
+    div.appendChild(label);
+    div.onclick = () => openAssignModal(f, photoId);
+    grid.appendChild(div);
+  }
+}
+
+function openAssignModal(face, photoId) {
+  _assignFaceId = face.id;
+  _assignFacePhotoId = photoId;
+  if (face.thumbnail_b64) {
+    $('assignFaceImg').src = 'data:image/jpeg;base64,' + face.thumbnail_b64;
+  }
+  $('assignFaceScore').textContent = `Güven skoru: ${(face.score * 100).toFixed(0)}%`;
+  $('newPersonInput').value = '';
+  // Populate persons list
+  const list = $('assignPersonList');
+  list.innerHTML = '';
+  for (const p of _personsCache) {
+    const item = document.createElement('div');
+    item.className = 'person-pick-item' + (face.person_id === p.id ? ' active' : '');
+    item.innerHTML = `
+      <div class="person-avatar">${p.thumbnail ? `<img src="data:image/jpeg;base64,${p.thumbnail}" style="width:100%;height:100%;object-fit:cover">` : '👤'}</div>
+      <div style="flex:1"><div style="font-size:12px;font-weight:700;color:var(--cream2)">${p.name}</div><div style="font-size:10px;color:var(--text3)">${p.face_count} yüz</div></div>`;
+    item.onclick = async () => {
+      try {
+        await invoke('assign_face_to_person', { faceId: _assignFaceId, personId: p.id });
+        toast(`"${p.name}" olarak işaretlendi`, 'success');
+        closeAssignModal();
+        if (selectedId) loadFacesForPhoto(selectedId);
+        refreshPersonsSidebar();
+      } catch (e) { toast('Hata: ' + e, 'error'); }
+    };
+    list.appendChild(item);
+  }
+  $('assignFaceModal').classList.add('open');
+}
+
+function closeAssignModal() {
+  $('assignFaceModal').classList.remove('open');
+  _assignFaceId = null;
+}
+
+async function refreshPersonsSidebar() {
+  try {
+    const persons = await invoke('get_persons');
+    _personsCache = persons;
+    renderPersonsSidebar(persons);
+  } catch (e) {}
+}
+
+function renderPersonsSidebar(persons) {
+  const list = $('personsList');
+  const hint = $('noPersonsHint');
+  list.innerHTML = '';
+  if (hint) hint.style.display = persons.length === 0 ? 'block' : 'none';
+  for (const p of persons) {
+    const item = document.createElement('div');
+    item.className = 'person-item';
+    item.style.padding = '5px 4px';
+    item.innerHTML = `
+      <div class="person-avatar">${p.thumbnail ? `<img src="data:image/jpeg;base64,${p.thumbnail}" style="width:100%;height:100%;border-radius:50%;object-fit:cover">` : '👤'}</div>
+      <div class="person-info">
+        <div class="person-name">${p.name}</div>
+        <div class="person-count">${p.face_count} yüz</div>
+      </div>
+      <button class="person-del" title="Sil" data-pid="${p.id}">&times;</button>`;
+    item.querySelector('.person-del').onclick = async e => {
+      e.stopPropagation();
+      if (!confirm(`"${p.name}" kişisini sil? Yüzlerdeki atamalar kaldırılır.`)) return;
+      await invoke('delete_person', { personId: p.id }).catch(() => {});
+      refreshPersonsSidebar();
+      if (selectedId) loadFacesForPhoto(selectedId);
+    };
+    // Click person to search their photos
+    item.querySelector('.person-info').onclick = () => {
+      $('searchInput').value = p.name.toLowerCase();
+      $('searchInput').dispatchEvent(new Event('input'));
+    };
+    list.appendChild(item);
+  }
+}
+
+// ── Cluster Modal ─────────────────────────────────────────────────────────────
+
+let _clusters = []; // current cluster data
+let _clusterInputs = []; // { faceIds, photoIds, input el }
+
+function openClusterModal() {
+  $('clusterModal').classList.add('open');
+  $('clusterGrid').innerHTML = '';
+  $('clusterCount').textContent = '';
+  $('clusterProgress').style.display = 'block';
+  $('clusterProgressLabel').textContent = 'Yüzler taranıyor… (bu birkaç dakika sürebilir)';
+  $('clusterProgressFill').style.width = '5%';
+  _clusters = [];
+  _clusterInputs = [];
+
+  // Determine folder: use currently selected folder filter
+  const activeFolder = document.querySelector('.folder-item.active')?.dataset.folder || '';
+
+  invoke('scan_and_cluster_faces', { folder: activeFolder })
+    .then(clusters => {
+      $('clusterProgress').style.display = 'none';
+      _clusters = clusters;
+      renderClusterGrid(clusters);
+    })
+    .catch(e => {
+      $('clusterProgress').style.display = 'none';
+      $('clusterGrid').innerHTML = `<div style="padding:20px;color:var(--red-light);font-size:13px">${e}</div>`;
+    });
+}
+
+function renderClusterGrid(clusters) {
+  const grid = $('clusterGrid');
+  grid.innerHTML = '';
+  _clusterInputs = [];
+
+  // Filter: only show clusters with ≥2 faces, or already named ones, to reduce noise
+  const significant = clusters.filter(c => c.count >= 1);
+
+  if (significant.length === 0) {
+    grid.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:13px">Hiç yüz bulunamadı. Önce fotoğrafları tarayın.</div>';
+    return;
+  }
+
+  $('clusterCount').textContent = `${significant.length} grup bulundu (${clusters.reduce((s,c)=>s+c.count,0)} yüz)`;
+
+  for (const c of significant) {
+    const card = document.createElement('div');
+    card.className = 'cluster-card';
+
+    // Thumbnail strip
+    const thumbsDiv = document.createElement('div');
+    thumbsDiv.className = 'cluster-thumbs';
+    const shown = c.thumbnails.slice(0, 3);
+    for (const t of shown) {
+      const img = document.createElement('img');
+      img.src = 'data:image/jpeg;base64,' + t;
+      thumbsDiv.appendChild(img);
+    }
+    if (c.count > 3) {
+      const more = document.createElement('div');
+      more.className = 'more';
+      more.textContent = '+' + (c.count - 3);
+      thumbsDiv.appendChild(more);
+    }
+
+    // Count label
+    const countDiv = document.createElement('div');
+    countDiv.className = 'cluster-count';
+    countDiv.textContent = `${c.count} fotoğraf`;
+
+    // Name input row
+    const nameRow = document.createElement('div');
+    nameRow.className = 'cluster-name-row';
+
+    const input = document.createElement('input');
+    input.className = 'cluster-name-input' + (c.person_name ? ' assigned' : '');
+    input.placeholder = 'İsim girin…';
+    input.value = c.person_name || '';
+    if (c.person_id) input.dataset.personId = c.person_id;
+
+    const skipBtn = document.createElement('button');
+    skipBtn.className = 'cluster-skip';
+    skipBtn.title = 'Bu grubu atla';
+    skipBtn.textContent = '✕';
+    skipBtn.onclick = () => {
+      input.value = '';
+      delete input.dataset.personId;
+      input.className = 'cluster-name-input';
+    };
+
+    nameRow.appendChild(input);
+    nameRow.appendChild(skipBtn);
+
+    card.appendChild(thumbsDiv);
+    card.appendChild(countDiv);
+    card.appendChild(nameRow);
+    grid.appendChild(card);
+
+    _clusterInputs.push({
+      faceIds: c.face_ids,
+      photoIds: c.photo_ids,
+      personId: c.person_id || null,
+      input,
+    });
+  }
+}
+
+// Apply all named clusters
+$('btnApplyClusters').onclick = async () => {
+  const btn = $('btnApplyClusters');
+  btn.disabled = true;
+  btn.textContent = 'Uygulanıyor…';
+
+  let applied = 0;
+  let errors = 0;
+
+  for (const item of _clusterInputs) {
+    const name = item.input.value.trim();
+    if (!name) continue; // skip unnamed
+
+    try {
+      const pid = await invoke('assign_cluster_to_person', {
+        faceIds: item.faceIds,
+        photoIds: item.photoIds,
+        personId: item.personId || null,
+        personName: name,
+      });
+      item.input.className = 'cluster-name-input assigned';
+      item.personId = pid;
+      applied++;
+    } catch (e) {
+      errors++;
+      toast('Hata: ' + e, 'error');
+    }
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Tüm İsimleri Uygula';
+
+  if (applied > 0) {
+    toast(`${applied} grup uygulandı`, 'success');
+    await refreshPersonsSidebar();
+    await loadPhotos(); // refresh tag counts
+  }
+  if (errors === 0 && applied > 0) {
+    // Close modal after short delay
+    setTimeout(() => $('clusterModal').classList.remove('open'), 800);
+  }
+};
+
+// Modal close buttons
+$('btnCloseClusterModal').onclick = () => $('clusterModal').classList.remove('open');
+$('btnCloseClusterModal2').onclick = () => $('clusterModal').classList.remove('open');
+$('clusterModal').onclick = e => { if (e.target === $('clusterModal')) $('clusterModal').classList.remove('open'); };
+
+// ── CLIP Semantic Search ──────────────────────────────────────────────────────
+
+let _clipMode = 'tag';            // 'tag' | 'semantic'
+let _clipTierSelected = 'fast';  // 'fast' | 'balanced' | 'best'
+const CLIP_TIER_INFO = {
+  fast:     { icon:'🚀', name:'Hızlı',    sub:'ViT-B/32 quantized · ~155 MB', desc:'Her bilgisayarda çalışır. CPU\'da bile hızlı. Başlangıç için ideal.', badge:'Önerilen' },
+  balanced: { icon:'⚖️',  name:'Dengeli',  sub:'ViT-B/32 full · ~600 MB',      desc:'Daha iyi doğruluk. Orta seviye GPU önerilir (GTX 1060+).', badge:'' },
+  best:     { icon:'🏆', name:'En İyi',   sub:'ViT-L/14 · ~1.7 GB',           desc:'En yüksek doğruluk. RTX 3090 gibi güçlü GPU için idealdir.', badge:'RTX 3090+' },
+};
+
+// Search mode toggle
+document.querySelectorAll('.search-mode-btn').forEach(btn => {
+  btn.onclick = () => {
+    _clipMode = btn.dataset.mode;
+    document.querySelectorAll('.search-mode-btn').forEach(b => b.classList.toggle('active', b === btn));
+    const ph = _clipMode === 'semantic'
+      ? 'Türkçe veya İngilizce cümleyle ara… "gün batımında deniz"'
+      : 'Search tags… (any language)';
+    $('searchInput').placeholder = ph;
+    if (_clipMode === 'semantic') {
+      $('searchInput').style.borderColor = 'rgba(100,160,255,.5)';
+    } else {
+      $('searchInput').style.borderColor = '';
+    }
+    // Re-run current search
+    if ($('searchInput').value.trim()) $('searchInput').dispatchEvent(new Event('input'));
+  };
+});
+
+// Intercept search for semantic mode
+const _origSearchInput = $('searchInput');
+_origSearchInput._semanticTimeout = null;
+_origSearchInput.addEventListener('input', e => {
+  if (_clipMode !== 'semantic') return; // tag search handled by original code
+  clearTimeout(_origSearchInput._semanticTimeout);
+  const q = _origSearchInput.value.trim();
+  if (!q) { loadPhotos(); return; }
+  $('searchHint').textContent = '🧠 semantic…';
+  _origSearchInput._semanticTimeout = setTimeout(async () => {
+    try {
+      const results = await invoke('semantic_search', {
+        query: q,
+        tier: _clipTierSelected,
+        limit: 100,
+      });
+      $('searchHint').textContent = `${results.length} sonuç`;
+      // Render results directly
+      renderSemanticResults(results);
+    } catch (err) {
+      $('searchHint').textContent = '';
+      toast(err.toString(), 'error');
+    }
+  }, 400);
+}, true); // capture phase — runs before original handler
+
+function renderSemanticResults(photos) {
+  // Reuse the same grid rendering as tag search
+  // Override currentPhotos temporarily
+  currentPhotos = photos;
+  renderGrid();
+}
+
+// Initialize CLIP settings panel when Settings modal opens
+function initClipSettings() {
+  invoke('get_clip_status').then(tiers => {
+    const list = $('clipTierList');
+    if (!list) return;
+    list.innerHTML = '';
+    tiers.forEach(t => {
+      const info = CLIP_TIER_INFO[t.tier] || {};
+      const card = document.createElement('div');
+      card.className = 'clip-tier-card' + (_clipTierSelected === t.tier ? ' selected' : '');
+      card.innerHTML = `
+        <div class="clip-tier-icon">${info.icon || '⚙️'}</div>
+        <div class="clip-tier-info">
+          <div class="clip-tier-name">${info.name} ${info.badge ? `<span style="font-size:9px;color:var(--amber);margin-left:4px">${info.badge}</span>` : ''}</div>
+          <div class="clip-tier-desc">${info.sub}<br><span style="opacity:.7">${info.desc}</span></div>
+        </div>
+        <div>
+          ${t.downloaded
+            ? `<span class="clip-tier-badge ok">✓ İndirildi</span>`
+            : `<button class="clip-tier-badge dl" onclick="downloadClipTier('${t.tier}',this)">⬇ İndir (${t.size_mb} MB)</button>`
+          }
+        </div>`;
+      card.onclick = e => {
+        if (e.target.tagName === 'BUTTON') return;
+        _clipTierSelected = t.tier;
+        document.querySelectorAll('.clip-tier-card').forEach(c => c.classList.remove('selected'));
+        card.classList.add('selected');
+        updateClipIndexStatus();
+      };
+      list.appendChild(card);
+    });
+    updateClipIndexStatus();
+  }).catch(() => {});
+}
+
+async function downloadClipTier(tier, btn) {
+  btn.disabled = true;
+  btn.textContent = 'İndiriliyor…';
+  try {
+    const msg = await invoke('download_clip_models', { tier });
+    toast(msg, 'success');
+    btn.className = 'clip-tier-badge ok';
+    btn.textContent = '✓ İndirildi';
+    btn.onclick = null;
+  } catch (e) {
+    toast('İndirme hatası: ' + e, 'error');
+    btn.disabled = false;
+    btn.textContent = '⬇ Tekrar dene';
+  }
+  updateClipIndexStatus();
+}
+
+async function updateClipIndexStatus() {
+  try {
+    const count = await invoke('get_clip_index_count', { tier: _clipTierSelected });
+    const totalEl = $('stTotal');
+    const total = totalEl ? parseInt(totalEl.textContent) || '?' : '?';
+    const el = $('clipIndexStatus');
+    if (el) el.textContent = `${count} / ${total} fotoğraf indekslenmiş`;
+  } catch (e) {}
+}
+
+// Index button
+if ($('btnClipIndex')) {
+  $('btnClipIndex').onclick = async () => {
+    const btn = $('btnClipIndex');
+    btn.disabled = true; btn.textContent = 'İndeksleniyor…';
+    // Show progress listener
+    const unsub = await listen('clip-index-progress', ev => {
+      btn.textContent = `İndeksleniyor… ${ev.payload.done}/${ev.payload.total}`;
+    });
+    try {
+      const count = await invoke('index_clip_embeddings', { tier: _clipTierSelected });
+      toast(`${count} fotoğraf semantic olarak indekslendi`, 'success');
+      updateClipIndexStatus();
+    } catch (e) {
+      toast('Hata: ' + e, 'error');
+    } finally {
+      btn.disabled = false; btn.textContent = '⚡ Semantic İndeksle';
+      unsub?.();
+    }
+  };
+}
+
+// Listen for face-recognized event (during batch recognition)
+listen('face-recognized', () => {
+  // refresh handled after recognize_all_faces completes
+});
 </script>
 </body>
 </html>

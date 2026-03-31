@@ -33,11 +33,21 @@ pub fn get_or_create_thumbnail(
     Ok(STANDARD.encode(&bytes))
 }
 
-/// Resize image to max 512px on longest side and return base64 JPEG.
-/// Used before sending to AI APIs to reduce costs.
+/// Resize image to max `max_px` on longest side and return base64 JPEG.
+/// Used before sending to AI APIs to reduce costs and VRAM usage.
 pub fn prepare_for_api(photo_path: &str) -> Result<String> {
+    prepare_for_api_sized(photo_path, 512)
+}
+
+/// Prepare a smaller image specifically for local Ollama inference.
+/// 384px is enough for tagging and uses significantly less VRAM.
+pub fn prepare_for_api_local(photo_path: &str) -> Result<String> {
+    prepare_for_api_sized(photo_path, 384)
+}
+
+fn prepare_for_api_sized(photo_path: &str, max_px: u32) -> Result<String> {
     let img = image::open(photo_path).context("open image for API")?;
-    let thumb = img.resize(512, 512, image::imageops::FilterType::Triangle);
+    let thumb = img.resize(max_px, max_px, image::imageops::FilterType::Triangle);
 
     let mut bytes: Vec<u8> = Vec::new();
     thumb

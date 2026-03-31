@@ -2,6 +2,45 @@ use anyhow::{Context, Result};
 
 use crate::models::AiProvider;
 
+/// Hata türü — tagger bu bilgiyle ne yapacağına karar verir
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApiErrorKind {
+    /// 401/403 — API key yanlış, bu provider'ı devre dışı bırak
+    AuthFailed,
+    /// 429 — Rate limit, bekle ve tekrar dene
+    RateLimit { retry_after_secs: u64 },
+    /// 5xx / timeout — Geçici hata, kısa süre sonra tekrar dene
+    Transient,
+    /// Diğer kalıcı hatalar
+    Permanent,
+}
+
+#[derive(Debug)]
+pub struct ApiError {
+    pub kind: ApiErrorKind,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+impl std::error::Error for ApiError {}
+
+fn classify_status(status: u16, body: &str) -> ApiErrorKind {
+    match status {
+        401 | 403 => ApiErrorKind::AuthFailed,
+        429 => {
+            // Bazı API'ler Retry-After header veya body'de süre verir
+            let secs = body.parse::<u64>().unwrap_or(15);
+            ApiErrorKind::RateLimit { retry_after_secs: secs.min(120) }
+        }
+        500..=599 => ApiErrorKind::Transient,
+        _ => ApiErrorKind::Permanent,
+    }
+}
+
 const TAG_PROMPT: &str = "\
 Analyze this image and return ONLY a JSON array of descriptive English tags. \
 No explanation, no markdown, just the raw JSON array. \
@@ -9,21 +48,55 @@ Include 10-20 tags covering: subjects, objects, colors, mood, setting, \
 activities, visual style, lighting, composition, and any text visible. \
 Use lowercase. Example: [\"outdoor\",\"sunset\",\"mountain\",\"orange sky\",\"silhouette\",\"hiking\"]";
 
+/// Simpler prompt for local Ollama models — more reliable JSON output
+const OLLAMA_TAG_PROMPT: &str = "\
+Look at this image. List 10-15 descriptive tags as a JSON array of strings.
+Tags should describe: people, objects, colors, setting, mood, activities.
+Use lowercase English. Output ONLY the JSON array, nothing else.
+Example output: [\"person\",\"outdoor\",\"sunset\",\"smiling\",\"casual\"]";
+
 /// Parse AI response into tag list, handling various response formats
 pub fn extract_tags(text: &str) -> Vec<String> {
+    let text = text.trim();
+
+    // Strip markdown code blocks: ```json ... ``` or ``` ... ```
+    let cleaned = if let Some(inner) = text.strip_prefix("```json").or_else(|| text.strip_prefix("```")) {
+        inner.trim_end_matches("```").trim()
+    } else {
+        text
+    };
+
     // Try direct JSON parse
-    if let Ok(tags) = serde_json::from_str::<Vec<String>>(text.trim()) {
+    if let Ok(tags) = serde_json::from_str::<Vec<String>>(cleaned) {
         return normalize_tags(tags);
     }
+
     // Find first JSON array in response
-    if let (Some(start), Some(end)) = (text.find('['), text.rfind(']')) {
-        let slice = &text[start..=end];
+    if let (Some(start), Some(end)) = (cleaned.find('['), cleaned.rfind(']')) {
+        let slice = &cleaned[start..=end];
         if let Ok(tags) = serde_json::from_str::<Vec<String>>(slice) {
             return normalize_tags(tags);
         }
     }
-    // Last resort: split by comma/newline
-    let tags: Vec<String> = text
+
+    // Handle "- tag" or "* tag" bullet list format
+    let bullet_tags: Vec<String> = cleaned
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim().trim_start_matches('-').trim_start_matches('*').trim_start_matches('•').trim();
+            if !l.is_empty() && l.len() > 1 && l.len() < 60 && !l.starts_with('{') && !l.starts_with('[') {
+                Some(l.to_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if bullet_tags.len() >= 3 {
+        return normalize_tags(bullet_tags);
+    }
+
+    // Last resort: split by comma
+    let tags: Vec<String> = cleaned
         .lines()
         .flat_map(|l| l.split(','))
         .map(|s| {
@@ -247,8 +320,7 @@ pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 /// Ollama uses the `/api/chat` endpoint with `images` field for base64 data.
 pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result<Vec<String>> {
     let client = reqwest::Client::builder()
-        // Longer timeout for local inference
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
         .unwrap();
 
@@ -257,9 +329,14 @@ pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result
     let body = serde_json::json!({
         "model": model,
         "stream": false,
+        "keep_alive": "5m",
+        "options": {
+            "num_ctx": 4096,
+            "temperature": 0.1
+        },
         "messages": [{
             "role": "user",
-            "content": TAG_PROMPT,
+            "content": OLLAMA_TAG_PROMPT,
             "images": [image_b64]
         }]
     });
@@ -290,8 +367,24 @@ pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result
         ));
     }
 
-    let text = json["message"]["content"].as_str().unwrap_or("[]");
-    Ok(extract_tags(text))
+    let text = json["message"]["content"].as_str().unwrap_or("");
+
+    if text.is_empty() {
+        return Err(anyhow::anyhow!("Ollama returned empty response for model '{}'", model));
+    }
+
+    let tags = extract_tags(text);
+
+    if tags.is_empty() {
+        // Log the raw response to help debug
+        let preview = &text[..text.len().min(200)];
+        return Err(anyhow::anyhow!(
+            "Ollama response could not be parsed into tags. Raw: {}",
+            preview
+        ));
+    }
+
+    Ok(tags)
 }
 
 /// Check if Ollama is reachable and the model is available.

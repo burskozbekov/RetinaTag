@@ -1,6 +1,9 @@
 use std::sync::atomic::Ordering;
 
-use tauri::Emitter;
+use base64::Engine as _;
+use tauri::{Emitter, Manager};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use crate::{db, export, exif_reader, models::*, providers::{self, DEFAULT_OLLAMA_URL}, router::SmartRouter, thumbnail, xmp, AppState};
 
@@ -247,10 +250,45 @@ pub async fn start_tagging(
     stop_flag.store(false, Ordering::SeqCst);
 
     tokio::spawn(async move {
-        let result =
-            crate::tagger::run_tagging(db_arc, stop_flag, app_handle.clone()).await;
+        // Auto-reset error photos to pending before starting
+        {
+            let conn = db_arc.lock().unwrap();
+            let _ = db::reset_error_photos(&conn);
+        }
+
+        let result = crate::tagger::run_tagging(db_arc.clone(), stop_flag, app_handle.clone()).await;
 
         tag_running.store(false, Ordering::SeqCst);
+
+        // Free Ollama model from VRAM after tagging
+        let endpoint = {
+            let conn = db_arc.lock().unwrap();
+            db::get_setting(&conn, "ollama_endpoint").ok().flatten()
+                .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string())
+        };
+        let model = {
+            let conn = db_arc.lock().unwrap();
+            db::get_setting(&conn, "model_local").ok().flatten()
+                .unwrap_or_else(|| "qwen2.5vl:7b".to_string())
+        };
+        let enabled_local = {
+            let conn = db_arc.lock().unwrap();
+            db::get_setting(&conn, "enabled_local").ok().flatten()
+                .map(|v| v == "true" || v == "1").unwrap_or(false)
+        };
+        if enabled_local {
+            let _ = reqwest::Client::new()
+                .post(format!("{}/api/chat", endpoint.trim_end_matches('/')))
+                .json(&serde_json::json!({
+                    "model": model,
+                    "keep_alive": 0,
+                    "messages": []
+                }))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await;
+        }
+
         app_handle.emit("tag-complete", result).ok();
     });
 
@@ -378,38 +416,14 @@ pub async fn get_provider_statuses(
 #[derive(serde::Serialize)]
 pub struct OllamaStatus {
     pub running: bool,
-    pub model_available: bool,
-    pub available_models: Vec<String>,
-    pub endpoint: String,
+    pub model_loaded: bool,
+    pub models: Vec<String>,
+    pub message: String,
 }
 
 #[tauri::command]
 pub async fn check_ollama(state: tauri::State<'_, AppState>) -> Result<OllamaStatus, String> {
-    let endpoint = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::get_setting(&conn, "ollama_endpoint")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string())
-    };
-
-    let model = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::get_setting(&conn, "model_local")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| AiProvider::Local.default_model().to_string())
-    };
-
-    let (running, model_available, available_models) =
-        providers::check_ollama_status(&model, &endpoint).await;
-
-    Ok(OllamaStatus {
-        running,
-        model_available,
-        available_models,
-        endpoint,
-    })
+    get_ollama_status(state).await
 }
 
 // ── Tag autocomplete ─────────────────────────────────────────────────────────
@@ -964,4 +978,1066 @@ pub async fn check_for_updates() -> Result<VersionInfo, String> {
         }
         _ => Ok(VersionInfo { current, latest: None, update_available: false, download_url: None }),
     }
+}
+
+// ── Retry & Stats ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn retry_failed_photos(state: tauri::State<'_, AppState>) -> Result<usize, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::reset_error_photos(&conn).map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct LibraryStats {
+    pub total: usize,
+    pub pending: usize,
+    pub tagged: usize,
+    pub error: usize,
+}
+
+#[tauri::command]
+pub async fn get_library_stats(state: tauri::State<'_, AppState>) -> Result<LibraryStats, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    let (total, pending, tagged, error) = db::get_status_counts(&conn).map_err(|e| e.to_string())?;
+    Ok(LibraryStats { total, pending, tagged, error })
+}
+
+// ── Ollama Service Control ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_ollama_status(state: tauri::State<'_, AppState>) -> Result<OllamaStatus, String> {
+    let endpoint = {
+        let conn = state.db.lock().unwrap();
+        db::get_setting(&conn, "ollama_endpoint")
+            .ok().flatten()
+            .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string())
+    };
+    let model = {
+        let conn = state.db.lock().unwrap();
+        db::get_setting(&conn, "model_local")
+            .ok().flatten()
+            .unwrap_or_else(|| "qwen2.5vl:7b".to_string())
+    };
+
+    let (running, model_loaded, models) = providers::check_ollama_status(&model, &endpoint).await;
+
+    let message = if !running {
+        "Ollama çalışmıyor".to_string()
+    } else if !model_loaded {
+        format!("Ollama çalışıyor ama '{}' modeli yüklü değil", model)
+    } else {
+        format!("Hazır — {} modeli yüklü", model)
+    };
+
+    Ok(OllamaStatus { running, model_loaded, models, message })
+}
+
+#[tauri::command]
+pub async fn start_ollama_service() -> Result<String, String> {
+    // Try to start Ollama in the background
+    #[cfg(target_os = "windows")]
+    {
+        let result = std::process::Command::new("cmd")
+            .args(["/C", "start", "/B", "ollama", "serve"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .spawn();
+
+        match result {
+            Ok(_) => {
+                // Wait a moment for it to start
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                Ok("Ollama başlatılıyor...".to_string())
+            }
+            Err(_) => {
+                // Try alternate path
+                let alt = std::process::Command::new("powershell")
+                    .args(["-WindowStyle", "Hidden", "-Command", "Start-Process ollama -ArgumentList serve -WindowStyle Hidden"])
+                    .spawn();
+                match alt {
+                    Ok(_) => {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        Ok("Ollama başlatılıyor...".to_string())
+                    }
+                    Err(e) => Err(format!("Ollama bulunamadı. Lütfen ollama.com adresinden indirin. Hata: {}", e))
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let result = std::process::Command::new("ollama")
+            .arg("serve")
+            .spawn();
+        match result {
+            Ok(_) => {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                Ok("Ollama başlatılıyor...".to_string())
+            }
+            Err(e) => Err(format!("Ollama bulunamadı: {}", e))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn stop_ollama_service() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "taskkill", "/F", "/IM", "ollama.exe"])
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok("Ollama durduruldu".to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("pkill")
+            .arg("ollama")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok("Ollama durduruldu".to_string())
+    }
+}
+
+/// Test Ollama with a real photo from the library
+#[tauri::command]
+pub async fn test_ollama_raw(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let endpoint = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        db::get_setting(&conn, "ollama_endpoint").ok().flatten()
+            .unwrap_or_else(|| providers::DEFAULT_OLLAMA_URL.to_string())
+    };
+    let model = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        db::get_setting(&conn, "model_local").ok().flatten()
+            .unwrap_or_else(|| "qwen2.5vl:7b".to_string())
+    };
+
+    // Get first real photo from library
+    let photo_path: Option<String> = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        conn.query_row("SELECT path FROM photos LIMIT 1", [], |r| r.get(0)).ok()
+    };
+
+    let photo_path = photo_path.ok_or("Kütüphanede hiç fotoğraf yok")?;
+
+    // Prepare image same way tagger does
+    let image_b64 = tokio::task::spawn_blocking({
+        let p = photo_path.clone();
+        move || thumbnail::prepare_for_api_local(&p)
+    }).await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("Görsel hazırlanamadı: {}", e))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build().map_err(|e| e.to_string())?;
+
+    let url = format!("{}/api/chat", endpoint.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "options": { "num_ctx": 1024, "temperature": 0.1 },
+        "messages": [{
+            "role": "user",
+            "content": "Look at this image. List 10-15 descriptive tags as a JSON array of strings. Output ONLY the JSON array, nothing else. Example: [\"person\",\"outdoor\",\"sunset\"]",
+            "images": [image_b64]
+        }]
+    });
+
+    match client.post(&url).json(&body).send().await {
+        Err(e) => Err(format!("Bağlantı hatası: {}", e)),
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let raw = resp.text().await.unwrap_or_default();
+            // Parse and extract the content field if possible
+            let content = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|j| j["message"]["content"].as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| raw.clone());
+            Ok(format!("HTTP {}\nFotoğraf: {}\n\n--- HAM YANIT ---\n{}\n\n--- CONTENT ---\n{}",
+                status, photo_path, &raw[..raw.len().min(500)], &content[..content.len().min(500)]))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn pull_ollama_model(model: String) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "cmd", "/K", &format!("ollama pull {}", model)])
+            .spawn()
+            .map_err(|e| format!("Ollama pull başlatılamadı: {}", e))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("sh")
+            .args(["-c", &format!("ollama pull {}", model)])
+            .spawn()
+            .map_err(|e| format!("Ollama pull başlatılamadı: {}", e))?;
+    }
+    Ok(format!("'{}' modeli indiriliyor — terminal penceresini takip edin", model))
+}
+
+// ── 14. Face Recognition ─────────────────────────────────────────────────────
+
+fn models_dir_for(app: &tauri::AppHandle) -> std::path::PathBuf {
+    // Store models in AppData/Local/RetinaTag/models (persists across updates)
+    app.path()
+        .app_local_data_dir()
+        .map(|d: std::path::PathBuf| d.join("models"))
+        .unwrap_or_else(|_| {
+            // Fallback: next to the exe
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|p| p.join("models")))
+                .unwrap_or_else(|| std::path::PathBuf::from("models"))
+        })
+}
+
+fn face_thumb_b64(faces_dir: &std::path::Path, face_id: i64) -> Option<String> {
+    let p = faces_dir.join(format!("face_{}.jpg", face_id));
+    std::fs::read(&p)
+        .ok()
+        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+}
+
+/// Detect faces in a photo and compute embeddings. Overwrites previous detections.
+#[tauri::command]
+pub async fn detect_faces_in_photo(
+    photo_id: i64,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<Vec<FaceRegion>, String> {
+    let photo_path: String = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        conn.query_row(
+            "SELECT path FROM photos WHERE id = ?1",
+            rusqlite::params![photo_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?
+    };
+
+    let models_dir = models_dir_for(&app);
+    let db_arc = state.db.clone();
+    let thumbs_dir = state.thumbnails_dir.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<Vec<FaceRegion>, String> {
+        let face_models = crate::face::load_models(&models_dir)
+            .map_err(|e| e.to_string())?;
+
+        let img = image::open(&photo_path)
+            .map_err(|e| format!("Fotoğraf açılamadı: {}", e))?;
+
+        // Clear previous detections for this photo
+        {
+            let conn = db_arc.lock().unwrap();
+            db::delete_faces_for_photo(&conn, photo_id).ok();
+        }
+
+        let detected = crate::face::detect_faces(&face_models, &img)
+            .map_err(|e| format!("Yüz tespiti hatası: {}", e))?;
+
+        let faces_dir = thumbs_dir.join("faces");
+        std::fs::create_dir_all(&faces_dir).ok();
+
+        let mut result = Vec::new();
+
+        for face in &detected {
+            let embedding = crate::face::get_embedding(&face_models, &img, face)
+                .unwrap_or_default();
+            let emb_bytes = crate::face::embedding_to_bytes(&embedding);
+
+            let face_id = {
+                let conn = db_arc.lock().unwrap();
+                db::insert_face_region(
+                    &conn, photo_id,
+                    face.x1, face.y1, face.x2, face.y2,
+                    face.score, &emb_bytes,
+                )
+                .map_err(|e| e.to_string())?
+            };
+
+            // Save 128×128 crop thumbnail
+            let (iw, ih) = (img.width() as i32, img.height() as i32);
+            let pad = ((face.x2 - face.x1).max(face.y2 - face.y1) / 5).max(8);
+            let cx1 = (face.x1 - pad).max(0) as u32;
+            let cy1 = (face.y1 - pad).max(0) as u32;
+            let cx2 = (face.x2 + pad).min(iw) as u32;
+            let cy2 = (face.y2 + pad).min(ih) as u32;
+            let crop = img
+                .crop_imm(cx1, cy1, cx2 - cx1, cy2 - cy1)
+                .resize(128, 128, image::imageops::FilterType::Triangle);
+            let thumb_path = faces_dir.join(format!("face_{}.jpg", face_id));
+            crop.save_with_format(&thumb_path, image::ImageFormat::Jpeg).ok();
+
+            let thumb_b64 = std::fs::read(&thumb_path)
+                .ok()
+                .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+
+            result.push(FaceRegion {
+                id: face_id,
+                photo_id,
+                x1: face.x1, y1: face.y1,
+                x2: face.x2, y2: face.y2,
+                score: face.score,
+                person_id: None,
+                person_name: None,
+                thumbnail_b64: thumb_b64,
+            });
+        }
+
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return previously detected faces for a photo (with thumbnails).
+#[tauri::command]
+pub async fn get_faces_for_photo(
+    photo_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<FaceRegion>, String> {
+    let (rows, thumbs_dir) = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let rows = db::get_faces_for_photo(&conn, photo_id).map_err(|e| e.to_string())?;
+        (rows, state.thumbnails_dir.clone())
+    };
+    let faces_dir = thumbs_dir.join("faces");
+    Ok(rows
+        .into_iter()
+        .map(|r| FaceRegion {
+            id: r.id,
+            photo_id,
+            x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2,
+            score: r.score,
+            person_id: r.person_id,
+            person_name: r.person_name,
+            thumbnail_b64: face_thumb_b64(&faces_dir, r.id),
+        })
+        .collect())
+}
+
+/// Create a new named person.
+#[tauri::command]
+pub async fn create_person(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<i64, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::create_person(&conn, name.trim()).map_err(|e| e.to_string())
+}
+
+/// List all persons with face counts and representative thumbnail.
+#[tauri::command]
+pub async fn get_persons(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Person>, String> {
+    let (rows, thumbs_dir) = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let rows = db::get_persons(&conn).map_err(|e| e.to_string())?;
+        (rows, state.thumbnails_dir.clone())
+    };
+    let faces_dir = thumbs_dir.join("faces");
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            // Use thumbnail file name stored in DB, or fall back to any face of this person
+            let thumbnail = r.thumbnail
+                .as_deref()
+                .and_then(|t| std::fs::read(faces_dir.join(t)).ok())
+                .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+            Person {
+                id: r.id,
+                name: r.name,
+                thumbnail,
+                face_count: r.face_count,
+            }
+        })
+        .collect())
+}
+
+/// Assign (or unassign) a detected face to a person.
+#[tauri::command]
+pub async fn assign_face_to_person(
+    face_id: i64,
+    person_id: Option<i64>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::assign_face_to_person(&conn, face_id, person_id).map_err(|e| e.to_string())?;
+
+    // Update person thumbnail if assigning (use this face as representative)
+    if let Some(pid) = person_id {
+        let thumb_name = format!("face_{}.jpg", face_id);
+        db::update_person_thumbnail(&conn, pid, &thumb_name).ok();
+    }
+    Ok(())
+}
+
+/// Delete a person (faces become unassigned; tags are NOT auto-removed).
+#[tauri::command]
+pub async fn delete_person(
+    person_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::delete_person(&conn, person_id).map_err(|e| e.to_string())
+}
+
+/// Rename a person.
+#[tauri::command]
+pub async fn rename_person(
+    person_id: i64,
+    new_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::rename_person(&conn, person_id, new_name.trim()).map_err(|e| e.to_string())
+}
+
+/// Auto-recognize all unassigned faces by comparing to known person embeddings.
+/// Returns number of faces that were matched.
+#[tauri::command]
+pub async fn recognize_all_faces(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<usize, String> {
+    let known = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        db::get_known_face_embeddings(&conn).map_err(|e| e.to_string())?
+    };
+
+    if known.is_empty() {
+        return Err("Önce birkaç yüzü kişilere atayın, sonra tanıma yapılabilir.".to_string());
+    }
+
+    // Build per-person averaged (mean) embedding
+    let mut person_map: std::collections::HashMap<i64, (String, Vec<f64>, usize)> =
+        std::collections::HashMap::new();
+    for (pid, pname, bytes) in &known {
+        let emb = crate::face::bytes_to_embedding(bytes);
+        if emb.is_empty() {
+            continue;
+        }
+        let entry = person_map
+            .entry(*pid)
+            .or_insert_with(|| (pname.clone(), vec![0.0f64; emb.len()], 0));
+        for (acc, v) in entry.1.iter_mut().zip(&emb) {
+            *acc += *v as f64;
+        }
+        entry.2 += 1;
+    }
+
+    // Normalise to get mean embeddings (as f32)
+    let persons: Vec<(i64, String, Vec<f32>)> = person_map
+        .into_iter()
+        .filter_map(|(pid, (name, sum, cnt))| {
+            if cnt == 0 {
+                return None;
+            }
+            let mean: Vec<f32> = sum.iter().map(|v| (*v / cnt as f64) as f32).collect();
+            // Re-normalise mean embedding
+            let norm: f32 = mean.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if norm < 1e-8 {
+                return None;
+            }
+            let normed: Vec<f32> = mean.iter().map(|v| v / norm).collect();
+            Some((pid, name, normed))
+        })
+        .collect();
+
+    let unassigned = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        db::get_unassigned_faces_with_embeddings(&conn).map_err(|e| e.to_string())?
+    };
+
+    let mut matched = 0usize;
+
+    for (face_id, photo_id, emb_bytes) in &unassigned {
+        let emb = crate::face::bytes_to_embedding(emb_bytes);
+        if emb.is_empty() {
+            continue;
+        }
+
+        // Find best matching person
+        let best = persons
+            .iter()
+            .map(|(pid, name, mean_emb)| {
+                let sim = crate::face::cosine_similarity(&emb, mean_emb);
+                (*pid, name.as_str(), sim)
+            })
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some((pid, person_name, sim)) = best {
+            if sim >= crate::face::RECOGNITION_THRESH {
+                let conn = state.db.lock().map_err(|_| "db lock")?;
+                db::assign_face_to_person(&conn, *face_id, Some(pid)).ok();
+                // Add person name as a tag on the photo
+                let tag = person_name.to_lowercase();
+                db::insert_tags(
+                    &conn,
+                    *photo_id,
+                    &[(tag, sim as f64, "face".to_string())],
+                )
+                .ok();
+                matched += 1;
+                app_handle
+                    .emit(
+                        "face-recognized",
+                        serde_json::json!({
+                            "face_id": face_id,
+                            "photo_id": photo_id,
+                            "person": person_name,
+                            "similarity": sim
+                        }),
+                    )
+                    .ok();
+            }
+        }
+    }
+
+    Ok(matched)
+}
+
+/// Download face recognition models to the models directory.
+#[tauri::command]
+pub async fn download_face_models(app: tauri::AppHandle) -> Result<String, String> {
+    let models_dir = models_dir_for(&app);
+    std::fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
+
+    let det_path = models_dir.join("det_500m.onnx");
+    let emb_path = models_dir.join("w600k_mbf.onnx");
+
+    if det_path.exists() && emb_path.exists() {
+        return Ok("Modeller zaten mevcut.".to_string());
+    }
+
+    // Download buffalo_s zip from InsightFace releases
+    let zip_url = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip";
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let zip_bytes = client
+        .get(zip_url)
+        .header("User-Agent", "RetinaTag/1.1")
+        .send()
+        .await
+        .map_err(|e| format!("İndirme başarısız: {}", e))?
+        .bytes()
+        .await
+        .map_err(|e| format!("İndirme tamamlanamadı: {}", e))?;
+
+    // Extract the two ONNX files from the zip
+    let cursor = std::io::Cursor::new(&zip_bytes[..]);
+    let mut zip = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Zip açılamadı: {}", e))?;
+
+    let mut det_found = false;
+    let mut emb_found = false;
+
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i).map_err(|e| e.to_string())?;
+        let name = file.name().to_string();
+        if name.ends_with("det_500m.onnx") {
+            let mut out = std::fs::File::create(&det_path).map_err(|e| e.to_string())?;
+            std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+            det_found = true;
+        } else if name.ends_with("w600k_mbf.onnx") {
+            let mut out = std::fs::File::create(&emb_path).map_err(|e| e.to_string())?;
+            std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+            emb_found = true;
+        }
+        if det_found && emb_found {
+            break;
+        }
+    }
+
+    if det_found && emb_found {
+        Ok("Yüz tanıma modelleri başarıyla indirildi!".to_string())
+    } else {
+        Err("Zip içinde model dosyaları bulunamadı.".to_string())
+    }
+}
+
+/// Check if face models are present.
+#[tauri::command]
+pub async fn check_face_models(app: tauri::AppHandle) -> Result<bool, String> {
+    let models_dir = models_dir_for(&app);
+    Ok(models_dir.join("det_500m.onnx").exists()
+        && models_dir.join("w600k_mbf.onnx").exists())
+}
+
+// ── 14b. Face Clustering ──────────────────────────────────────────────────────
+
+/// Represents one face cluster returned to the frontend.
+#[derive(serde::Serialize)]
+pub struct FaceClusterResult {
+    /// Thumbnails of a few representative faces (base64 JPEG), max 4.
+    pub thumbnails: Vec<String>,
+    /// face_ids in this cluster.
+    pub face_ids: Vec<i64>,
+    /// photo_ids corresponding to face_ids.
+    pub photo_ids: Vec<i64>,
+    /// How many faces are in this cluster.
+    pub count: usize,
+    /// If already assigned to a person, their name.
+    pub person_name: Option<String>,
+    /// If already assigned to a person, their id.
+    pub person_id: Option<i64>,
+}
+
+/// Scan every photo in a folder (or whole library if folder="") for faces,
+/// then cluster them. Returns clusters for the user to name.
+/// NOTE: only detects faces in photos that don't already have face data.
+#[tauri::command]
+pub async fn scan_and_cluster_faces(
+    folder: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<Vec<FaceClusterResult>, String> {
+    let models_dir = models_dir_for(&app);
+
+    // Check models
+    if !models_dir.join("det_500m.onnx").exists() {
+        return Err("Yüz tanıma modelleri eksik. Lütfen önce modelleri indirin.".to_string());
+    }
+
+    // Get photos to process — careful scoping to satisfy borrow checker
+    let photos: Vec<(i64, String)> = {
+        let sql = if folder.is_empty() {
+            "SELECT id, path FROM photos WHERE status = 'tagged' OR status = 'pending'".to_string()
+        } else {
+            format!(
+                "SELECT id, path FROM photos WHERE folder = '{}' OR path LIKE '{}%'",
+                folder.replace('\'', "''"),
+                folder.replace('\'', "''")
+            )
+        };
+        let result: Result<Vec<(i64, String)>, String> = (|| {
+            let conn = state.db.lock().map_err(|_| "db lock".to_string())?;
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows: Vec<(i64, String)> = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })();
+        result?
+    };
+
+    if photos.is_empty() {
+        return Err("Bu klasörde fotoğraf bulunamadı.".to_string());
+    }
+
+    let thumbs_dir = state.thumbnails_dir.clone();
+    let db_arc = state.db.clone();
+
+    // Run detection + embedding in blocking thread
+    let cluster_results = tokio::task::spawn_blocking(move || -> Result<Vec<FaceClusterResult>, String> {
+        let face_models = crate::face::load_models(&models_dir).map_err(|e| e.to_string())?;
+        let faces_dir = thumbs_dir.join("faces");
+        std::fs::create_dir_all(&faces_dir).ok();
+
+        // Detect faces in all photos (skip already-processed ones)
+        let mut all_embeddings: Vec<(i64, i64, Vec<f32>)> = Vec::new(); // (face_id, photo_id, emb)
+
+        for (photo_id, path) in &photos {
+            // Check if already has faces
+            let already_done = {
+                let conn = db_arc.lock().unwrap();
+                db::photo_has_faces(&conn, *photo_id)
+            };
+
+            if already_done {
+                // Load existing embeddings
+                let rows = {
+                    let conn = db_arc.lock().unwrap();
+                    db::get_faces_for_photo(&conn, *photo_id).unwrap_or_default()
+                };
+                for r in rows {
+                    if let Some(bytes) = r.embedding_bytes {
+                        let emb = crate::face::bytes_to_embedding(&bytes);
+                        if !emb.is_empty() {
+                            all_embeddings.push((r.id, *photo_id, emb));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Detect new faces
+            let img = match image::open(path) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let detected = match crate::face::detect_faces(&face_models, &img) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Clear old detections and insert new ones
+            {
+                let conn = db_arc.lock().unwrap();
+                db::delete_faces_for_photo(&conn, *photo_id).ok();
+            }
+
+            for face in &detected {
+                let embedding = crate::face::get_embedding(&face_models, &img, face)
+                    .unwrap_or_default();
+                let emb_bytes = crate::face::embedding_to_bytes(&embedding);
+
+                let face_id = {
+                    let conn = db_arc.lock().unwrap();
+                    db::insert_face_region(
+                        &conn, *photo_id,
+                        face.x1, face.y1, face.x2, face.y2,
+                        face.score, &emb_bytes,
+                    ).unwrap_or(0)
+                };
+                if face_id == 0 { continue; }
+
+                // Save face thumbnail
+                let (iw, ih) = (img.width() as i32, img.height() as i32);
+                let pad = ((face.x2 - face.x1).max(face.y2 - face.y1) / 5).max(8);
+                let cx1 = (face.x1 - pad).max(0) as u32;
+                let cy1 = (face.y1 - pad).max(0) as u32;
+                let cx2 = (face.x2 + pad).min(iw) as u32;
+                let cy2 = (face.y2 + pad).min(ih) as u32;
+                let crop = img.crop_imm(cx1, cy1, cx2 - cx1, cy2 - cy1)
+                    .resize(128, 128, image::imageops::FilterType::Triangle);
+                crop.save_with_format(faces_dir.join(format!("face_{}.jpg", face_id)),
+                    image::ImageFormat::Jpeg).ok();
+
+                if !embedding.is_empty() {
+                    all_embeddings.push((face_id, *photo_id, embedding));
+                }
+            }
+        }
+
+        if all_embeddings.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Run clustering
+        let face_pairs: Vec<(i64, Vec<f32>)> = all_embeddings
+            .iter()
+            .map(|(fid, _, emb)| (*fid, emb.clone()))
+            .collect();
+        let clusters = crate::face::cluster_embeddings(&face_pairs);
+
+        // Build result
+        let mut results = Vec::new();
+        for cluster in &clusters {
+            if cluster.face_ids.is_empty() { continue; }
+
+            // Get up to 4 thumbnails
+            let mut thumbs = Vec::new();
+            for fid in cluster.face_ids.iter().take(4) {
+                if let Some(b64) = face_thumb_b64(&faces_dir, *fid) {
+                    thumbs.push(b64);
+                }
+            }
+
+            // photo_ids for these faces
+            let photo_ids: Vec<i64> = cluster.face_ids.iter()
+                .filter_map(|fid| all_embeddings.iter().find(|(id,_,_)| id == fid).map(|(_,pid,_)| *pid))
+                .collect();
+
+            // Check if already assigned to a person
+            let (person_name, person_id) = {
+                let conn = db_arc.lock().unwrap();
+                // Check representative face
+                let mut pname = None;
+                let mut pid = None;
+                if let Ok(rows) = db::get_faces_for_photo(&conn, *photo_ids.first().unwrap_or(&0)) {
+                    for r in rows {
+                        if cluster.face_ids.contains(&r.id) {
+                            pname = r.person_name;
+                            pid = r.person_id;
+                            break;
+                        }
+                    }
+                }
+                (pname, pid)
+            };
+
+            results.push(FaceClusterResult {
+                thumbnails: thumbs,
+                face_ids: cluster.face_ids.clone(),
+                photo_ids,
+                count: cluster.face_ids.len(),
+                person_name,
+                person_id,
+            });
+        }
+
+        Ok(results)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    cluster_results
+}
+
+/// Assign all faces in a cluster to a person (create if name given, use existing if id given).
+#[tauri::command]
+pub async fn assign_cluster_to_person(
+    face_ids: Vec<i64>,
+    photo_ids: Vec<i64>,
+    person_id: Option<i64>,
+    person_name: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<i64, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+
+    // Resolve or create the person
+    let pid = if let Some(id) = person_id {
+        id
+    } else if let Some(ref name) = person_name {
+        // Try find existing person with this name first
+        let existing: Option<i64> = conn.query_row(
+            "SELECT id FROM persons WHERE name = ?1",
+            rusqlite::params![name.trim()],
+            |r| r.get(0),
+        ).ok();
+        if let Some(id) = existing {
+            id
+        } else {
+            db::create_person(&conn, name.trim()).map_err(|e| e.to_string())?
+        }
+    } else {
+        return Err("person_id veya person_name gerekli".to_string());
+    };
+
+    // Assign every face in the cluster
+    for face_id in &face_ids {
+        db::assign_face_to_person(&conn, *face_id, Some(pid)).ok();
+    }
+
+    // Set representative thumbnail (first face)
+    if let Some(first_id) = face_ids.first() {
+        let thumb_name = format!("face_{}.jpg", first_id);
+        db::update_person_thumbnail(&conn, pid, &thumb_name).ok();
+    }
+
+    // Add person name as a tag to all involved photos
+    let tag = if let Some(ref name) = person_name {
+        name.trim().to_lowercase()
+    } else {
+        // Look up name from DB
+        conn.query_row(
+            "SELECT name FROM persons WHERE id = ?1",
+            rusqlite::params![pid],
+            |r| r.get::<_, String>(0),
+        ).unwrap_or_default().to_lowercase()
+    };
+
+    let unique_photo_ids: std::collections::HashSet<i64> = photo_ids.into_iter().collect();
+    if !tag.is_empty() {
+        for photo_id in unique_photo_ids {
+            db::insert_tags(&conn, photo_id, &[(tag.clone(), 1.0, "face".to_string())]).ok();
+        }
+    }
+
+    Ok(pid)
+}
+
+// ── 15. CLIP Semantic Search ──────────────────────────────────────────────────
+
+fn clip_models_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    app.path()
+        .app_local_data_dir()
+        .map(|d: std::path::PathBuf| d.join("models"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("models"))
+}
+
+/// Check which CLIP tiers are downloaded.
+#[tauri::command]
+pub async fn get_clip_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let base = clip_models_dir(&app);
+    let tiers = [crate::clip::ClipTier::Fast, crate::clip::ClipTier::Balanced, crate::clip::ClipTier::Best];
+    let statuses: Vec<serde_json::Value> = tiers.iter().map(|t| {
+        let dir = base.join(t.dir_name());
+        let downloaded = dir.join("visual.onnx").exists() && dir.join("textual.onnx").exists();
+        serde_json::json!({
+            "tier": t,
+            "label": t.label(),
+            "size_mb": t.size_mb(),
+            "downloaded": downloaded,
+        })
+    }).collect();
+    Ok(serde_json::json!(statuses))
+}
+
+/// Download models for the given tier.
+#[tauri::command]
+pub async fn download_clip_models(
+    tier: crate::clip::ClipTier,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let base = clip_models_dir(&app);
+    let dir  = base.join(tier.dir_name());
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let (vis_url, txt_url, vocab_url, merges_url) = tier.urls();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    async fn dl(client: &reqwest::Client, url: &str, dest: &std::path::Path) -> Result<(), String> {
+        if dest.exists() { return Ok(()); }
+        let bytes = client.get(url)
+            .header("User-Agent", "RetinaTag/1.2")
+            .send().await.map_err(|e| format!("İndirme hatası {}: {}", url, e))?
+            .bytes().await.map_err(|e| e.to_string())?;
+        std::fs::write(dest, &bytes).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    dl(&client, &vis_url,    &dir.join("visual.onnx"    )).await?;
+    dl(&client, &txt_url,    &dir.join("textual.onnx"   )).await?;
+    dl(&client, &vocab_url,  &dir.join("clip_vocab.json")).await?;
+    dl(&client, &merges_url, &dir.join("clip_merges.txt")).await?;
+
+    Ok(format!("{} modeli indirildi!", tier.label()))
+}
+
+/// Index all photos: compute CLIP image embeddings and store in DB.
+#[tauri::command]
+pub async fn index_clip_embeddings(
+    tier: crate::clip::ClipTier,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<usize, String> {
+    let base = clip_models_dir(&app);
+
+    // Photos that haven't been indexed with this tier yet
+    let photos: Vec<(i64, String)> = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        db::get_photos_without_clip_emb(&conn, tier.dir_name()).map_err(|e| e.to_string())?
+    };
+
+    if photos.is_empty() {
+        return Ok(0);
+    }
+
+    let db_arc      = state.db.clone();
+    let tier_name   = tier.dir_name().to_string();
+    let app_clone   = app.clone();
+
+    let indexed = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let mut engine = crate::clip::load_engine(&base, tier).map_err(|e| e.to_string())?;
+        let total  = photos.len();
+        let mut done = 0usize;
+
+        for (photo_id, path) in &photos {
+            let img = match image::open(path) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let emb = match crate::clip::encode_image(&mut engine, &img) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let bytes = crate::clip::embedding_to_bytes(&emb);
+            {
+                let conn = db_arc.lock().unwrap();
+                db::save_clip_embedding(&conn, *photo_id, &bytes, &tier_name).ok();
+            }
+            done += 1;
+            if done % 20 == 0 {
+                app_clone.emit("clip-index-progress", serde_json::json!({
+                    "done": done, "total": total
+                })).ok();
+            }
+        }
+        Ok(done)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    indexed
+}
+
+/// Semantic search: encode query text with CLIP, return top-N most similar photos.
+#[tauri::command]
+pub async fn semantic_search(
+    query: String,
+    tier: crate::clip::ClipTier,
+    limit: usize,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<Vec<PhotoSummary>, String> {
+    if query.trim().is_empty() {
+        return Ok(vec![]);
+    }
+
+    let base = clip_models_dir(&app);
+
+    // Load all embeddings from DB
+    let photo_embs: Vec<(i64, Vec<u8>)> = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        db::get_photos_with_clip_emb(&conn, tier.dir_name()).map_err(|e| e.to_string())?
+    };
+
+    if photo_embs.is_empty() {
+        return Err("Önce 'Semantic İndeksle' butonuna basarak fotoğrafları indeksleyin.".to_string());
+    }
+
+    let query_owned = query.trim().to_string();
+    let db_arc = state.db.clone();
+
+    let results = tokio::task::spawn_blocking(move || -> Result<Vec<PhotoSummary>, String> {
+        let mut engine = crate::clip::load_engine(&base, tier).map_err(|e| e.to_string())?;
+        let query_emb = crate::clip::encode_text(&mut engine, &query_owned).map_err(|e| e.to_string())?;
+
+        // Compute cosine similarity for all indexed photos
+        let mut scored: Vec<(i64, f32)> = photo_embs
+            .iter()
+            .map(|(pid, bytes)| {
+                let emb = crate::clip::bytes_to_embedding(bytes);
+                let sim = crate::clip::cosine_similarity(&query_emb, &emb);
+                (*pid, sim)
+            })
+            .collect();
+
+        // Sort by similarity descending
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit.max(1).min(200));
+
+        // Filter: only show results above a reasonable threshold
+        let threshold = 0.20f32;
+        let top_ids: Vec<i64> = scored
+            .into_iter()
+            .filter(|(_, s)| *s >= threshold)
+            .map(|(id, _)| id)
+            .collect();
+
+        let conn = db_arc.lock().unwrap();
+        db::get_photos_by_ids(&conn, &top_ids).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    results
+}
+
+/// How many photos have been CLIP-indexed for a given tier.
+#[tauri::command]
+pub async fn get_clip_index_count(
+    tier: crate::clip::ClipTier,
+    state: tauri::State<'_, AppState>,
+) -> Result<i64, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    Ok(db::count_clip_indexed(&conn, tier.dir_name()))
 }

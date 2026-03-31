@@ -5,10 +5,13 @@ use std::sync::{
 
 use tauri::Manager;
 
+mod clip;
+mod clip_tokenizer;
 mod commands;
 mod db;
 mod export;
 mod exif_reader;
+mod face;
 mod models;
 mod providers;
 mod router;
@@ -123,6 +126,32 @@ pub fn run() {
             commands::natural_language_search,
             // 13. Update check
             commands::check_for_updates,
+            commands::retry_failed_photos,
+            commands::get_library_stats,
+            commands::test_ollama_raw,
+            commands::get_ollama_status,
+            commands::start_ollama_service,
+            commands::stop_ollama_service,
+            commands::pull_ollama_model,
+            // 14. Face Recognition
+            commands::detect_faces_in_photo,
+            commands::get_faces_for_photo,
+            commands::create_person,
+            commands::get_persons,
+            commands::assign_face_to_person,
+            commands::delete_person,
+            commands::rename_person,
+            commands::recognize_all_faces,
+            commands::download_face_models,
+            commands::check_face_models,
+            commands::scan_and_cluster_faces,
+            commands::assign_cluster_to_person,
+            // 15. CLIP Semantic Search
+            commands::get_clip_status,
+            commands::download_clip_models,
+            commands::index_clip_embeddings,
+            commands::semantic_search,
+            commands::get_clip_index_count,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -24,9 +24,18 @@ pub fn is_image_file(path: &Path) -> bool {
 }
 
 pub fn compute_hash(path: &str) -> Result<String> {
-    let data = std::fs::read(path)?;
+    use std::io::Read;
+    // Chunked reading — safe for large RAW files (50MB+)
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("Dosya açılamadı '{}': {}", path, e))?;
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     let mut hasher = Sha256::new();
-    hasher.update(&data);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -150,7 +159,19 @@ pub async fn scan_folder_impl(
         match result {
             Ok(Ok(true)) => new_files += 1,
             Ok(Ok(false)) => skipped += 1,
-            _ => {}
+            Ok(Err(e)) => {
+                // Log scan error for this file but continue
+                app_handle.emit("scan-file-error", serde_json::json!({
+                    "file": path.to_string_lossy(),
+                    "error": e.to_string()
+                })).ok();
+            }
+            Err(e) => {
+                app_handle.emit("scan-file-error", serde_json::json!({
+                    "file": path.to_string_lossy(),
+                    "error": format!("İşlem hatası: {}", e)
+                })).ok();
+            }
         }
     }
 

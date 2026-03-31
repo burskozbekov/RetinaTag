@@ -322,6 +322,30 @@ pub struct BudgetStatus {
     pub is_over: bool,
 }
 
+// ── Face Recognition ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Person {
+    pub id: i64,
+    pub name: String,
+    pub thumbnail: Option<String>, // base64-encoded JPEG of representative face
+    pub face_count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FaceRegion {
+    pub id: i64,
+    pub photo_id: i64,
+    pub x1: i32,
+    pub y1: i32,
+    pub x2: i32,
+    pub y2: i32,
+    pub score: f32,
+    pub person_id: Option<i64>,
+    pub person_name: Option<String>,
+    pub thumbnail_b64: Option<String>, // base64-encoded 128×128 JPEG crop
+}
+
 // ── Cost Dashboard ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]

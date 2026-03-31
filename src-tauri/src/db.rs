@@ -133,6 +133,37 @@ pub fn init_db(path: &str) -> Result<Connection> {
          CREATE INDEX IF NOT EXISTS idx_photos_phash ON photos(phash);",
     )?;
 
+    // CLIP semantic embedding column (added later, ignore if exists)
+    conn.execute_batch("ALTER TABLE photos ADD COLUMN clip_emb BLOB;").ok();
+    conn.execute_batch("ALTER TABLE photos ADD COLUMN clip_tier TEXT;").ok();
+
+    // Face recognition tables (idempotent)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS persons (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            thumbnail   TEXT,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_persons_name ON persons(name);
+
+        CREATE TABLE IF NOT EXISTS face_regions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            photo_id    INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+            x1          INTEGER NOT NULL,
+            y1          INTEGER NOT NULL,
+            x2          INTEGER NOT NULL,
+            y2          INTEGER NOT NULL,
+            score       REAL NOT NULL DEFAULT 0,
+            embedding   BLOB,
+            person_id   INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_faces_photo  ON face_regions(photo_id);
+        CREATE INDEX IF NOT EXISTS idx_faces_person ON face_regions(person_id);",
+    )
+    .ok(); // ok() — safe to run repeatedly
+
     Ok(conn)
 }
 
@@ -606,6 +637,24 @@ pub fn get_pending_photos(conn: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(rows)
 }
 
+/// Reset all 'error' status photos back to 'pending' so they can be retried
+pub fn reset_error_photos(conn: &Connection) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE photos SET status = 'pending' WHERE status = 'error'",
+        [],
+    )?;
+    Ok(count)
+}
+
+/// Get count of photos by status
+pub fn get_status_counts(conn: &Connection) -> Result<(usize, usize, usize, usize)> {
+    let pending: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='pending'", [], |r| r.get(0)).unwrap_or(0);
+    let tagged: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='tagged'", [], |r| r.get(0)).unwrap_or(0);
+    let error: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='error'", [], |r| r.get(0)).unwrap_or(0);
+    let total: usize = conn.query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0)).unwrap_or(0);
+    Ok((total, pending, tagged, error))
+}
+
 pub fn get_photo_path_and_hash(conn: &Connection, id: i64) -> Result<(String, String)> {
     Ok(conn.query_row(
         "SELECT path, hash FROM photos WHERE id = ?1",
@@ -984,3 +1033,299 @@ pub fn get_all_tags(conn: &Connection, prefix: Option<&str>) -> Result<Vec<(Stri
         .collect();
     Ok(tags)
 }
+
+// ── Face Recognition ─────────────────────────────────────────────────────────
+
+pub struct FaceRegionRow {
+    pub id: i64,
+    pub x1: i32,
+    pub y1: i32,
+    pub x2: i32,
+    pub y2: i32,
+    pub score: f32,
+    pub embedding_bytes: Option<Vec<u8>>,
+    pub person_id: Option<i64>,
+    pub person_name: Option<String>,
+}
+
+pub struct PersonRow {
+    pub id: i64,
+    pub name: String,
+    pub thumbnail: Option<String>,
+    pub face_count: i64,
+}
+
+pub fn insert_face_region(
+    conn: &Connection,
+    photo_id: i64,
+    x1: i32, y1: i32, x2: i32, y2: i32,
+    score: f32,
+    embedding: &[u8],
+) -> Result<i64> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO face_regions (photo_id, x1, y1, x2, y2, score, embedding, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![photo_id, x1, y1, x2, y2, score as f64, embedding, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn delete_faces_for_photo(conn: &Connection, photo_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM face_regions WHERE photo_id = ?1", params![photo_id])?;
+    Ok(())
+}
+
+pub fn get_faces_for_photo(conn: &Connection, photo_id: i64) -> Result<Vec<FaceRegionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.x1, f.y1, f.x2, f.y2, f.score, f.embedding, f.person_id, p.name
+         FROM face_regions f
+         LEFT JOIN persons p ON f.person_id = p.id
+         WHERE f.photo_id = ?1
+         ORDER BY f.x1",
+    )?;
+    let rows = stmt
+        .query_map(params![photo_id], |r| {
+            Ok(FaceRegionRow {
+                id: r.get(0)?,
+                x1: r.get(1)?,
+                y1: r.get(2)?,
+                x2: r.get(3)?,
+                y2: r.get(4)?,
+                score: r.get::<_, f64>(5)? as f32,
+                embedding_bytes: r.get(6)?,
+                person_id: r.get(7)?,
+                person_name: r.get(8)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+pub fn assign_face_to_person(
+    conn: &Connection,
+    face_id: i64,
+    person_id: Option<i64>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE face_regions SET person_id = ?1 WHERE id = ?2",
+        params![person_id, face_id],
+    )?;
+    Ok(())
+}
+
+/// Returns (face_id, photo_id, embedding_bytes) for unassigned faces with embeddings.
+pub fn get_unassigned_faces_with_embeddings(
+    conn: &Connection,
+) -> Result<Vec<(i64, i64, Vec<u8>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, photo_id, embedding FROM face_regions
+         WHERE embedding IS NOT NULL AND person_id IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Returns all (person_id, person_name, embedding_bytes) for faces already assigned to persons.
+pub fn get_known_face_embeddings(
+    conn: &Connection,
+) -> Result<Vec<(i64, String, Vec<u8>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, f.embedding
+         FROM persons p
+         INNER JOIN face_regions f ON f.person_id = p.id
+         WHERE f.embedding IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+pub fn create_person(conn: &Connection, name: &str) -> Result<i64> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO persons (name, created_at) VALUES (?1, ?2)",
+        params![name, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn get_persons(conn: &Connection) -> Result<Vec<PersonRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, p.thumbnail, COUNT(f.id) as face_count
+         FROM persons p
+         LEFT JOIN face_regions f ON f.person_id = p.id
+         GROUP BY p.id
+         ORDER BY p.name",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(PersonRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                thumbnail: r.get(2)?,
+                face_count: r.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+pub fn delete_person(conn: &Connection, person_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM persons WHERE id = ?1", params![person_id])?;
+    Ok(())
+}
+
+pub fn rename_person(conn: &Connection, person_id: i64, new_name: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE persons SET name = ?1 WHERE id = ?2",
+        params![new_name, person_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_person_thumbnail(conn: &Connection, person_id: i64, thumb: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE persons SET thumbnail = ?1 WHERE id = ?2",
+        params![thumb, person_id],
+    )?;
+    Ok(())
+}
+
+/// True if there are already detected faces for this photo.
+pub fn photo_has_faces(conn: &Connection, photo_id: i64) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM face_regions WHERE photo_id = ?1",
+        params![photo_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+// ── CLIP Semantic Search ──────────────────────────────────────────────────────
+
+/// Save a CLIP embedding for a photo.
+pub fn save_clip_embedding(
+    conn: &Connection,
+    photo_id: i64,
+    emb_bytes: &[u8],
+    tier: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE photos SET clip_emb = ?1, clip_tier = ?2 WHERE id = ?3",
+        params![emb_bytes, tier, photo_id],
+    )?;
+    Ok(())
+}
+
+/// Returns (photo_id, clip_emb_bytes) for all photos with a CLIP embedding
+/// matching the given tier (or any tier if tier is empty).
+pub fn get_photos_with_clip_emb(
+    conn: &Connection,
+    tier: &str,
+) -> Result<Vec<(i64, Vec<u8>)>> {
+    let sql = if tier.is_empty() {
+        "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL".to_string()
+    } else {
+        format!(
+            "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL AND clip_tier = '{}'",
+            tier.replace('\'', "''")
+        )
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Returns photo_ids that do NOT yet have a CLIP embedding for the given tier.
+pub fn get_photos_without_clip_emb(conn: &Connection, tier: &str) -> Result<Vec<(i64, String)>> {
+    let sql = format!(
+        "SELECT id, path FROM photos WHERE clip_emb IS NULL OR clip_tier != '{}'",
+        tier.replace('\'', "''")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Count how many photos have CLIP embeddings for a given tier.
+pub fn count_clip_indexed(conn: &Connection, tier: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM photos WHERE clip_emb IS NOT NULL AND clip_tier = ?1",
+        params![tier],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// Get photo summaries by a list of IDs (for returning semantic search results).
+pub fn get_photos_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<super::models::PhotoSummary>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let placeholders = ids.iter().enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT p.id, p.path, p.filename, p.status, p.provider_used,
+                GROUP_CONCAT(t.tag, ',') as tags, COUNT(t.id) as tag_count
+         FROM photos p
+         LEFT JOIN tags t ON t.photo_id = p.id
+         WHERE p.id IN ({})
+         GROUP BY p.id",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let rows = stmt
+        .query_map(params_refs.as_slice(), |r| {
+            let tags_str: Option<String> = r.get(5)?;
+            let tags: Vec<String> = tags_str
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            Ok(super::models::PhotoSummary {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                filename: r.get(2)?,
+                status: r.get(3)?,
+                provider_used: r.get(4)?,
+                tags,
+                tag_count: r.get(6)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+

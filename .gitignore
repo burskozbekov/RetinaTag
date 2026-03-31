@@ -9,3 +9,6 @@ dist/*.js.map
 *.db
 *.db-shm
 *.db-wal
+
+# Face recognition model binaries (download with download_models.ps1)
+src-tauri/models/*.onnx

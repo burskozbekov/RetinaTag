@@ -148,9 +148,21 @@ impl SmartRouter {
         self.error_streak.insert(provider, 0);
     }
 
+    /// Permanently disable a provider this session (e.g. invalid API key)
+    pub fn disable_provider(&mut self, provider: AiProvider) {
+        self.error_streak.insert(provider, self.max_errors + 1);
+        self.keys.remove(&provider);
+    }
+
     /// Check how many providers are available
     pub fn provider_count(&self) -> usize {
         self.available_providers().len()
+    }
+
+    /// Check if the only active provider is local Ollama
+    pub fn is_local_only(&self) -> bool {
+        let providers = self.available_providers();
+        providers.len() == 1 && providers[0] == AiProvider::Local
     }
 
     /// Get the cheapest available provider for text-only tasks (translation)

@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 use crate::{
     db,
     models::*,
-    providers,
+    providers::{self, ApiErrorKind},
     router::SmartRouter,
     thumbnail,
 };
@@ -59,8 +59,13 @@ pub async fn run_tagging(
     let completed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
 
-    // Concurrency: scale with number of providers (each has its own rate limits)
-    let concurrency = (provider_count * 3).max(2).min(16);
+    // Concurrency: local Ollama can only handle 1 at a time (serial processing).
+    // Cloud APIs can run in parallel. Check if the only provider is Local.
+    let is_local_only = {
+        let r = router.lock().unwrap();
+        r.is_local_only()
+    };
+    let concurrency = if is_local_only { 1 } else { (provider_count * 3).max(2).min(16) };
     let sem = Arc::new(Semaphore::new(concurrency));
 
     // Provider breakdown tracker
@@ -96,23 +101,7 @@ pub async fn run_tagging(
                     .to_string_lossy()
                     .to_string();
 
-                // Resize image for API
-                let image_b64 = match tokio::task::spawn_blocking({
-                    let p = photo_path.clone();
-                    move || thumbnail::prepare_for_api(&p)
-                })
-                .await
-                {
-                    Ok(Ok(b)) => b,
-                    _ => {
-                        fail.fetch_add(1, Ordering::Relaxed);
-                        let conn = db.lock().unwrap();
-                        db::update_photo_status(&conn, photo_id, "error").ok();
-                        return;
-                    }
-                };
-
-                // Get route from smart router
+                // Get route from smart router first so we know if it's local
                 let route = {
                     let mut r = router.lock().unwrap();
                     r.next_route()
@@ -126,11 +115,52 @@ pub async fn run_tagging(
                     }
                 };
 
+                // Resize image — smaller for local Ollama to save VRAM
+                let is_local = route.provider == AiProvider::Local;
+                let image_b64 = match tokio::task::spawn_blocking({
+                    let p = photo_path.clone();
+                    move || {
+                        if is_local {
+                            thumbnail::prepare_for_api_local(&p)
+                        } else {
+                            thumbnail::prepare_for_api(&p)
+                        }
+                    }
+                })
+                .await
+                {
+                    Ok(Ok(b)) => b,
+                    Ok(Err(e)) => {
+                        ah.emit("tag-provider-error", serde_json::json!({
+                            "provider": route.provider.name(),
+                            "file": &filename,
+                            "error": format!("Görsel açılamadı: {}", e),
+                            "kind": "ImagePrep"
+                        })).ok();
+                        fail.fetch_add(1, Ordering::Relaxed);
+                        let conn = db.lock().unwrap();
+                        db::update_photo_status(&conn, photo_id, "error").ok();
+                        return;
+                    }
+                    Err(e) => {
+                        ah.emit("tag-provider-error", serde_json::json!({
+                            "provider": route.provider.name(),
+                            "file": &filename,
+                            "error": format!("Görsel işleme thread hatası: {}", e),
+                            "kind": "ImagePrep"
+                        })).ok();
+                        fail.fetch_add(1, Ordering::Relaxed);
+                        let conn = db.lock().unwrap();
+                        db::update_photo_status(&conn, photo_id, "error").ok();
+                        return;
+                    }
+                };
+
                 let mut current_provider = route.provider;
                 let mut current_key = route.api_key;
                 let mut current_model = route.model;
                 let mut attempt = 0;
-                let max_attempts = 3;
+                const MAX_ATTEMPTS: usize = 4;
 
                 loop {
                     attempt += 1;
@@ -171,65 +201,93 @@ pub async fn run_tagging(
                                 let conn = db.lock().unwrap();
                                 db::insert_tags(&conn, photo_id, &tag_tuples).ok();
                                 db::update_photo_status(&conn, photo_id, "tagged").ok();
-                                db::update_photo_provider(&conn, photo_id, &provider_name)
-                                    .ok();
-                                db::record_usage(&conn, &provider_name, photo_id, true, cost)
-                                    .ok();
+                                db::update_photo_provider(&conn, photo_id, &provider_name).ok();
+                                db::record_usage(&conn, &provider_name, photo_id, true, cost).ok();
                             }
-
-                            {
-                                let mut r = router.lock().unwrap();
-                                r.report_success(current_provider);
-                            }
-
-                            {
-                                let mut bd = bd.lock().unwrap();
-                                let entry = bd.entry(provider_name).or_insert((0, 0.0));
-                                entry.0 += 1;
-                                entry.1 += cost;
-                            }
-
+                            { router.lock().unwrap().report_success(current_provider); }
+                            { let mut b = bd.lock().unwrap(); let e = b.entry(provider_name).or_insert((0,0.0)); e.0+=1; e.1+=cost; }
                             done.fetch_add(1, Ordering::Relaxed);
                             break;
                         }
-                        Ok(_) | Err(_) => {
-                            // Record failure
-                            {
-                                let conn = db.lock().unwrap();
-                                db::record_usage(
-                                    &conn,
-                                    current_provider.key_name(),
-                                    photo_id,
-                                    false,
-                                    0.0,
-                                )
-                                .ok();
-                            }
 
-                            if attempt >= max_attempts {
+                        Ok(_) => {
+                            // Empty tag list — retry same provider with brief wait
+                            if attempt >= MAX_ATTEMPTS {
                                 let conn = db.lock().unwrap();
                                 db::update_photo_status(&conn, photo_id, "error").ok();
                                 fail.fetch_add(1, Ordering::Relaxed);
                                 break;
                             }
+                            // Short wait then retry (don't switch provider yet)
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
 
-                            // Try fallback provider
-                            let fallback = {
-                                let mut r = router.lock().unwrap();
-                                r.fallback_route(current_provider)
+                        Err(e) => {
+                            // Classify the error
+                            let kind = if let Some(api_err) = e.downcast_ref::<providers::ApiError>() {
+                                api_err.kind.clone()
+                            } else {
+                                let msg = e.to_string().to_lowercase();
+                                if msg.contains("401") || msg.contains("403") || msg.contains("unauthorized") || msg.contains("invalid api key") {
+                                    ApiErrorKind::AuthFailed
+                                } else if msg.contains("429") || msg.contains("rate limit") || msg.contains("too many") {
+                                    ApiErrorKind::RateLimit { retry_after_secs: 15 }
+                                } else if msg.contains("500") || msg.contains("502") || msg.contains("503") || msg.contains("timeout") {
+                                    ApiErrorKind::Transient
+                                } else {
+                                    ApiErrorKind::Permanent
+                                }
                             };
 
-                            match fallback {
-                                Some(fb) => {
-                                    current_provider = fb.provider;
-                                    current_key = fb.api_key;
-                                    current_model = fb.model;
+                            // Emit error details to frontend
+                            ah.emit("tag-provider-error", serde_json::json!({
+                                "provider": current_provider.name(),
+                                "file": &filename,
+                                "error": e.to_string(),
+                                "kind": format!("{:?}", kind)
+                            })).ok();
+
+                            { let conn=db.lock().unwrap(); db::record_usage(&conn,current_provider.key_name(),photo_id,false,0.0).ok(); }
+
+                            match kind {
+                                ApiErrorKind::AuthFailed => {
+                                    // API key geçersiz — bu provider'ı tamamen devre dışı bırak
+                                    router.lock().unwrap().disable_provider(current_provider);
+                                    ah.emit("tag-auth-error", serde_json::json!({
+                                        "provider": current_provider.name(),
+                                        "message": format!("{} API anahtarı geçersiz. Lütfen Ayarlar'dan kontrol edin.", current_provider.name())
+                                    })).ok();
+                                    // Başka provider var mı?
+                                    match router.lock().unwrap().fallback_route(current_provider) {
+                                        Some(fb) => { current_provider=fb.provider; current_key=fb.api_key; current_model=fb.model; }
+                                        None => { let conn=db.lock().unwrap(); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break; }
+                                    }
                                 }
-                                None => {
-                                    let conn = db.lock().unwrap();
-                                    db::update_photo_status(&conn, photo_id, "error").ok();
-                                    fail.fetch_add(1, Ordering::Relaxed);
-                                    break;
+                                ApiErrorKind::RateLimit { retry_after_secs } => {
+                                    // Rate limit — bekle ve aynı provider'la tekrar dene
+                                    ah.emit("tag-rate-limit", serde_json::json!({
+                                        "provider": current_provider.name(),
+                                        "wait_secs": retry_after_secs
+                                    })).ok();
+                                    tokio::time::sleep(std::time::Duration::from_secs(retry_after_secs)).await;
+                                    attempt -= 1; // Bu denemeyi saymıyoruz
+                                }
+                                ApiErrorKind::Transient => {
+                                    // Geçici hata — kısa bekle
+                                    if attempt >= MAX_ATTEMPTS {
+                                        let conn=db.lock().unwrap(); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break;
+                                    }
+                                    let wait = std::time::Duration::from_millis(500 * 2u64.pow(attempt as u32 - 1));
+                                    tokio::time::sleep(wait).await;
+                                }
+                                ApiErrorKind::Permanent => {
+                                    if attempt >= MAX_ATTEMPTS {
+                                        let conn=db.lock().unwrap(); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break;
+                                    }
+                                    match router.lock().unwrap().fallback_route(current_provider) {
+                                        Some(fb) => { current_provider=fb.provider; current_key=fb.api_key; current_model=fb.model; }
+                                        None => { let conn=db.lock().unwrap(); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break; }
+                                    }
                                 }
                             }
                         }
