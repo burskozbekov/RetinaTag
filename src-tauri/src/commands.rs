@@ -1682,7 +1682,8 @@ pub async fn recognize_all_faces(
     };
 
     if known.is_empty() {
-        return Err("Please assign some faces to people first, then recognition can be performed.".to_string());
+        // No known persons yet — nothing to recognize against, that's fine
+        return Ok(0);
     }
 
     // Build per-person averaged (mean) embedding

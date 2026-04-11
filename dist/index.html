@@ -1177,7 +1177,6 @@ async function addToCollectionPrompt(photoId){
 
 // ── Add folder ────────────────────────────────────────────────────────────────
 $('btnAddFolder').onclick=async()=>{
-  toast('Button clicked! Calling dialog…','info');
   try{
     const folder=await invoke('open_folder_dialog');
     if(!folder){toast('No folder selected (cancelled)','info');return;}
@@ -1392,11 +1391,15 @@ $('btnScanFacesAll').onclick=async()=>{
     }
     // Detect faces in all unscanned photos
     toast('Detecting faces in photos…','info');
-    const newFaces=await invoke('detect_faces_background').catch(e=>{throw new Error('Detection failed: '+e);});
+    let newFaces=0;
+    try{ newFaces=await invoke('detect_faces_background'); }
+    catch(e){ toast('Face detection: '+e,'warn'); }
     if(newFaces>0) toast(`${newFaces} new face(s) detected`,'info');
-    // Recognize known faces
-    const recognized=await invoke('recognize_all_faces').catch(()=>0);
-    if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
+    // Recognize known faces (may fail if no persons defined yet — that's OK)
+    try{
+      const recognized=await invoke('recognize_all_faces');
+      if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
+    }catch(_){}
     // Show popup for unknown faces
     await checkUnknownFaces(true);
     refreshPersonsSidebar();
