@@ -51,7 +51,9 @@ impl SmartRouter {
                         .ok()
                         .flatten()
                         .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
-                    keys.insert(*provider, endpoint);
+                    let local_model = models.get(provider).cloned().unwrap_or_else(|| "gemma3:4b".to_string());
+                    // Pack endpoint|model so translate_query can use the right model
+                    keys.insert(*provider, format!("{}|{}", endpoint, local_model));
                 }
             } else {
                 let key_setting = format!("api_key_{}", provider.key_name());

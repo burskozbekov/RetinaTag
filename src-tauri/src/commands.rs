@@ -187,18 +187,57 @@ pub async fn search_photos(
         let conn = state.db.lock().map_err(|_| "db lock")?;
         db::search_photos_multi(&conn, &all_terms).map_err(|e| e.to_string())
     } else {
-        // English search — use FTS directly
+        // English search — expand with synonyms then FTS
+        let expanded = expand_synonyms(&trimmed);
         let conn = state.db.lock().map_err(|_| "db lock")?;
 
-        // Try prefix match for partial words
-        let fts_query = if trimmed.contains(' ') {
-            trimmed.clone()
+        if expanded.len() > 1 {
+            // Search with all synonym terms
+            db::search_photos_multi(&conn, &expanded).map_err(|e| e.to_string())
         } else {
-            format!("{}*", trimmed)
-        };
-
-        db::search_photos_fts(&conn, &fts_query).map_err(|e| e.to_string())
+            let fts_query = if trimmed.contains(' ') {
+                trimmed.clone()
+            } else {
+                format!("{}*", trimmed)
+            };
+            db::search_photos_fts(&conn, &fts_query).map_err(|e| e.to_string())
+        }
     }
+}
+
+/// Expand search term with common synonyms for better recall
+fn expand_synonyms(term: &str) -> Vec<String> {
+    let lower = term.to_lowercase();
+    let groups: &[&[&str]] = &[
+        &["woman", "women", "female", "lady", "girl"],
+        &["man", "men", "male", "boy", "guy"],
+        &["child", "kid", "children", "baby", "toddler", "infant"],
+        &["food", "meal", "dish", "cuisine", "dinner", "lunch", "breakfast"],
+        &["car", "vehicle", "automobile", "auto"],
+        &["dog", "puppy", "canine"],
+        &["cat", "kitten", "feline"],
+        &["house", "home", "building", "residence"],
+        &["happy", "smiling", "joyful", "cheerful", "laughing"],
+        &["sad", "crying", "unhappy", "melancholy"],
+        &["beautiful", "pretty", "gorgeous", "stunning"],
+        &["old", "elderly", "aged", "senior", "ancient"],
+        &["young", "youthful", "teen", "teenager"],
+        &["big", "large", "huge", "giant", "massive"],
+        &["small", "little", "tiny", "miniature"],
+        &["street", "road", "avenue", "path", "alley"],
+        &["ocean", "sea", "water", "beach", "shore", "coast"],
+        &["mountain", "hill", "peak", "summit"],
+        &["tree", "forest", "woods", "jungle"],
+        &["flower", "blossom", "bloom", "floral"],
+        &["night", "dark", "evening", "nighttime"],
+        &["couple", "romantic", "love", "together", "pair"],
+    ];
+    for group in groups {
+        if group.contains(&lower.as_str()) {
+            return group.iter().map(|s| s.to_string()).collect();
+        }
+    }
+    vec![lower]
 }
 
 // ── Thumbnail ─────────────────────────────────────────────────────────────────
@@ -943,6 +982,83 @@ pub async fn natural_language_search(
     db::search_photos_multi(&conn, &terms).map_err(|e| e.to_string())
 }
 
+/// Translate a non-English query to English for semantic (CLIP) search.
+/// Returns the English translation, or the original if translation fails.
+#[tauri::command]
+pub async fn translate_for_clip(
+    query: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let trimmed = query.trim().to_string();
+    let is_non_english = trimmed.chars().any(|c| !c.is_ascii());
+    if !is_non_english {
+        return Ok(trimmed);
+    }
+
+    // Check cache first
+    let cache_key = format!("clip:{}", trimmed);
+    let cached = {
+        let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
+        db::get_cached_translation(&conn, &cache_key).ok().flatten()
+    };
+    if let Some(c) = cached {
+        return Ok(c);
+    }
+
+    // Translate via Ollama directly with a precise prompt
+    let router = SmartRouter::new(&state.db);
+    let (provider, api_key) = router.cheapest_text_provider()
+        .ok_or("No AI provider available for translation")?;
+
+    let prompt = format!(
+        "Translate this single word or phrase to English. \
+         Return ONLY the exact English translation, one word or short phrase. \
+         Do NOT add synonyms or related words. \
+         Examples: kadın→woman, kedi→cat, araba→car, güneş batımı→sunset \
+         Translate: \"{}\"",
+        trimmed
+    );
+
+    // Call the provider directly for a clean single-word translation
+    let result = match provider {
+        AiProvider::Local => {
+            let parts: Vec<&str> = api_key.splitn(2, '|').collect();
+            let endpoint = if parts[0].is_empty() { providers::DEFAULT_OLLAMA_URL } else { parts[0] };
+            let model = if parts.len() > 1 && !parts[1].is_empty() { parts[1] } else { "gemma3:4b" };
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build().map_err(|e| e.to_string())?;
+            let url = format!("{}/api/chat", endpoint.trim_end_matches('/'));
+            let body = serde_json::json!({
+                "model": model, "stream": false,
+                "messages": [{"role":"user","content": prompt}]
+            });
+            let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let raw = json["message"]["content"].as_str().unwrap_or("").trim().to_string();
+            // Clean up: remove quotes, brackets, extra text
+            raw.trim_matches(|c: char| c == '"' || c == '\'' || c == '[' || c == ']' || c == '.' || c == '\n')
+               .trim().to_string()
+        }
+        _ => {
+            // For cloud providers, use existing translate_query
+            providers::translate_query(&prompt, provider, &api_key)
+                .await.map_err(|e| e.to_string())?
+                .join(" ")
+        }
+    };
+
+    let result = if result.is_empty() { trimmed.clone() } else { result };
+
+    // Cache it
+    {
+        let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
+        db::cache_translation(&conn, &cache_key, None, &result, provider.key_name()).ok();
+    }
+
+    Ok(result)
+}
+
 // ── 13. Version Check (simple update notification) ──────────────────────────
 
 #[derive(serde::Serialize)]
@@ -986,6 +1102,13 @@ pub async fn check_for_updates() -> Result<VersionInfo, String> {
 pub async fn retry_failed_photos(state: tauri::State<'_, AppState>) -> Result<usize, String> {
     let conn = state.db.lock().map_err(|_| "db lock")?;
     db::reset_error_photos(&conn).map_err(|e| e.to_string())
+}
+
+/// Clear all tags and reset photos to pending for re-tagging
+#[tauri::command]
+pub async fn clear_all_tags(state: tauri::State<'_, AppState>) -> Result<usize, String> {
+    let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
+    db::clear_all_tags(&conn).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -1906,11 +2029,24 @@ pub async fn download_clip_models(
         .map_err(|e| e.to_string())?;
 
     async fn dl(client: &reqwest::Client, url: &str, dest: &std::path::Path) -> Result<(), String> {
-        if dest.exists() { return Ok(()); }
-        let bytes = client.get(url)
+        // Skip only if file exists AND is larger than 1KB (not corrupted)
+        if dest.exists() {
+            if let Ok(meta) = std::fs::metadata(dest) {
+                if meta.len() > 1024 { return Ok(()); }
+            }
+            // Remove corrupted/tiny file
+            let _ = std::fs::remove_file(dest);
+        }
+        let resp = client.get(url)
             .header("User-Agent", "RetinaTag/1.2")
-            .send().await.map_err(|e| format!("Download error {}: {}", url, e))?
-            .bytes().await.map_err(|e| e.to_string())?;
+            .send().await.map_err(|e| format!("Download error {}: {}", url, e))?;
+        if !resp.status().is_success() {
+            return Err(format!("Download failed (HTTP {}): {}", resp.status(), url));
+        }
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        if bytes.len() < 1024 {
+            return Err(format!("Downloaded file too small ({} bytes): {}", bytes.len(), url));
+        }
         std::fs::write(dest, &bytes).map_err(|e| e.to_string())?;
         Ok(())
     }

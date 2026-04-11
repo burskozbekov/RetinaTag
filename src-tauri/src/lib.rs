@@ -127,6 +127,7 @@ pub fn run() {
             // 13. Update check
             commands::check_for_updates,
             commands::retry_failed_photos,
+            commands::clear_all_tags,
             commands::get_library_stats,
             commands::test_ollama_raw,
             commands::get_ollama_status,
@@ -153,6 +154,7 @@ pub fn run() {
             commands::index_clip_embeddings,
             commands::semantic_search,
             commands::get_clip_index_count,
+            commands::translate_for_clip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -44,7 +44,7 @@ impl ClipTier {
     pub fn label(self) -> &'static str {
         match self {
             ClipTier::Fast     => "Fast (ViT-B/32 quantized)",
-            ClipTier::Balanced => "Dengeli (ViT-B/32 full)",
+            ClipTier::Balanced => "Balanced (ViT-B/32 full)",
             ClipTier::Best     => "Best (ViT-L/14)",
         }
     }
@@ -73,22 +73,22 @@ impl ClipTier {
 
         match self {
             ClipTier::Fast => (
-                format!("{}/visual_quantized.onnx",  base_b32),
-                format!("{}/textual_quantized.onnx", base_b32),
-                format!("{}/vocab.json",              tok_b32),
-                format!("{}/merges.txt",              tok_b32),
+                format!("{}/vision_model_quantized.onnx", base_b32),
+                format!("{}/text_model_quantized.onnx",   base_b32),
+                format!("{}/vocab.json",                   tok_b32),
+                format!("{}/merges.txt",                   tok_b32),
             ),
             ClipTier::Balanced => (
-                format!("{}/visual.onnx",  base_b32),
-                format!("{}/textual.onnx", base_b32),
-                format!("{}/vocab.json",   tok_b32),
-                format!("{}/merges.txt",   tok_b32),
+                format!("{}/vision_model.onnx", base_b32),
+                format!("{}/text_model.onnx",   base_b32),
+                format!("{}/vocab.json",         tok_b32),
+                format!("{}/merges.txt",         tok_b32),
             ),
             ClipTier::Best => (
-                format!("{}/visual.onnx",  base_l14),
-                format!("{}/textual.onnx", base_l14),
-                format!("{}/vocab.json",   tok_l14),
-                format!("{}/merges.txt",   tok_l14),
+                format!("{}/vision_model.onnx", base_l14),
+                format!("{}/text_model.onnx",   base_l14),
+                format!("{}/vocab.json",         tok_l14),
+                format!("{}/merges.txt",         tok_l14),
             ),
         }
     }

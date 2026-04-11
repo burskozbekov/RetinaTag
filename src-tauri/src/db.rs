@@ -641,6 +641,18 @@ pub fn get_pending_photos(conn: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(rows)
 }
 
+/// Clear all tags and reset all photos to 'pending' for re-tagging
+pub fn clear_all_tags(conn: &Connection) -> Result<usize> {
+    conn.execute("DELETE FROM tags", [])?;
+    conn.execute("DELETE FROM tags_fts", [])?;
+    let count = conn.execute("UPDATE photos SET status = 'pending', tagged_at = NULL", [])?;
+    // Also clear CLIP embeddings so semantic re-index happens
+    conn.execute("UPDATE photos SET clip_emb = NULL, clip_tier = NULL WHERE clip_emb IS NOT NULL", []).ok();
+    // Clear translation cache
+    conn.execute("DELETE FROM translation_cache", []).ok();
+    Ok(count)
+}
+
 /// Reset all 'error' status photos back to 'pending' so they can be retried
 pub fn reset_error_photos(conn: &Connection) -> Result<usize> {
     let count = conn.execute(
