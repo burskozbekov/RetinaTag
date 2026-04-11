@@ -23,7 +23,7 @@ pub async fn run_tagging(
     let router = Arc::new(Mutex::new(SmartRouter::new(&db_conn)));
 
     let provider_count = {
-        let r = router.lock().unwrap();
+        let r = router.lock().unwrap_or_else(|e| e.into_inner());
         r.provider_count()
     };
 
@@ -43,7 +43,7 @@ pub async fn run_tagging(
 
     // Load all pending photos
     let pending: Vec<(i64, String)> = {
-        let conn = db_conn.lock().unwrap();
+        let conn = db_conn.lock().unwrap_or_else(|e| e.into_inner());
         db::get_pending_photos(&conn).unwrap_or_default()
     };
 
@@ -62,7 +62,7 @@ pub async fn run_tagging(
     // Concurrency: local Ollama can only handle 1 at a time (serial processing).
     // Cloud APIs can run in parallel. Check if the only provider is Local.
     let is_local_only = {
-        let r = router.lock().unwrap();
+        let r = router.lock().unwrap_or_else(|e| e.into_inner());
         r.is_local_only()
     };
     let concurrency = if is_local_only { 1 } else { (provider_count * 3).max(2).min(16) };
@@ -103,7 +103,7 @@ pub async fn run_tagging(
 
                 // Get route from smart router first so we know if it's local
                 let route = {
-                    let mut r = router.lock().unwrap();
+                    let mut r = router.lock().unwrap_or_else(|e| e.into_inner());
                     r.next_route()
                 };
 
@@ -134,11 +134,11 @@ pub async fn run_tagging(
                         ah.emit("tag-provider-error", serde_json::json!({
                             "provider": route.provider.name(),
                             "file": &filename,
-                            "error": format!("Görsel açılamadı: {}", e),
+                            "error": format!("Image could not be opened: {}", e),
                             "kind": "ImagePrep"
                         })).ok();
                         fail.fetch_add(1, Ordering::Relaxed);
-                        let conn = db.lock().unwrap();
+                        let conn = db.lock().unwrap_or_else(|e| e.into_inner());
                         db::update_photo_status(&conn, photo_id, "error").ok();
                         return;
                     }
@@ -146,11 +146,11 @@ pub async fn run_tagging(
                         ah.emit("tag-provider-error", serde_json::json!({
                             "provider": route.provider.name(),
                             "file": &filename,
-                            "error": format!("Görsel işleme thread hatası: {}", e),
+                            "error": format!("Image processing thread error: {}", e),
                             "kind": "ImagePrep"
                         })).ok();
                         fail.fetch_add(1, Ordering::Relaxed);
-                        let conn = db.lock().unwrap();
+                        let conn = db.lock().unwrap_or_else(|e| e.into_inner());
                         db::update_photo_status(&conn, photo_id, "error").ok();
                         return;
                     }
@@ -198,14 +198,14 @@ pub async fn run_tagging(
                                 .collect();
 
                             {
-                                let conn = db.lock().unwrap();
+                                let conn = db.lock().unwrap_or_else(|e| e.into_inner());
                                 db::insert_tags(&conn, photo_id, &tag_tuples).ok();
                                 db::update_photo_status(&conn, photo_id, "tagged").ok();
                                 db::update_photo_provider(&conn, photo_id, &provider_name).ok();
                                 db::record_usage(&conn, &provider_name, photo_id, true, cost).ok();
                             }
-                            { router.lock().unwrap().report_success(current_provider); }
-                            { let mut b = bd.lock().unwrap(); let e = b.entry(provider_name).or_insert((0,0.0)); e.0+=1; e.1+=cost; }
+                            { router.lock().unwrap_or_else(|e| e.into_inner()).report_success(current_provider); }
+                            { let mut b = bd.lock().unwrap_or_else(|e| e.into_inner()); let e = b.entry(provider_name).or_insert((0,0.0)); e.0+=1; e.1+=cost; }
                             done.fetch_add(1, Ordering::Relaxed);
                             break;
                         }
@@ -213,7 +213,7 @@ pub async fn run_tagging(
                         Ok(_) => {
                             // Empty tag list — retry same provider with brief wait
                             if attempt >= MAX_ATTEMPTS {
-                                let conn = db.lock().unwrap();
+                                let conn = db.lock().unwrap_or_else(|e| e.into_inner());
                                 db::update_photo_status(&conn, photo_id, "error").ok();
                                 fail.fetch_add(1, Ordering::Relaxed);
                                 break;
@@ -247,46 +247,46 @@ pub async fn run_tagging(
                                 "kind": format!("{:?}", kind)
                             })).ok();
 
-                            { let conn=db.lock().unwrap(); db::record_usage(&conn,current_provider.key_name(),photo_id,false,0.0).ok(); }
+                            { let conn=db.lock().unwrap_or_else(|e| e.into_inner()); db::record_usage(&conn,current_provider.key_name(),photo_id,false,0.0).ok(); }
 
                             match kind {
                                 ApiErrorKind::AuthFailed => {
-                                    // API key geçersiz — bu provider'ı tamamen devre dışı bırak
-                                    router.lock().unwrap().disable_provider(current_provider);
+                                    // API key invalid — disable this provider for the session
+                                    router.lock().unwrap_or_else(|e| e.into_inner()).disable_provider(current_provider);
                                     ah.emit("tag-auth-error", serde_json::json!({
                                         "provider": current_provider.name(),
-                                        "message": format!("{} API anahtarı geçersiz. Lütfen Ayarlar'dan kontrol edin.", current_provider.name())
+                                        "message": format!("{} API key is invalid. Please check Settings.", current_provider.name())
                                     })).ok();
-                                    // Başka provider var mı?
-                                    match router.lock().unwrap().fallback_route(current_provider) {
+                                    // Try another provider?
+                                    match router.lock().unwrap_or_else(|e| e.into_inner()).fallback_route(current_provider) {
                                         Some(fb) => { current_provider=fb.provider; current_key=fb.api_key; current_model=fb.model; }
-                                        None => { let conn=db.lock().unwrap(); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break; }
+                                        None => { let conn=db.lock().unwrap_or_else(|e| e.into_inner()); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break; }
                                     }
                                 }
                                 ApiErrorKind::RateLimit { retry_after_secs } => {
-                                    // Rate limit — bekle ve aynı provider'la tekrar dene
+                                    // Rate limit — wait and retry with the same provider
                                     ah.emit("tag-rate-limit", serde_json::json!({
                                         "provider": current_provider.name(),
                                         "wait_secs": retry_after_secs
                                     })).ok();
                                     tokio::time::sleep(std::time::Duration::from_secs(retry_after_secs)).await;
-                                    attempt -= 1; // Bu denemeyi saymıyoruz
+                                    attempt -= 1; // Don't count this attempt
                                 }
                                 ApiErrorKind::Transient => {
-                                    // Geçici hata — kısa bekle
+                                    // Transient error — short backoff
                                     if attempt >= MAX_ATTEMPTS {
-                                        let conn=db.lock().unwrap(); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break;
+                                        let conn=db.lock().unwrap_or_else(|e| e.into_inner()); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break;
                                     }
                                     let wait = std::time::Duration::from_millis(500 * 2u64.pow(attempt as u32 - 1));
                                     tokio::time::sleep(wait).await;
                                 }
                                 ApiErrorKind::Permanent => {
                                     if attempt >= MAX_ATTEMPTS {
-                                        let conn=db.lock().unwrap(); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break;
+                                        let conn=db.lock().unwrap_or_else(|e| e.into_inner()); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break;
                                     }
-                                    match router.lock().unwrap().fallback_route(current_provider) {
+                                    match router.lock().unwrap_or_else(|e| e.into_inner()).fallback_route(current_provider) {
                                         Some(fb) => { current_provider=fb.provider; current_key=fb.api_key; current_model=fb.model; }
-                                        None => { let conn=db.lock().unwrap(); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break; }
+                                        None => { let conn=db.lock().unwrap_or_else(|e| e.into_inner()); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break; }
                                     }
                                 }
                             }
@@ -300,7 +300,7 @@ pub async fn run_tagging(
     join_all(tasks).await;
 
     // Build breakdown
-    let bd = breakdown.lock().unwrap();
+    let bd = breakdown.lock().unwrap_or_else(|e| e.into_inner());
     let provider_breakdown: Vec<ProviderBreakdown> = bd
         .iter()
         .map(|(name, (count, cost))| ProviderBreakdown {

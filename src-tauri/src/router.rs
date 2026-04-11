@@ -26,7 +26,7 @@ pub struct SmartRouter {
 
 impl SmartRouter {
     pub fn new(db_conn: &Arc<Mutex<rusqlite::Connection>>) -> Self {
-        let conn = db_conn.lock().unwrap();
+        let conn = db_conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut keys = HashMap::new();
         let mut models = HashMap::new();
 

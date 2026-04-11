@@ -66,13 +66,23 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
   box-shadow:0 2px 12px rgba(184,58,18,.3)}
 .btn-primary:hover{background:linear-gradient(135deg,var(--red),var(--red-light));
   box-shadow:0 4px 20px rgba(184,58,18,.45);transform:translateY(-1px)}
+.btn-primary:active:not(:disabled){transform:scale(.93);box-shadow:0 1px 4px rgba(184,58,18,.25);
+  transition:transform .06s,box-shadow .06s}
 .btn-secondary{background:var(--card);color:var(--text2);border:1px solid var(--border2)}
 .btn-secondary:hover{border-color:var(--red-dark);color:var(--cream)}
+.btn-secondary:active:not(:disabled){transform:scale(.93);background:var(--surface);
+  border-color:var(--red);transition:transform .06s,background .06s}
 .btn-ghost{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;
   line-height:1;padding:4px;transition:color .15s;font-family:var(--font)}
 .btn-ghost:hover{color:var(--cream)}
+.btn-ghost:active{color:var(--red-light);transform:scale(.9);transition:transform .06s}
 .btn-block{width:100%}.btn-sm{padding:5px 10px;font-size:11px}
 .btn:disabled{opacity:.3;cursor:not-allowed;transform:none !important}
+.btn.loading{position:relative;color:transparent !important;pointer-events:none}
+.btn.loading::after{content:'';position:absolute;width:14px;height:14px;
+  border:2px solid var(--cream);border-top-color:transparent;border-radius:50%;
+  animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .btn-xs{padding:3px 8px;font-size:10px;border-radius:5px}
 .btn-danger{background:rgba(192,64,64,.15);color:#E05050;border:1px solid rgba(192,64,64,.3)}
 .btn-danger:hover{background:rgba(192,64,64,.25)}
@@ -246,7 +256,9 @@ select.tb-select:focus{border-color:var(--red-dark)}
 .clip-tier-desc{font-size:10px;color:var(--text3);margin-top:2px;line-height:1.4}
 .clip-tier-badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;flex-shrink:0}
 .clip-tier-badge.ok{background:rgba(100,210,120,.15);color:var(--green)}
-.clip-tier-badge.dl{background:var(--red-bg);color:var(--red-light);cursor:pointer}
+.clip-tier-badge.dl{background:var(--red-bg);color:var(--red-light);cursor:pointer;transition:transform .1s,background .1s}
+.clip-tier-badge.dl:hover{background:rgba(184,58,18,.25)}
+.clip-tier-badge.dl:active{transform:scale(.88);background:rgba(184,58,18,.4)}
 /* Search mode toggle */
 .search-mode-toggle{display:flex;gap:0;border-radius:20px;overflow:hidden;border:1px solid var(--border2);flex-shrink:0}
 .search-mode-btn{padding:6px 12px;font-size:11px;font-weight:600;color:var(--text3);background:none;border:none;
@@ -734,15 +746,15 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <!-- CLIP Semantic Search -->
       <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)" id="clipSettingsSection">
         <div class="sb-label" style="margin-bottom:4px">
-          🔍 Semantic Arama (CLIP)
-          <span style="font-size:10px;font-weight:400;color:var(--text3);margin-left:8px">"Gün batımında deniz" gibi cümleyle ara</span>
+          🔍 Semantic Search (CLIP)
+          <span style="font-size:10px;font-weight:400;color:var(--text3);margin-left:8px">Search with natural language: "sunset over the sea"</span>
         </div>
         <p style="font-size:11px;color:var(--text3);margin-bottom:12px;line-height:1.6">
-          Fotoğrafı görmeden anlayan AI — tag olmasa bile bulur. Bir model seç ve fotoğrafları indeksle.
+          AI that understands photos without tags — finds them even without keywords. Pick a model and index your library.
         </p>
         <div style="display:flex;flex-direction:column;gap:8px" id="clipTierList"></div>
         <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
-          <button class="btn btn-secondary btn-sm" id="btnClipIndex">⚡ Semantic İndeksle</button>
+          <button class="btn btn-secondary btn-sm" id="btnClipIndex">⚡ Semantic Index</button>
           <span style="font-size:11px;color:var(--text3)" id="clipIndexStatus">—</span>
         </div>
       </div>
@@ -1214,7 +1226,7 @@ listen('tag-complete',({payload:p})=>{
   const parts=p.provider_breakdown.map(b=>`${b.provider}: ${b.count}`).join(' · ');
   const failMsg=p.failed?` · ${p.failed} hatalı`:'';
   if(p.tagged===0 && p.failed===0){
-    toast('Etiketlenecek fotoğraf bulunamadı','warn');
+    toast('No photos found to tag','warn');
   } else {
     toast(`${p.tagged} fotoğraf etiketlendi${failMsg}${parts?' — '+parts:''}`,'success');
   }
@@ -1268,7 +1280,7 @@ function translateError(msg){
   if(msg.includes('network')||msg.includes('fetch')) return 'Ağ hatası. İnternet bağlantınızı kontrol edin.';
   if(msg.includes('No AI providers')) return 'AI sağlayıcı tanımlı değil. Ayarlar\'dan API anahtarı ekleyin.';
   if(msg.includes('budget')) return 'Aylık bütçe aşıldı. Ayarlar\'dan limiti artırın.';
-  if(msg.includes('not found')||msg.includes('404')) return 'Dosya veya model bulunamadı.';
+  if(msg.includes('not found')||msg.includes('404')) return 'File or model not found.';
   if(msg.includes('disk full')||msg.includes('No space')) return 'Disk dolu. Alan açın.';
   if(msg.includes('permission')||msg.includes('Access denied')) return 'İzin hatası. Klasöre erişim yok.';
   return msg;
@@ -1519,20 +1531,20 @@ async function openSettings(){
         <div style="flex:1"><div class="pc-name">${prov.name}</div><div style="font-size:10px;color:var(--text3)">${prov.sub}</div></div>
         <span class="free-badge">ÜCRETSİZ</span>
         <label class="pc-toggle"><input type="checkbox" data-setting="enabled_local" ${enabled?'checked':''}><span class="track"></span><span class="knob"></span></label></div>
-        <div class="form-hint" style="margin-bottom:10px">Tamamen ücretsiz, internet bağlantısı gerektirmez. Fotoğraflarınız cihazınızda kalır.</div>
+        <div class="form-hint" style="margin-bottom:10px">Completely free, no internet required. Your photos stay on your device.</div>
         <div><label class="form-label">Ollama Adresi</label><input class="form-input" data-setting="ollama_endpoint" value="${endpoint}" style="font-size:12px"></div>
         <div style="margin-top:8px"><label class="form-label">Model</label>
           <div style="display:flex;gap:6px;align-items:center">
             <input class="form-input" id="localModelInput" data-setting="model_local" value="${model}" style="font-size:12px;flex:1">
-            <button class="btn-sm btn-ghost" onclick="pullOllamaModel()" title="Modeli indir">⬇ İndir</button>
+            <button class="btn-sm btn-ghost" onclick="pullOllamaModel()" title="Download model">⬇ Download</button>
           </div>
           <div style="font-size:10px;color:var(--text3);margin-top:3px">Önerilen modeller: qwen2.5vl:7b · qwen2.5vl:3b</div>
         </div>
         <div id="ollamaStatusBox" style="margin-top:10px"><div class="ollama-status warn">⟳ Kontrol ediliyor…</div></div>
         <div id="ollamaControls" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-          <button class="btn-sm btn-primary" id="btnOllamaStart" onclick="startOllama()" style="flex:1">▶ Başlat</button>
-          <button class="btn-sm btn-ghost" id="btnOllamaStop" onclick="stopOllama()" style="flex:1">■ Durdur</button>
-          <button class="btn-sm btn-ghost" onclick="testOllamaRaw()" style="flex:1">🧪 Test Et</button>
+          <button class="btn btn-sm btn-primary" id="btnOllamaStart" onclick="startOllama()" style="flex:1">▶ Start</button>
+          <button class="btn btn-sm btn-ghost" id="btnOllamaStop" onclick="stopOllama()" style="flex:1">■ Stop</button>
+          <button class="btn btn-sm btn-ghost" onclick="testOllamaRaw()" style="flex:1">🧪 Test</button>
           <button class="btn-sm btn-ghost" onclick="checkOllamaStatus(document.querySelector('[data-local]'))" title="Yenile">↻</button>
         </div>`;
       card.setAttribute('data-local','1');
@@ -1563,20 +1575,20 @@ async function checkOllamaStatus(card){
     if(!s.running){
       box.innerHTML=`<div class="ollama-status err">✕ Ollama çalışmıyor</div>
         <div style="font-size:10px;color:var(--text3);margin-top:4px">
-          Ollama yüklü değilse: <strong>ollama.com</strong> adresinden indirin<br>
-          Yüklüyse "▶ Ollama'yı Başlat" butonuna basın
+          If Ollama is not installed: download from <strong>ollama.com</strong><br>
+          If installed, click "▶ Start"
         </div>`;
       if(btnStart){btnStart.disabled=false;btnStop.disabled=true;}
       return;
     }
     if(!s.model_loaded){
       const m=modelInp?.value||'qwen2.5vl:7b';
-      box.innerHTML=`<div class="ollama-status warn">⚠ '${m}' modeli bulunamadı</div>`;
+      box.innerHTML=`<div class="ollama-status warn">⚠ '${m}' model not found</div>`;
       if(s.models&&s.models.length){
-        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">Yüklü modeller:</div>
+        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">Loaded models:</div>
           <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${s.models.map(m=>`<span style="background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer" onclick="document.getElementById('localModelInput').value='${m}'">${m}</span>`).join('')}</div>`;
       } else {
-        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">"⬇ İndir" butonuna basarak modeli indirin</div>`;
+        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">Click "⬇ Download" to download the model</div>`;
       }
       if(btnStart){btnStart.disabled=true;btnStop.disabled=false;}
       return;
@@ -1593,17 +1605,17 @@ async function startOllama(){
   const card=document.querySelector('[data-local]');
   const box=card?.querySelector('#ollamaStatusBox');
   const btn=document.getElementById('btnOllamaStart');
-  if(btn){btn.disabled=true;btn.textContent='⟳ Başlatılıyor…';}
+  if(btn){btn.disabled=true;btn.textContent='⟳ Starting…';}
   try{
     await invoke('start_ollama_service');
     // Wait 3 seconds then check
     setTimeout(()=>{
-      if(btn){btn.textContent='▶ Ollama\'yı Başlat';}
+      if(btn){btn.textContent='▶ Start';}
       checkOllamaStatus(card);
     },3000);
   }catch(e){
     if(box) box.innerHTML=`<div class="ollama-status err">✕ ${e}</div>`;
-    if(btn){btn.disabled=false;btn.textContent='▶ Ollama\'yı Başlat';}
+    if(btn){btn.disabled=false;btn.textContent='▶ Start';}
   }
 }
 
@@ -1613,7 +1625,7 @@ async function stopOllama(){
     await invoke('stop_ollama_service');
     toast('Ollama durduruldu','info');
     setTimeout(()=>checkOllamaStatus(card),1000);
-  }catch(e){toast('Durdurulamadı: '+e,'error');}
+  }catch(e){toast('Could not stop:'+e,'error');}
 }
 
 async function testOllamaRaw(){
@@ -1760,7 +1772,7 @@ function initFaceRecognition() {
     if (!modelOk) {
       const ok = confirm('Yüz tanıma modelleri indirilmemiş.\n\nŞimdi indirilsin mi? (~5 MB)');
       if (!ok) return;
-      btn.textContent = 'İndiriliyor…';
+      btn.textContent = 'Downloading…';
       btn.disabled = true;
       try {
         const msg = await invoke('download_face_models');
@@ -1801,7 +1813,7 @@ function initFaceRecognition() {
       if (!ok) return;
       try {
         const btn = $('btnClusterFaces');
-        btn.textContent = 'İndiriliyor…'; btn.disabled = true;
+        btn.textContent = 'Downloading…'; btn.disabled = true;
         await invoke('download_face_models');
         toast('Modeller indirildi', 'success');
         btn.textContent = 'Grupla'; btn.disabled = false;
@@ -1877,7 +1889,7 @@ function renderFaceGrid(faces, photoId) {
   const grid = $('faceGrid');
   grid.innerHTML = '';
   if (!faces || faces.length === 0) {
-    grid.innerHTML = '<div style="font-size:10px;color:var(--text3);text-align:center;padding:8px 0">Yüz bulunamadı — "Yüzleri Tara" butonuna basın</div>';
+    grid.innerHTML = '<div style="font-size:10px;color:var(--text3);text-align:center;padding:8px 0">No faces found — click "Detect Faces" to scan</div>';
     return;
   }
   for (const f of faces) {
@@ -2013,7 +2025,7 @@ function renderClusterGrid(clusters) {
   const significant = clusters.filter(c => c.count >= 1);
 
   if (significant.length === 0) {
-    grid.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:13px">Hiç yüz bulunamadı. Önce fotoğrafları tarayın.</div>';
+    grid.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:13px">No faces found. Scan photos first.</div>';
     return;
   }
 
@@ -2145,7 +2157,7 @@ document.querySelectorAll('.search-mode-btn').forEach(btn => {
     _clipMode = btn.dataset.mode;
     document.querySelectorAll('.search-mode-btn').forEach(b => b.classList.toggle('active', b === btn));
     const ph = _clipMode === 'semantic'
-      ? 'Türkçe veya İngilizce cümleyle ara… "gün batımında deniz"'
+      ? 'Search with a sentence… "sunset over the sea"'
       : 'Search tags… (any language)';
     $('searchInput').placeholder = ph;
     if (_clipMode === 'semantic') {
@@ -2209,8 +2221,8 @@ function initClipSettings() {
         </div>
         <div>
           ${t.downloaded
-            ? `<span class="clip-tier-badge ok">✓ İndirildi</span>`
-            : `<button class="clip-tier-badge dl" onclick="downloadClipTier('${t.tier}',this)">⬇ İndir (${t.size_mb} MB)</button>`
+            ? `<span class="clip-tier-badge ok">✓ Downloaded</span>`
+            : `<button class="clip-tier-badge dl" onclick="downloadClipTier('${t.tier}',this)">⬇ Download (${t.size_mb} MB)</button>`
           }
         </div>`;
       card.onclick = e => {
@@ -2228,15 +2240,15 @@ function initClipSettings() {
 
 async function downloadClipTier(tier, btn) {
   btn.disabled = true;
-  btn.textContent = 'İndiriliyor…';
+  btn.textContent = 'Downloading…';
   try {
     const msg = await invoke('download_clip_models', { tier });
     toast(msg, 'success');
     btn.className = 'clip-tier-badge ok';
-    btn.textContent = '✓ İndirildi';
+    btn.textContent = '✓ Downloaded';
     btn.onclick = null;
   } catch (e) {
-    toast('İndirme hatası: ' + e, 'error');
+    toast('Download error:' + e, 'error');
     btn.disabled = false;
     btn.textContent = '⬇ Tekrar dene';
   }
@@ -2249,7 +2261,7 @@ async function updateClipIndexStatus() {
     const totalEl = $('stTotal');
     const total = totalEl ? parseInt(totalEl.textContent) || '?' : '?';
     const el = $('clipIndexStatus');
-    if (el) el.textContent = `${count} / ${total} fotoğraf indekslenmiş`;
+    if (el) el.textContent = `${count} / ${total} photos indexed`;
   } catch (e) {}
 }
 
@@ -2257,19 +2269,19 @@ async function updateClipIndexStatus() {
 if ($('btnClipIndex')) {
   $('btnClipIndex').onclick = async () => {
     const btn = $('btnClipIndex');
-    btn.disabled = true; btn.textContent = 'İndeksleniyor…';
+    btn.disabled = true; btn.textContent = 'Indexing…';
     // Show progress listener
     const unsub = await listen('clip-index-progress', ev => {
-      btn.textContent = `İndeksleniyor… ${ev.payload.done}/${ev.payload.total}`;
+      btn.textContent = `Indexing… ${ev.payload.done}/${ev.payload.total}`;
     });
     try {
       const count = await invoke('index_clip_embeddings', { tier: _clipTierSelected });
-      toast(`${count} fotoğraf semantic olarak indekslendi`, 'success');
+      toast(`${count} photos semantically indexed`, 'success');
       updateClipIndexStatus();
     } catch (e) {
       toast('Hata: ' + e, 'error');
     } finally {
-      btn.disabled = false; btn.textContent = '⚡ Semantic İndeksle';
+      btn.disabled = false; btn.textContent = '⚡ Semantic Index';
       unsub?.();
     }
   };

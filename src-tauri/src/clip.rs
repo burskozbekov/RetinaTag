@@ -43,9 +43,9 @@ impl ClipTier {
 
     pub fn label(self) -> &'static str {
         match self {
-            ClipTier::Fast     => "Hızlı (ViT-B/32 quantized)",
+            ClipTier::Fast     => "Fast (ViT-B/32 quantized)",
             ClipTier::Balanced => "Dengeli (ViT-B/32 full)",
-            ClipTier::Best     => "En İyi (ViT-L/14)",
+            ClipTier::Best     => "Best (ViT-L/14)",
         }
     }
 
@@ -116,8 +116,8 @@ pub fn load_engine(models_dir: &Path, tier: ClipTier) -> Result<ClipEngine> {
 
     if !visual_path.exists() || !textual_path.exists() {
         bail!(
-            "CLIP modelleri bulunamadı: {:?}\n\
-             Ayarlar > Semantic Arama bölümünden indirin.",
+            "CLIP models not found: {:?}\n\
+             Please download them from Settings > Semantic Search.",
             dir
         );
     }
@@ -127,16 +127,16 @@ pub fn load_engine(models_dir: &Path, tier: ClipTier) -> Result<ClipEngine> {
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("opt level (visual): {e}"))?
         .commit_from_file(&visual_path)
-        .map_err(|e| anyhow::anyhow!("visual model yükleme: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("visual model loading: {e}"))?;
 
     let textual = Session::builder()
         .map_err(|e| anyhow::anyhow!("ONNX builder (textual): {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("opt level (textual): {e}"))?
         .commit_from_file(&textual_path)
-        .map_err(|e| anyhow::anyhow!("textual model yükleme: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("textual model loading: {e}"))?;
 
-    let tokenizer = ClipTokenizer::load(&dir).context("tokenizer yüklenemedi")?;
+    let tokenizer = ClipTokenizer::load(&dir).context("failed to load tokenizer")?;
 
     Ok(ClipEngine { visual, textual, tokenizer, tier })
 }

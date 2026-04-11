@@ -56,19 +56,27 @@ impl FolderWatcher {
                             let running_ref = debounce_running2.clone();
 
                             std::thread::spawn(move || {
-                                std::thread::sleep(Duration::from_secs(5));
+                                // Keep looping until the pending set stays empty after a full
+                                // debounce window — this closes the race where files arrive
+                                // between the drain and the running=false store.
+                                loop {
+                                    std::thread::sleep(Duration::from_secs(5));
 
-                                let files: Vec<String> = {
-                                    let mut pending = pending_ref.lock().unwrap();
-                                    let files: Vec<String> = pending.drain().collect();
-                                    files
-                                };
+                                    let files: Vec<String> = {
+                                        let mut pending = pending_ref.lock().unwrap_or_else(|e| e.into_inner());
+                                        pending.drain().collect()
+                                    };
 
-                                if !files.is_empty() {
+                                    if files.is_empty() {
+                                        // Nothing arrived during the sleep window — safe to exit.
+                                        running_ref.store(false, Ordering::SeqCst);
+                                        break;
+                                    }
+
                                     process_new_files(files, &db_ref, &thumbs_ref, &ah_ref);
+                                    // Loop: sleep again to catch any files that arrived while
+                                    // process_new_files was running.
                                 }
-
-                                running_ref.store(false, Ordering::SeqCst);
                             });
                         }
                     }
@@ -119,9 +127,18 @@ fn process_new_files(
         let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let folder = path.parent().unwrap_or(path).to_string_lossy().to_string();
 
-        let (width, height) = image::image_dimensions(file_path)
-            .map(|(w, h)| (Some(w as i32), Some(h as i32)))
-            .unwrap_or((None, None));
+        let (width, height) = {
+            let fp = file_path.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = image::image_dimensions(&fp)
+                    .map(|(w, h)| (Some(w as i32), Some(h as i32)))
+                    .unwrap_or((None, None));
+                let _ = tx.send(result);
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or((None, None))
+        };
 
         let size = std::fs::metadata(file_path).map(|m| m.len() as i64).unwrap_or(0);
 

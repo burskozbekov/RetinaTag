@@ -2,16 +2,16 @@ use anyhow::{Context, Result};
 
 use crate::models::AiProvider;
 
-/// Hata türü — tagger bu bilgiyle ne yapacağına karar verir
+/// Error kind — tagger decides what action to take based on this
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApiErrorKind {
-    /// 401/403 — API key yanlış, bu provider'ı devre dışı bırak
+    /// 401/403 — API key invalid, disable this provider
     AuthFailed,
-    /// 429 — Rate limit, bekle ve tekrar dene
+    /// 429 — Rate limit, wait and retry
     RateLimit { retry_after_secs: u64 },
-    /// 5xx / timeout — Geçici hata, kısa süre sonra tekrar dene
+    /// 5xx / timeout — Transient error, retry after a short delay
     Transient,
-    /// Diğer kalıcı hatalar
+    /// Other permanent errors
     Permanent,
 }
 
@@ -32,7 +32,7 @@ fn classify_status(status: u16, body: &str) -> ApiErrorKind {
     match status {
         401 | 403 => ApiErrorKind::AuthFailed,
         429 => {
-            // Bazı API'ler Retry-After header veya body'de süre verir
+            // Some APIs provide retry duration in Retry-After header or body
             let secs = body.parse::<u64>().unwrap_or(15);
             ApiErrorKind::RateLimit { retry_after_secs: secs.min(120) }
         }
@@ -119,7 +119,10 @@ fn normalize_tags(tags: Vec<String>) -> Vec<String> {
 // ── Claude (Anthropic) ───────────────────────────────────────────────────────
 
 pub async fn call_claude(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("HTTP client build failed")?;
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 512,
@@ -167,7 +170,10 @@ pub async fn call_claude(image_b64: &str, api_key: &str, model: &str) -> Result<
 // ── OpenAI (GPT-4o) ─────────────────────────────────────────────────────────
 
 pub async fn call_openai(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("HTTP client build failed")?;
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 512,
@@ -215,7 +221,10 @@ pub async fn call_openai(image_b64: &str, api_key: &str, model: &str) -> Result<
 // ── Google Gemini ────────────────────────────────────────────────────────────
 
 pub async fn call_gemini(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("HTTP client build failed")?;
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         model, api_key
@@ -266,7 +275,10 @@ pub async fn call_gemini(image_b64: &str, api_key: &str, model: &str) -> Result<
 // ── xAI Grok ─────────────────────────────────────────────────────────────────
 
 pub async fn call_grok(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("HTTP client build failed")?;
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 512,
@@ -316,13 +328,13 @@ pub async fn call_grok(image_b64: &str, api_key: &str, model: &str) -> Result<Ve
 /// Default Ollama endpoint — configurable via `ollama_endpoint` setting.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
-/// Call a local Ollama model with vision support (e.g. qwen2.5vl:7b).
+/// Call a local Ollama model with vision support (e.g. gemma3:4b, qwen2.5vl:7b).
 /// Ollama uses the `/api/chat` endpoint with `images` field for base64 data.
 pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result<Vec<String>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
-        .unwrap();
+        .context("HTTP client build failed")?;
 
     let url = format!("{}/api/chat", endpoint.trim_end_matches('/'));
 
@@ -393,10 +405,13 @@ pub async fn check_ollama_status(
     model: &str,
     endpoint: &str,
 ) -> (bool, bool, Vec<String>) {
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .unwrap();
+    {
+        Ok(c) => c,
+        Err(_) => return (false, false, vec![]),
+    };
 
     let url = format!("{}/api/tags", endpoint.trim_end_matches('/'));
     match client.get(&url).send().await {

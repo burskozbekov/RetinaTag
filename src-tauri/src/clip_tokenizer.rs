@@ -25,12 +25,12 @@ impl ClipTokenizer {
         let merges_path = models_dir.join("clip_merges.txt");
 
         let vocab_json = std::fs::read_to_string(&vocab_path)
-            .with_context(|| format!("clip_vocab.json bulunamadı: {:?}", vocab_path))?;
+            .with_context(|| format!("clip_vocab.json not found: {:?}", vocab_path))?;
         let vocab: HashMap<String, i64> = serde_json::from_str(&vocab_json)
-            .context("clip_vocab.json parse edilemedi")?;
+            .context("clip_vocab.json could not be parsed")?;
 
         let merges_text = std::fs::read_to_string(&merges_path)
-            .with_context(|| format!("clip_merges.txt bulunamadı: {:?}", merges_path))?;
+            .with_context(|| format!("clip_merges.txt not found: {:?}", merges_path))?;
 
         let merges: HashMap<(String, String), usize> = merges_text
             .lines()

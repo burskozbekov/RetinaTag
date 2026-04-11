@@ -252,7 +252,7 @@ pub async fn start_tagging(
     tokio::spawn(async move {
         // Auto-reset error photos to pending before starting
         {
-            let conn = db_arc.lock().unwrap();
+            let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
             let _ = db::reset_error_photos(&conn);
         }
 
@@ -262,17 +262,17 @@ pub async fn start_tagging(
 
         // Free Ollama model from VRAM after tagging
         let endpoint = {
-            let conn = db_arc.lock().unwrap();
+            let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
             db::get_setting(&conn, "ollama_endpoint").ok().flatten()
                 .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string())
         };
         let model = {
-            let conn = db_arc.lock().unwrap();
+            let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
             db::get_setting(&conn, "model_local").ok().flatten()
-                .unwrap_or_else(|| "qwen2.5vl:7b".to_string())
+                .unwrap_or_else(|| "gemma3:4b".to_string())
         };
         let enabled_local = {
-            let conn = db_arc.lock().unwrap();
+            let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
             db::get_setting(&conn, "enabled_local").ok().flatten()
                 .map(|v| v == "true" || v == "1").unwrap_or(false)
         };
@@ -1003,31 +1003,38 @@ pub async fn get_library_stats(state: tauri::State<'_, AppState>) -> Result<Libr
     Ok(LibraryStats { total, pending, tagged, error })
 }
 
+// ── Local Model Presets ───────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_local_model_presets() -> Result<Vec<LocalModelPreset>, String> {
+    Ok(crate::models::local_model_presets())
+}
+
 // ── Ollama Service Control ─────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_ollama_status(state: tauri::State<'_, AppState>) -> Result<OllamaStatus, String> {
     let endpoint = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db::get_setting(&conn, "ollama_endpoint")
             .ok().flatten()
             .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string())
     };
     let model = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
         db::get_setting(&conn, "model_local")
             .ok().flatten()
-            .unwrap_or_else(|| "qwen2.5vl:7b".to_string())
+            .unwrap_or_else(|| "gemma3:4b".to_string())
     };
 
     let (running, model_loaded, models) = providers::check_ollama_status(&model, &endpoint).await;
 
     let message = if !running {
-        "Ollama çalışmıyor".to_string()
+        "Ollama is not running".to_string()
     } else if !model_loaded {
-        format!("Ollama çalışıyor ama '{}' modeli yüklü değil", model)
+        format!("Ollama is running but '{}' model is not loaded", model)
     } else {
-        format!("Hazır — {} modeli yüklü", model)
+        format!("Ready — {} model loaded", model)
     };
 
     Ok(OllamaStatus { running, model_loaded, models, message })
@@ -1047,7 +1054,7 @@ pub async fn start_ollama_service() -> Result<String, String> {
             Ok(_) => {
                 // Wait a moment for it to start
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                Ok("Ollama başlatılıyor...".to_string())
+                Ok("Starting Ollama...".to_string())
             }
             Err(_) => {
                 // Try alternate path
@@ -1057,9 +1064,9 @@ pub async fn start_ollama_service() -> Result<String, String> {
                 match alt {
                     Ok(_) => {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        Ok("Ollama başlatılıyor...".to_string())
+                        Ok("Starting Ollama...".to_string())
                     }
-                    Err(e) => Err(format!("Ollama bulunamadı. Lütfen ollama.com adresinden indirin. Hata: {}", e))
+                    Err(e) => Err(format!("Ollama not found. Please download from ollama.com. Error: {}", e))
                 }
             }
         }
@@ -1072,9 +1079,9 @@ pub async fn start_ollama_service() -> Result<String, String> {
         match result {
             Ok(_) => {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                Ok("Ollama başlatılıyor...".to_string())
+                Ok("Starting Ollama...".to_string())
             }
-            Err(e) => Err(format!("Ollama bulunamadı: {}", e))
+            Err(e) => Err(format!("Ollama not found: {}", e))
         }
     }
 }
@@ -1088,7 +1095,7 @@ pub async fn stop_ollama_service() -> Result<String, String> {
             .creation_flags(0x08000000)
             .spawn()
             .map_err(|e| e.to_string())?;
-        Ok("Ollama durduruldu".to_string())
+        Ok("Ollama stopped".to_string())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1096,7 +1103,7 @@ pub async fn stop_ollama_service() -> Result<String, String> {
             .arg("ollama")
             .spawn()
             .map_err(|e| e.to_string())?;
-        Ok("Ollama durduruldu".to_string())
+        Ok("Ollama stopped".to_string())
     }
 }
 
@@ -1111,7 +1118,7 @@ pub async fn test_ollama_raw(state: tauri::State<'_, AppState>) -> Result<String
     let model = {
         let conn = state.db.lock().map_err(|_| "db lock")?;
         db::get_setting(&conn, "model_local").ok().flatten()
-            .unwrap_or_else(|| "qwen2.5vl:7b".to_string())
+            .unwrap_or_else(|| "gemma3:4b".to_string())
     };
 
     // Get first real photo from library
@@ -1120,7 +1127,7 @@ pub async fn test_ollama_raw(state: tauri::State<'_, AppState>) -> Result<String
         conn.query_row("SELECT path FROM photos LIMIT 1", [], |r| r.get(0)).ok()
     };
 
-    let photo_path = photo_path.ok_or("Kütüphanede hiç fotoğraf yok")?;
+    let photo_path = photo_path.ok_or("No photos in the library")?;
 
     // Prepare image same way tagger does
     let image_b64 = tokio::task::spawn_blocking({
@@ -1128,7 +1135,7 @@ pub async fn test_ollama_raw(state: tauri::State<'_, AppState>) -> Result<String
         move || thumbnail::prepare_for_api_local(&p)
     }).await
     .map_err(|e| e.to_string())?
-    .map_err(|e| format!("Görsel hazırlanamadı: {}", e))?;
+    .map_err(|e| format!("Image could not be prepared: {}", e))?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -1147,7 +1154,7 @@ pub async fn test_ollama_raw(state: tauri::State<'_, AppState>) -> Result<String
     });
 
     match client.post(&url).json(&body).send().await {
-        Err(e) => Err(format!("Bağlantı hatası: {}", e)),
+        Err(e) => Err(format!("Connection error: {}", e)),
         Ok(resp) => {
             let status = resp.status().as_u16();
             let raw = resp.text().await.unwrap_or_default();
@@ -1156,7 +1163,7 @@ pub async fn test_ollama_raw(state: tauri::State<'_, AppState>) -> Result<String
                 .ok()
                 .and_then(|j| j["message"]["content"].as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| raw.clone());
-            Ok(format!("HTTP {}\nFotoğraf: {}\n\n--- HAM YANIT ---\n{}\n\n--- CONTENT ---\n{}",
+            Ok(format!("HTTP {}\nPhoto: {}\n\n--- RAW RESPONSE ---\n{}\n\n--- CONTENT ---\n{}",
                 status, photo_path, &raw[..raw.len().min(500)], &content[..content.len().min(500)]))
         }
     }
@@ -1169,16 +1176,16 @@ pub async fn pull_ollama_model(model: String) -> Result<String, String> {
         std::process::Command::new("cmd")
             .args(["/C", "start", "cmd", "/K", &format!("ollama pull {}", model)])
             .spawn()
-            .map_err(|e| format!("Ollama pull başlatılamadı: {}", e))?;
+            .map_err(|e| format!("Failed to start ollama pull: {}", e))?;
     }
     #[cfg(not(target_os = "windows"))]
     {
         std::process::Command::new("sh")
             .args(["-c", &format!("ollama pull {}", model)])
             .spawn()
-            .map_err(|e| format!("Ollama pull başlatılamadı: {}", e))?;
+            .map_err(|e| format!("Failed to start ollama pull: {}", e))?;
     }
-    Ok(format!("'{}' modeli indiriliyor — terminal penceresini takip edin", model))
+    Ok(format!("'{}' model is downloading — follow the terminal window", model))
 }
 
 // ── 14. Face Recognition ─────────────────────────────────────────────────────
@@ -1230,16 +1237,16 @@ pub async fn detect_faces_in_photo(
             .map_err(|e| e.to_string())?;
 
         let img = image::open(&photo_path)
-            .map_err(|e| format!("Fotoğraf açılamadı: {}", e))?;
+            .map_err(|e| format!("Failed to open photo: {}", e))?;
 
         // Clear previous detections for this photo
         {
-            let conn = db_arc.lock().unwrap();
+            let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
             db::delete_faces_for_photo(&conn, photo_id).ok();
         }
 
         let detected = crate::face::detect_faces(&face_models, &img)
-            .map_err(|e| format!("Yüz tespiti hatası: {}", e))?;
+            .map_err(|e| format!("Face detection error: {}", e))?;
 
         let faces_dir = thumbs_dir.join("faces");
         std::fs::create_dir_all(&faces_dir).ok();
@@ -1252,7 +1259,7 @@ pub async fn detect_faces_in_photo(
             let emb_bytes = crate::face::embedding_to_bytes(&embedding);
 
             let face_id = {
-                let conn = db_arc.lock().unwrap();
+                let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
                 db::insert_face_region(
                     &conn, photo_id,
                     face.x1, face.y1, face.x2, face.y2,
@@ -1413,7 +1420,7 @@ pub async fn recognize_all_faces(
     };
 
     if known.is_empty() {
-        return Err("Önce birkaç yüzü kişilere atayın, sonra tanıma yapılabilir.".to_string());
+        return Err("Please assign some faces to people first, then recognition can be performed.".to_string());
     }
 
     // Build per-person averaged (mean) embedding
@@ -1514,7 +1521,7 @@ pub async fn download_face_models(app: tauri::AppHandle) -> Result<String, Strin
     let emb_path = models_dir.join("w600k_mbf.onnx");
 
     if det_path.exists() && emb_path.exists() {
-        return Ok("Modeller zaten mevcut.".to_string());
+        return Ok("Models already exist.".to_string());
     }
 
     // Download buffalo_s zip from InsightFace releases
@@ -1529,15 +1536,15 @@ pub async fn download_face_models(app: tauri::AppHandle) -> Result<String, Strin
         .header("User-Agent", "RetinaTag/1.1")
         .send()
         .await
-        .map_err(|e| format!("İndirme başarısız: {}", e))?
+        .map_err(|e| format!("Download failed: {}", e))?
         .bytes()
         .await
-        .map_err(|e| format!("İndirme tamamlanamadı: {}", e))?;
+        .map_err(|e| format!("Download could not be completed: {}", e))?;
 
     // Extract the two ONNX files from the zip
     let cursor = std::io::Cursor::new(&zip_bytes[..]);
     let mut zip = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("Zip açılamadı: {}", e))?;
+        .map_err(|e| format!("Failed to open zip: {}", e))?;
 
     let mut det_found = false;
     let mut emb_found = false;
@@ -1560,9 +1567,9 @@ pub async fn download_face_models(app: tauri::AppHandle) -> Result<String, Strin
     }
 
     if det_found && emb_found {
-        Ok("Yüz tanıma modelleri başarıyla indirildi!".to_string())
+        Ok("Face recognition models downloaded successfully!".to_string())
     } else {
-        Err("Zip içinde model dosyaları bulunamadı.".to_string())
+        Err("Model files not found inside zip.".to_string())
     }
 }
 
@@ -1606,35 +1613,39 @@ pub async fn scan_and_cluster_faces(
 
     // Check models
     if !models_dir.join("det_500m.onnx").exists() {
-        return Err("Yüz tanıma modelleri eksik. Lütfen önce modelleri indirin.".to_string());
+        return Err("Face recognition models are missing. Please download them first.".to_string());
     }
 
     // Get photos to process — careful scoping to satisfy borrow checker
     let photos: Vec<(i64, String)> = {
-        let sql = if folder.is_empty() {
-            "SELECT id, path FROM photos".to_string()
-        } else {
-            format!(
-                "SELECT id, path FROM photos WHERE folder = '{}' OR path LIKE '{}%'",
-                folder.replace('\'', "''"),
-                folder.replace('\'', "''")
-            )
-        };
         let result: Result<Vec<(i64, String)>, String> = (|| {
             let conn = state.db.lock().map_err(|_| "db lock".to_string())?;
-            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-            let rows: Vec<(i64, String)> = stmt
-                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-                .map_err(|e| e.to_string())?
-                .filter_map(|r| r.ok())
-                .collect();
+            let rows: Vec<(i64, String)> = if folder.is_empty() {
+                let mut stmt = conn.prepare("SELECT id, path FROM photos")
+                    .map_err(|e| e.to_string())?;
+                let result: Vec<(i64, String)> = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                result
+            } else {
+                let like_pat = format!("{}%", &folder);
+                let mut stmt = conn.prepare(
+                    "SELECT id, path FROM photos WHERE folder = ?1 OR path LIKE ?2"
+                ).map_err(|e| e.to_string())?;
+                let result: Vec<(i64, String)> = stmt.query_map(rusqlite::params![&folder, &like_pat], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                result
+            };
             Ok(rows)
         })();
         result?
     };
 
     if photos.is_empty() {
-        return Err("Bu klasörde fotoğraf bulunamadı.".to_string());
+        return Err("No photos found in this folder.".to_string());
     }
 
     let thumbs_dir = state.thumbnails_dir.clone();
@@ -1652,14 +1663,14 @@ pub async fn scan_and_cluster_faces(
         for (photo_id, path) in &photos {
             // Check if already has faces
             let already_done = {
-                let conn = db_arc.lock().unwrap();
+                let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
                 db::photo_has_faces(&conn, *photo_id)
             };
 
             if already_done {
                 // Load existing embeddings
                 let rows = {
-                    let conn = db_arc.lock().unwrap();
+                    let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
                     db::get_faces_for_photo(&conn, *photo_id).unwrap_or_default()
                 };
                 for r in rows {
@@ -1685,7 +1696,7 @@ pub async fn scan_and_cluster_faces(
 
             // Clear old detections and insert new ones
             {
-                let conn = db_arc.lock().unwrap();
+                let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
                 db::delete_faces_for_photo(&conn, *photo_id).ok();
             }
 
@@ -1695,7 +1706,7 @@ pub async fn scan_and_cluster_faces(
                 let emb_bytes = crate::face::embedding_to_bytes(&embedding);
 
                 let face_id = {
-                    let conn = db_arc.lock().unwrap();
+                    let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
                     db::insert_face_region(
                         &conn, *photo_id,
                         face.x1, face.y1, face.x2, face.y2,
@@ -1753,7 +1764,7 @@ pub async fn scan_and_cluster_faces(
 
             // Check if already assigned to a person
             let (person_name, person_id) = {
-                let conn = db_arc.lock().unwrap();
+                let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
                 // Check representative face
                 let mut pname = None;
                 let mut pid = None;
@@ -1814,7 +1825,7 @@ pub async fn assign_cluster_to_person(
             db::create_person(&conn, name.trim()).map_err(|e| e.to_string())?
         }
     } else {
-        return Err("person_id veya person_name gerekli".to_string());
+        return Err("person_id or person_name is required".to_string());
     };
 
     // Assign every face in the cluster
@@ -1898,7 +1909,7 @@ pub async fn download_clip_models(
         if dest.exists() { return Ok(()); }
         let bytes = client.get(url)
             .header("User-Agent", "RetinaTag/1.2")
-            .send().await.map_err(|e| format!("İndirme hatası {}: {}", url, e))?
+            .send().await.map_err(|e| format!("Download error {}: {}", url, e))?
             .bytes().await.map_err(|e| e.to_string())?;
         std::fs::write(dest, &bytes).map_err(|e| e.to_string())?;
         Ok(())
@@ -1909,7 +1920,7 @@ pub async fn download_clip_models(
     dl(&client, &vocab_url,  &dir.join("clip_vocab.json")).await?;
     dl(&client, &merges_url, &dir.join("clip_merges.txt")).await?;
 
-    Ok(format!("{} modeli indirildi!", tier.label()))
+    Ok(format!("{} model downloaded!", tier.label()))
 }
 
 /// Index all photos: compute CLIP image embeddings and store in DB.
@@ -1951,7 +1962,7 @@ pub async fn index_clip_embeddings(
             };
             let bytes = crate::clip::embedding_to_bytes(&emb);
             {
-                let conn = db_arc.lock().unwrap();
+                let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
                 db::save_clip_embedding(&conn, *photo_id, &bytes, &tier_name).ok();
             }
             done += 1;
@@ -1991,7 +2002,7 @@ pub async fn semantic_search(
     };
 
     if photo_embs.is_empty() {
-        return Err("Önce 'Semantic İndeksle' butonuna basarak fotoğrafları indeksleyin.".to_string());
+        return Err("Please index your photos first using the 'Semantic Index' button.".to_string());
     }
 
     let query_owned = query.trim().to_string();
@@ -2023,7 +2034,7 @@ pub async fn semantic_search(
             .map(|(id, _)| id)
             .collect();
 
-        let conn = db_arc.lock().unwrap();
+        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
         db::get_photos_by_ids(&conn, &top_ids).map_err(|e| e.to_string())
     })
     .await

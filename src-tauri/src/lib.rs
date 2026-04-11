@@ -130,6 +130,7 @@ pub fn run() {
             commands::get_library_stats,
             commands::test_ollama_raw,
             commands::get_ollama_status,
+            commands::get_local_model_presets,
             commands::start_ollama_service,
             commands::stop_ollama_service,
             commands::pull_ollama_model,

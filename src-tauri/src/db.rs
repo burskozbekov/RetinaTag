@@ -267,12 +267,16 @@ pub fn insert_tags(
     photo_id: i64,
     tags: &[(String, f64, String)],
 ) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)",
-    )?;
-    for (tag, conf, source) in tags {
-        stmt.execute(params![photo_id, tag, conf, source])?;
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (tag, conf, source) in tags {
+            stmt.execute(params![photo_id, tag, conf, source])?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -835,22 +839,26 @@ pub fn update_watch_folder_checked(conn: &Connection, id: i64) -> Result<()> {
 // ── Tag Management ──────────────────────────────────────────────────────────
 
 pub fn merge_tags(conn: &Connection, source_tag: &str, target_tag: &str) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
     // Update all instances of source_tag to target_tag, skip if duplicate
-    let updated = conn.execute(
+    let updated = tx.execute(
         "UPDATE OR IGNORE tags SET tag = ?1 WHERE tag = ?2",
         params![target_tag, source_tag],
     )?;
     // Delete remaining (duplicates that couldn't be updated)
-    conn.execute("DELETE FROM tags WHERE tag = ?1", params![source_tag])?;
+    tx.execute("DELETE FROM tags WHERE tag = ?1", params![source_tag])?;
+    tx.commit()?;
     Ok(updated)
 }
 
 pub fn rename_tag(conn: &Connection, old_name: &str, new_name: &str) -> Result<usize> {
-    let updated = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE OR IGNORE tags SET tag = ?1 WHERE tag = ?2",
         params![new_name, old_name],
     )?;
-    conn.execute("DELETE FROM tags WHERE tag = ?1", params![old_name])?;
+    tx.execute("DELETE FROM tags WHERE tag = ?1", params![old_name])?;
+    tx.commit()?;
     Ok(updated)
 }
 
@@ -1244,31 +1252,34 @@ pub fn get_photos_with_clip_emb(
     conn: &Connection,
     tier: &str,
 ) -> Result<Vec<(i64, Vec<u8>)>> {
-    let sql = if tier.is_empty() {
-        "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL".to_string()
+    if tier.is_empty() {
+        let mut stmt = conn.prepare(
+            "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     } else {
-        format!(
-            "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL AND clip_tier = '{}'",
-            tier.replace('\'', "''")
-        )
-    };
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(rows)
+        let mut stmt = conn.prepare(
+            "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL AND clip_tier = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![tier], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
 }
 
 /// Returns photo_ids that do NOT yet have a CLIP embedding for the given tier.
 pub fn get_photos_without_clip_emb(conn: &Connection, tier: &str) -> Result<Vec<(i64, String)>> {
-    let sql = format!(
-        "SELECT id, path FROM photos WHERE clip_emb IS NULL OR clip_tier != '{}'",
-        tier.replace('\'', "''")
-    );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM photos WHERE clip_emb IS NULL OR clip_tier != ?1",
+    )?;
     let rows: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .query_map(params![tier], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(rows)

@@ -61,7 +61,9 @@ fn extract_gps(exif: &exif::Exif) -> (Option<f64>, Option<f64>, Option<f64>) {
 
     let alt = exif.get_field(Tag::GPSAltitude, In::PRIMARY).and_then(|f| {
         if let exif::Value::Rational(ref v) = f.value {
-            v.first().map(|r| r.num as f64 / r.denom as f64)
+            v.first().and_then(|r| {
+                if r.denom == 0 { None } else { Some(r.num as f64 / r.denom as f64) }
+            })
         } else {
             None
         }
@@ -75,7 +77,11 @@ fn extract_gps_coord(exif: &exif::Exif, coord_tag: Tag, ref_tag: Tag) -> Option<
     let ref_field = exif.get_field(ref_tag, In::PRIMARY)?;
 
     if let exif::Value::Rational(ref values) = field.value {
-        if values.len() >= 3 {
+        if values.len() >= 3
+            && values[0].denom != 0
+            && values[1].denom != 0
+            && values[2].denom != 0
+        {
             let degrees = values[0].num as f64 / values[0].denom as f64;
             let minutes = values[1].num as f64 / values[1].denom as f64;
             let seconds = values[2].num as f64 / values[2].denom as f64;
