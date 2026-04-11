@@ -17,7 +17,7 @@ const DET_SIZE: usize = 640;   // SCRFD input
 const EMB_SIZE: usize = 112;   // MobileFaceNet input
 const SCORE_THRESH: f32 = 0.5;
 const NMS_THRESH: f32 = 0.4;
-pub const RECOGNITION_THRESH: f32 = 0.35; // cosine similarity threshold
+pub const RECOGNITION_THRESH: f32 = 0.55; // cosine similarity threshold (higher = stricter)
 
 // ── Model types ───────────────────────────────────────────────────────────────
 
@@ -51,34 +51,34 @@ pub fn load_models(models_dir: &Path) -> Result<FaceModels> {
 
     if !det_path.exists() {
         bail!(
-            "Yüz tespit modeli bulunamadı: {:?}\n\
-             Lütfen download_models.ps1 scriptini çalıştırın veya Settings > Yüz Tanıma > İndir butonunu kullanın.",
+            "Face detection model not found: {:?}\n\
+             Please run download_models.ps1 or use Settings > Face Recognition > Download.",
             det_path
         );
     }
     if !emb_path.exists() {
         bail!(
-            "Yüz gömme modeli bulunamadı: {:?}\n\
-             Lütfen download_models.ps1 scriptini çalıştırın veya Settings > Yüz Tanıma > İndir butonunu kullanın.",
+            "Face embedding model not found: {:?}\n\
+             Please run download_models.ps1 or use Settings > Face Recognition > Download.",
             emb_path
         );
     }
 
     let detector = tract_onnx::onnx()
         .model_for_path(&det_path)
-        .context("Tespit modeli yüklenemedi")?
+        .context("Failed to load detection model")?
         .into_optimized()
-        .context("Tespit modeli optimize edilemedi")?
+        .context("Failed to optimize detection model")?
         .into_runnable()
-        .context("Tespit modeli çalıştırılamadı")?;
+        .context("Failed to make detection model runnable")?;
 
     let embedder = tract_onnx::onnx()
         .model_for_path(&emb_path)
-        .context("Gömme modeli yüklenemedi")?
+        .context("Failed to load embedding model")?
         .into_optimized()
-        .context("Gömme modeli optimize edilemedi")?
+        .context("Failed to optimize embedding model")?
         .into_runnable()
-        .context("Gömme modeli çalıştırılamadı")?;
+        .context("Failed to make embedding model runnable")?;
 
     Ok(FaceModels { detector, embedder })
 }

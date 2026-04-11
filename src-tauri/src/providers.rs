@@ -2,16 +2,16 @@ use anyhow::{Context, Result};
 
 use crate::models::AiProvider;
 
-/// Hata türü — tagger bu bilgiyle ne yapacağına karar verir
+/// Error kind — tagger decides what action to take based on this
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApiErrorKind {
-    /// 401/403 — API key yanlış, bu provider'ı devre dışı bırak
+    /// 401/403 — API key invalid, disable this provider
     AuthFailed,
-    /// 429 — Rate limit, bekle ve tekrar dene
+    /// 429 — Rate limit, wait and retry
     RateLimit { retry_after_secs: u64 },
-    /// 5xx / timeout — Geçici hata, kısa süre sonra tekrar dene
+    /// 5xx / timeout — Transient error, retry after a short delay
     Transient,
-    /// Diğer kalıcı hatalar
+    /// Other permanent errors
     Permanent,
 }
 
@@ -32,7 +32,7 @@ fn classify_status(status: u16, body: &str) -> ApiErrorKind {
     match status {
         401 | 403 => ApiErrorKind::AuthFailed,
         429 => {
-            // Bazı API'ler Retry-After header veya body'de süre verir
+            // Some APIs provide retry duration in Retry-After header or body
             let secs = body.parse::<u64>().unwrap_or(15);
             ApiErrorKind::RateLimit { retry_after_secs: secs.min(120) }
         }
@@ -42,18 +42,38 @@ fn classify_status(status: u16, body: &str) -> ApiErrorKind {
 }
 
 const TAG_PROMPT: &str = "\
-Analyze this image and return ONLY a JSON array of descriptive English tags. \
-No explanation, no markdown, just the raw JSON array. \
-Include 10-20 tags covering: subjects, objects, colors, mood, setting, \
-activities, visual style, lighting, composition, and any text visible. \
-Use lowercase. Example: [\"outdoor\",\"sunset\",\"mountain\",\"orange sky\",\"silhouette\",\"hiking\"]";
+Analyze this image and return ONLY a JSON array of 20-40 descriptive English tags. \
+No explanation, no markdown, just the raw JSON array. Be EXHAUSTIVE and SPECIFIC. \
+REQUIRED categories — include ALL that apply: \
+- PEOPLE: gender (man/woman/boy/girl), age range (baby/child/teen/young adult/middle-aged/elderly), ethnicity if visible, hair color, facial hair \
+- EMOTIONS: smiling, laughing, serious, surprised, happy, sad, romantic \
+- CLOTHING: dress, jacket, hat, scarf, glasses, casual, formal, traditional \
+- BODY: portrait, close-up, selfie, full-body, group photo, couple \
+- OBJECTS: every visible object (phone, bag, glass, plate, fork, car, etc.) \
+- FOOD & DRINK: specific food names (pasta, steak, salad, coffee, wine, etc.) \
+- LOCATION: indoor/outdoor, restaurant, street, park, museum, beach, city, nature \
+- ARCHITECTURE: building, monument, church, bridge, tower, historical \
+- COLORS: dominant colors (red, blue, green, black, white, etc.) \
+- MOOD: romantic, festive, calm, energetic, dramatic, cozy \
+- WEATHER/LIGHT: sunny, cloudy, night, golden hour, flash, dim \
+- ACTIVITY: eating, walking, posing, talking, cooking, traveling, sightseeing \
+Use lowercase. Be specific: say \"woman\" not just \"person\", say \"pasta\" not just \"food\". \
+Example: [\"woman\",\"man\",\"couple\",\"selfie\",\"smiling\",\"restaurant\",\"indoor\",\"dinner\",\"wine glass\",\"romantic\",\"evening\",\"casual\",\"happy\",\"brown hair\",\"scarf\"]";
 
-/// Simpler prompt for local Ollama models — more reliable JSON output
+/// Detailed prompt for local Ollama models
 const OLLAMA_TAG_PROMPT: &str = "\
-Look at this image. List 10-15 descriptive tags as a JSON array of strings.
-Tags should describe: people, objects, colors, setting, mood, activities.
-Use lowercase English. Output ONLY the JSON array, nothing else.
-Example output: [\"person\",\"outdoor\",\"sunset\",\"smiling\",\"casual\"]";
+Analyze this image exhaustively. Return 20-40 tags as a JSON array of lowercase English strings.
+Be VERY SPECIFIC — use exact words:
+- People: say \"man\" or \"woman\" (not just \"person\"), include age (child/young/elderly), hair color
+- Food: name the exact dish (pasta, steak, salad) not just \"food\"
+- Location: be specific (restaurant, museum, park, beach, street)
+- Objects: list every visible object (phone, glass, plate, bag, car)
+- Emotions: smiling, laughing, serious, romantic, happy
+- Clothing: jacket, dress, hat, scarf, glasses
+- Colors: dominant colors visible
+- Activity: eating, walking, posing, talking, sightseeing
+Output ONLY the JSON array, nothing else.
+Example: [\"woman\",\"man\",\"couple\",\"restaurant\",\"indoor\",\"pasta\",\"wine\",\"smiling\",\"romantic\",\"evening\",\"casual\",\"brown hair\"]";
 
 /// Parse AI response into tag list, handling various response formats
 pub fn extract_tags(text: &str) -> Vec<String> {
@@ -119,7 +139,10 @@ fn normalize_tags(tags: Vec<String>) -> Vec<String> {
 // ── Claude (Anthropic) ───────────────────────────────────────────────────────
 
 pub async fn call_claude(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("HTTP client build failed")?;
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 512,
@@ -167,7 +190,10 @@ pub async fn call_claude(image_b64: &str, api_key: &str, model: &str) -> Result<
 // ── OpenAI (GPT-4o) ─────────────────────────────────────────────────────────
 
 pub async fn call_openai(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("HTTP client build failed")?;
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 512,
@@ -215,7 +241,10 @@ pub async fn call_openai(image_b64: &str, api_key: &str, model: &str) -> Result<
 // ── Google Gemini ────────────────────────────────────────────────────────────
 
 pub async fn call_gemini(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("HTTP client build failed")?;
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         model, api_key
@@ -266,7 +295,10 @@ pub async fn call_gemini(image_b64: &str, api_key: &str, model: &str) -> Result<
 // ── xAI Grok ─────────────────────────────────────────────────────────────────
 
 pub async fn call_grok(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("HTTP client build failed")?;
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 512,
@@ -316,13 +348,13 @@ pub async fn call_grok(image_b64: &str, api_key: &str, model: &str) -> Result<Ve
 /// Default Ollama endpoint — configurable via `ollama_endpoint` setting.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
-/// Call a local Ollama model with vision support (e.g. qwen2.5vl:7b).
+/// Call a local Ollama model with vision support (e.g. gemma3:4b, qwen2.5vl:7b).
 /// Ollama uses the `/api/chat` endpoint with `images` field for base64 data.
 pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result<Vec<String>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
-        .unwrap();
+        .context("HTTP client build failed")?;
 
     let url = format!("{}/api/chat", endpoint.trim_end_matches('/'));
 
@@ -393,10 +425,13 @@ pub async fn check_ollama_status(
     model: &str,
     endpoint: &str,
 ) -> (bool, bool, Vec<String>) {
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .unwrap();
+    {
+        Ok(c) => c,
+        Err(_) => return (false, false, vec![]),
+    };
 
     let url = format!("{}/api/tags", endpoint.trim_end_matches('/'));
     match client.get(&url).send().await {
@@ -439,7 +474,12 @@ pub async fn call_provider(
         AiProvider::Gemini => call_gemini(image_b64, api_key, model).await,
         AiProvider::Grok => call_grok(image_b64, api_key, model).await,
         AiProvider::Local => {
-            let endpoint = if api_key.is_empty() { DEFAULT_OLLAMA_URL } else { api_key };
+            // api_key may be "endpoint|model" or just "endpoint"
+            let endpoint = if api_key.is_empty() {
+                DEFAULT_OLLAMA_URL
+            } else {
+                api_key.split('|').next().unwrap_or(DEFAULT_OLLAMA_URL)
+            };
             call_ollama(image_b64, model, endpoint).await
         }
     }
@@ -448,8 +488,9 @@ pub async fn call_provider(
 // ── Translation via cheapest available text API ──────────────────────────────
 
 const TRANSLATE_PROMPT: &str = "\
-Translate the following search query to English tags for image search. \
-Return ONLY a JSON array of English search terms. No explanation. \
+Translate ONLY this word/phrase to English. Return a JSON array with ONLY the direct translation. \
+Do NOT add synonyms, related words, or broader categories. \
+Examples: kadın→[\"woman\"], kedi→[\"cat\"], kırmızı araba→[\"red car\"], güneş batımı→[\"sunset\"]. \
 If already English, return as-is but still in a JSON array. \
 Input: ";
 
@@ -537,15 +578,17 @@ pub async fn translate_query(
                 .to_string()
         }
         AiProvider::Local => {
-            // Use Ollama for translation too — text-only, no image
-            let endpoint = if api_key.is_empty() { DEFAULT_OLLAMA_URL } else { api_key };
+            // Use Ollama for translation — use whatever model is configured
+            let parts: Vec<&str> = api_key.splitn(2, '|').collect();
+            let endpoint = if parts[0].is_empty() { DEFAULT_OLLAMA_URL } else { parts[0] };
+            let model = if parts.len() > 1 && !parts[1].is_empty() { parts[1] } else { "gemma3:4b" };
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
-                .unwrap();
+                .context("HTTP client build failed")?;
             let url = format!("{}/api/chat", endpoint.trim_end_matches('/'));
             let body = serde_json::json!({
-                "model": "qwen2.5:7b",  // text-only model for translation
+                "model": model,
                 "stream": false,
                 "messages": [{ "role": "user", "content": prompt }]
             });

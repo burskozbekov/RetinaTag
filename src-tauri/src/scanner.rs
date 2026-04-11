@@ -27,7 +27,7 @@ pub fn compute_hash(path: &str) -> Result<String> {
     use std::io::Read;
     // Chunked reading — safe for large RAW files (50MB+)
     let file = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("Dosya açılamadı '{}': {}", path, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path, e))?;
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
@@ -113,9 +113,20 @@ pub async fn scan_folder_impl(
                 return Ok(false);
             }
 
-            let (width, height) = image::image_dimensions(&path_str_clone)
-                .map(|(w, h)| (Some(w as i32), Some(h as i32)))
-                .unwrap_or((None, None));
+            // image_dimensions can hang on corrupted files; use a thread
+            // with a timeout so a bad file never stalls the entire scan.
+            let (width, height) = {
+                let dims_path = path_str_clone.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = image::image_dimensions(&dims_path)
+                        .map(|(w, h)| (Some(w as i32), Some(h as i32)))
+                        .unwrap_or((None, None));
+                    let _ = tx.send(result);
+                });
+                rx.recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap_or((None, None))
+            };
 
             let meta = std::fs::metadata(&path_str_clone)?;
             let size = meta.len() as i64;
@@ -169,7 +180,7 @@ pub async fn scan_folder_impl(
             Err(e) => {
                 app_handle.emit("scan-file-error", serde_json::json!({
                     "file": path.to_string_lossy(),
-                    "error": format!("İşlem hatası: {}", e)
+                    "error": format!("Processing error: {}", e)
                 })).ok();
             }
         }

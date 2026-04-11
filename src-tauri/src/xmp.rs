@@ -7,19 +7,7 @@ use std::path::Path;
 pub fn write_xmp_sidecar(photo_path: &str, tags: &[String]) -> Result<String> {
     let xmp_path = format!("{}.xmp", photo_path);
 
-    let subject_tags: String = tags
-        .iter()
-        .map(|t| format!("          <rdf:li>{}</rdf:li>", escape_xml(t)))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let hierarchical: String = tags
-        .iter()
-        .map(|t| format!("          <rdf:li>{}</rdf:li>", escape_xml(t)))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let keywords_iptc: String = tags
+    let tag_items: String = tags
         .iter()
         .map(|t| format!("          <rdf:li>{}</rdf:li>", escape_xml(t)))
         .collect::<Vec<_>>()
@@ -43,21 +31,21 @@ pub fn write_xmp_sidecar(photo_path: &str, tags: &[String]) -> Result<String> {
       <!-- Dublin Core Subject (standard tags) -->
       <dc:subject>
         <rdf:Bag>
-{subject_tags}
+{tag_items}
         </rdf:Bag>
       </dc:subject>
 
       <!-- Lightroom Hierarchical Subject -->
       <lr:hierarchicalSubject>
         <rdf:Bag>
-{hierarchical}
+{tag_items}
         </rdf:Bag>
       </lr:hierarchicalSubject>
 
       <!-- IPTC Keywords -->
       <Iptc4xmpCore:Keywords>
         <rdf:Bag>
-{keywords_iptc}
+{tag_items}
         </rdf:Bag>
       </Iptc4xmpCore:Keywords>
 

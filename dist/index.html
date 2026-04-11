@@ -66,13 +66,23 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
   box-shadow:0 2px 12px rgba(184,58,18,.3)}
 .btn-primary:hover{background:linear-gradient(135deg,var(--red),var(--red-light));
   box-shadow:0 4px 20px rgba(184,58,18,.45);transform:translateY(-1px)}
+.btn-primary:active:not(:disabled){transform:scale(.93);box-shadow:0 1px 4px rgba(184,58,18,.25);
+  transition:transform .06s,box-shadow .06s}
 .btn-secondary{background:var(--card);color:var(--text2);border:1px solid var(--border2)}
 .btn-secondary:hover{border-color:var(--red-dark);color:var(--cream)}
+.btn-secondary:active:not(:disabled){transform:scale(.93);background:var(--surface);
+  border-color:var(--red);transition:transform .06s,background .06s}
 .btn-ghost{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;
   line-height:1;padding:4px;transition:color .15s;font-family:var(--font)}
 .btn-ghost:hover{color:var(--cream)}
+.btn-ghost:active{color:var(--red-light);transform:scale(.9);transition:transform .06s}
 .btn-block{width:100%}.btn-sm{padding:5px 10px;font-size:11px}
 .btn:disabled{opacity:.3;cursor:not-allowed;transform:none !important}
+.btn.loading{position:relative;color:transparent !important;pointer-events:none}
+.btn.loading::after{content:'';position:absolute;width:14px;height:14px;
+  border:2px solid var(--cream);border-top-color:transparent;border-radius:50%;
+  animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .btn-xs{padding:3px 8px;font-size:10px;border-radius:5px}
 .btn-danger{background:rgba(192,64,64,.15);color:#E05050;border:1px solid rgba(192,64,64,.3)}
 .btn-danger:hover{background:rgba(192,64,64,.25)}
@@ -246,12 +256,9 @@ select.tb-select:focus{border-color:var(--red-dark)}
 .clip-tier-desc{font-size:10px;color:var(--text3);margin-top:2px;line-height:1.4}
 .clip-tier-badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;flex-shrink:0}
 .clip-tier-badge.ok{background:rgba(100,210,120,.15);color:var(--green)}
-.clip-tier-badge.dl{background:var(--red-bg);color:var(--red-light);cursor:pointer}
-/* Search mode toggle */
-.search-mode-toggle{display:flex;gap:0;border-radius:20px;overflow:hidden;border:1px solid var(--border2);flex-shrink:0}
-.search-mode-btn{padding:6px 12px;font-size:11px;font-weight:600;color:var(--text3);background:none;border:none;
-  cursor:pointer;transition:all .14s;font-family:var(--font)}
-.search-mode-btn.active{background:var(--red-dark);color:white}
+.clip-tier-badge.dl{background:var(--red-bg);color:var(--red-light);cursor:pointer;transition:transform .1s,background .1s}
+.clip-tier-badge.dl:hover{background:rgba(184,58,18,.25)}
+.clip-tier-badge.dl:active{transform:scale(.88);background:rgba(184,58,18,.4)}
 /* Cluster card */
 .cluster-card{background:var(--card);border:1px solid var(--border2);border-radius:var(--radius-sm);
   padding:12px;transition:border-color .14s}
@@ -515,16 +522,16 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <!-- Persons / Face Recognition -->
   <div class="persons-section" id="personsSection">
     <div class="sb-label" style="display:flex;justify-content:space-between;align-items:center">
-      <span>Kişiler</span>
+      <span>People</span>
       <div style="display:flex;gap:4px">
-        <button class="btn-ghost" id="btnClusterFaces" title="Yüzleri otomatik grupla" style="font-size:10px;padding:2px 6px;color:var(--amber)">Grupla</button>
-        <button class="btn-ghost" id="btnRecognizeAll" title="Tanımlı kişileri tüm fotoğraflarda ara" style="font-size:10px;padding:2px 6px">Tanı</button>
-        <button class="btn-ghost" id="btnNewPerson" title="Yeni kişi ekle" style="font-size:14px;padding:0 4px">+</button>
+        <button class="btn-ghost" id="btnClusterFaces" title="Auto-cluster all faces" style="font-size:10px;padding:2px 6px;color:var(--amber)">Cluster</button>
+        <button class="btn-ghost" id="btnRecognizeAll" title="Recognize known people in all photos" style="font-size:10px;padding:2px 6px">Recognize</button>
+        <button class="btn-ghost" id="btnNewPerson" title="Add new person" style="font-size:14px;padding:0 4px">+</button>
       </div>
     </div>
     <div id="personsList" style="margin-top:4px"></div>
     <div id="noPersonsHint" style="font-size:10px;color:var(--text3);padding:6px 4px;line-height:1.5">
-      Henüz kişi yok.<br>"Grupla" ile tüm yüzleri otomatik gruplandır.
+      No people yet.<br>Use "Cluster" to auto-group all faces.
     </div>
   </div>
 
@@ -567,13 +574,9 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <button class="view-tab" data-view="duplicates">Dupes</button>
       <button class="view-tab" data-view="dashboard">Dashboard</button>
     </div>
-    <div class="search-mode-toggle" id="searchModeToggle" title="Arama modunu değiştir">
-      <button class="search-mode-btn active" data-mode="tag" id="btnModeTag">🏷 Tag</button>
-      <button class="search-mode-btn" data-mode="semantic" id="btnModeSemantic">🧠 Semantic</button>
-    </div>
     <div class="search-box">
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input type="text" id="searchInput" placeholder="Search tags…">
+      <input type="text" id="searchInput" placeholder="Search photos…">
       <span class="search-hint" id="searchHint"></span>
     </div>
     <select class="tb-select" id="statusFilter">
@@ -583,6 +586,12 @@ select.tb-select:focus{border-color:var(--red-dark)}
     <button class="btn btn-primary btn-sm" id="btnTagAll">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
       Tag with AI
+    </button>
+    <button class="btn btn-secondary btn-sm" id="btnClearRetag" title="Clear all tags and re-tag from scratch" style="font-size:10px">
+      🔄 Re-tag All
+    </button>
+    <button class="btn btn-secondary btn-sm" id="btnScanFacesAll" title="Scan all faces and identify unknown people" style="font-size:10px">
+      👤 Identify Faces
     </button>
     <button class="btn btn-secondary btn-sm" id="btnExport" title="Export data">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -618,10 +627,10 @@ select.tb-select:focus{border-color:var(--red-dark)}
     </div>
     <div class="face-section" id="faceSection" style="display:none">
       <div class="section-label">
-        <span>Yüzler</span>
+        <span>Faces</span>
         <button class="btn btn-secondary btn-sm" id="btnScanFaces" style="font-size:9px;padding:3px 8px">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="7" r="4"/><path d="M5 20v-2a7 7 0 0114 0v2"/></svg>
-          Yüzleri Tara
+          Detect Faces
         </button>
       </div>
       <div class="face-grid" id="faceGrid"></div>
@@ -645,15 +654,15 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <div class="modal-box" style="width:720px;max-height:90vh;display:flex;flex-direction:column">
     <div style="padding:22px 24px 0">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-        <div style="font-size:16px;font-weight:800;color:var(--cream)">Yüz Grupları</div>
+        <div style="font-size:16px;font-weight:800;color:var(--cream)">Face Clusters</div>
         <button class="btn-ghost" id="btnCloseClusterModal" style="font-size:18px">&times;</button>
       </div>
       <div style="font-size:11px;color:var(--text3);margin-bottom:16px" id="clusterSubtitle">
-        Her gruba bir isim verin — aynı kişinin tüm fotoğrafları otomatik etiketlenecek.
+        Name each group — all photos of the same person will be auto-tagged.
       </div>
       <!-- progress bar shown during scanning -->
       <div id="clusterProgress" style="display:none;margin-bottom:14px">
-        <div style="font-size:11px;color:var(--amber);margin-bottom:6px" id="clusterProgressLabel">Yüzler taranıyor…</div>
+        <div style="font-size:11px;color:var(--amber);margin-bottom:6px" id="clusterProgressLabel">Scanning faces…</div>
         <div class="progress-track"><div class="progress-fill" id="clusterProgressFill" style="width:0%"></div></div>
       </div>
     </div>
@@ -664,8 +673,8 @@ select.tb-select:focus{border-color:var(--red-dark)}
     <div style="padding:14px 24px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
       <span style="font-size:11px;color:var(--text3)" id="clusterCount"></span>
       <div style="flex:1"></div>
-      <button class="btn btn-secondary btn-sm" id="btnCloseClusterModal2">Kapat</button>
-      <button class="btn btn-primary btn-sm" id="btnApplyClusters">Tüm İsimleri Uygula</button>
+      <button class="btn btn-secondary btn-sm" id="btnCloseClusterModal2">Close</button>
+      <button class="btn btn-primary btn-sm" id="btnApplyClusters">Apply All Names</button>
     </div>
   </div>
 </div>
@@ -673,19 +682,19 @@ select.tb-select:focus{border-color:var(--red-dark)}
 <!-- ── Assign Face Modal ──────────────────────────────────────────── -->
 <div class="modal-overlay" id="assignFaceModal">
   <div class="modal-box" style="width:340px;padding:24px">
-    <div style="font-size:15px;font-weight:800;color:var(--cream);margin-bottom:16px;text-align:center">Yüzü Kişiye Ata</div>
-    <img id="assignFaceImg" class="assign-face-preview" src="" alt="Yüz">
+    <div style="font-size:15px;font-weight:800;color:var(--cream);margin-bottom:16px;text-align:center">Assign Face to Person</div>
+    <img id="assignFaceImg" class="assign-face-preview" src="" alt="Face">
     <div style="font-size:11px;color:var(--text3);text-align:center;margin-bottom:10px" id="assignFaceScore"></div>
     <!-- Existing persons list -->
     <div class="person-pick-list" id="assignPersonList"></div>
     <!-- New person input -->
     <div style="display:flex;gap:6px;margin-top:10px">
-      <input class="add-input" id="newPersonInput" placeholder="Yeni kişi adı…" style="flex:1">
+      <input class="add-input" id="newPersonInput" placeholder="New person name…" style="flex:1">
       <button class="btn btn-primary btn-sm" id="btnCreateAndAssign">Ata</button>
     </div>
     <div style="display:flex;gap:6px;margin-top:12px;justify-content:space-between">
-      <button class="btn btn-secondary btn-sm" id="btnUnassignFace">Atamayı Kaldır</button>
-      <button class="btn btn-secondary btn-sm" id="btnCloseAssignModal">İptal</button>
+      <button class="btn btn-secondary btn-sm" id="btnUnassignFace">Unassign</button>
+      <button class="btn btn-secondary btn-sm" id="btnCloseAssignModal">Cancel</button>
     </div>
   </div>
 </div>
@@ -734,16 +743,16 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <!-- CLIP Semantic Search -->
       <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)" id="clipSettingsSection">
         <div class="sb-label" style="margin-bottom:4px">
-          🔍 Semantic Arama (CLIP)
-          <span style="font-size:10px;font-weight:400;color:var(--text3);margin-left:8px">"Gün batımında deniz" gibi cümleyle ara</span>
+          🔍 Semantic Search (CLIP)
+          <span style="font-size:10px;font-weight:400;color:var(--text3);margin-left:8px">Search with natural language: "sunset over the sea"</span>
         </div>
         <p style="font-size:11px;color:var(--text3);margin-bottom:12px;line-height:1.6">
-          Fotoğrafı görmeden anlayan AI — tag olmasa bile bulur. Bir model seç ve fotoğrafları indeksle.
+          AI that understands photos without tags — finds them even without keywords. Pick a model and index your library.
         </p>
         <div style="display:flex;flex-direction:column;gap:8px" id="clipTierList"></div>
         <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
-          <button class="btn btn-secondary btn-sm" id="btnClipIndex">⚡ Semantic İndeksle</button>
           <span style="font-size:11px;color:var(--text3)" id="clipIndexStatus">—</span>
+          <span style="font-size:10px;color:var(--text3)">Indexing runs automatically after tagging</span>
         </div>
       </div>
     </div>
@@ -1164,10 +1173,18 @@ async function addToCollectionPrompt(photoId){
 
 // ── Add folder ────────────────────────────────────────────────────────────────
 $('btnAddFolder').onclick=async()=>{
-  try{const folder=await invoke('open_folder_dialog');
-    if(!folder)return;toast('Scanning '+folder.split(/[\\/]/).pop()+'…','info');
+  toast('Button clicked! Calling dialog…','info');
+  try{
+    const folder=await invoke('open_folder_dialog');
+    if(!folder){toast('No folder selected (cancelled)','info');return;}
+    toast('Scanning '+folder.split(/[\\/]/).pop()+'…','info');
     await invoke('scan_folder',{folder});
-  }catch(e){toast('Error: '+e,'error')}
+    await loadPhotos();refreshFolders();refreshStats();
+    toast('Scan complete!','success');
+  }catch(e){
+    toast('Dialog ERROR: '+String(e),'error');
+    console.error('open_folder_dialog error:', e);
+  }
 };
 
 // ── Drag & Drop ──────────────────────────────────────────────────────────────
@@ -1204,21 +1221,51 @@ listen('scan-error',({payload:m})=>{$('progressArea').classList.remove('active')
 listen('tag-progress',({payload:p})=>{
   $('progressArea').classList.add('active');
   const pct=p.total?Math.round(p.completed/p.total*100):0;
-  $('progressLabel').textContent='Etiketleniyor…';$('progressPct').textContent=pct+'%';
+  $('progressLabel').textContent='Tagging…';$('progressPct').textContent=pct+'%';
   $('progressFill').style.width=pct+'%';
   $('progressSub').textContent=`${p.completed}/${p.total} · ${p.current_provider} · ${p.current_file}`;
 });
-listen('tag-complete',({payload:p})=>{
+listen('tag-complete',async({payload:p})=>{
   $('progressArea').classList.remove('active');
   _lastProviderErrors=[];
   const parts=p.provider_breakdown.map(b=>`${b.provider}: ${b.count}`).join(' · ');
-  const failMsg=p.failed?` · ${p.failed} hatalı`:'';
+  const failMsg=p.failed?` · ${p.failed} failed`:'';
   if(p.tagged===0 && p.failed===0){
-    toast('Etiketlenecek fotoğraf bulunamadı','warn');
+    toast('No photos found to tag','warn');
   } else {
-    toast(`${p.tagged} fotoğraf etiketlendi${failMsg}${parts?' — '+parts:''}`,'success');
+    toast(`${p.tagged} photos tagged${failMsg}${parts?' — '+parts:''}`,'success');
   }
-  if(p.tagged>0) toast('GPU belleği serbest bırakıldı','info');
+  if(p.tagged>0){
+    // Auto-run face detection + recognition
+    try{
+      const hasModels=await invoke('check_face_models');
+      if(hasModels){
+        toast('Scanning faces in photos… this may take a moment','info');
+        // Detect faces in all unprocessed photos (fast, no clustering)
+        const newFaces=await invoke('detect_faces_background').catch(e=>{
+          console.error('Face detection error:',e);return 0;
+        });
+        if(newFaces>0) toast(`${newFaces} new face(s) detected`,'info');
+        // Recognize known faces
+        const recognized=await invoke('recognize_all_faces').catch(()=>0);
+        if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
+        // Show "Who is this?" for unrecognized faces
+        await checkUnknownFaces(false); // false = auto mode (no "none found" toast)
+      } else {
+        // Face models not downloaded — skip silently (don't nag the user every tag cycle)
+      }
+    }catch(e){console.error('Face pipeline error:',e);}
+    // Auto-run semantic indexing if CLIP is available
+    try{
+      const clipStatus=await invoke('get_clip_status');
+      const downloaded=clipStatus.find(t=>t.downloaded);
+      if(downloaded){
+        toast('Starting semantic indexing…','info');
+        const indexed=await invoke('index_clip_embeddings',{tier:downloaded.tier});
+        if(indexed>0) toast(`${indexed} photos semantically indexed`,'success');
+      }
+    }catch(_){}
+  }
   loadPhotos();refreshStats();refreshProviders();
 });
 listen('tag-error',({payload:m})=>{
@@ -1233,7 +1280,7 @@ listen('tag-auth-error',({payload:p})=>{
   setTimeout(()=>document.querySelector('[data-action="settings"]')?.classList.remove('pulse-error'),4000);
 });
 listen('tag-rate-limit',({payload:p})=>{
-  toast(`⏱ ${p.provider} rate limit — ${p.wait_secs}sn bekleniyor…`,'warn');
+  toast(`⏱ ${p.provider} rate limit — waiting ${p.wait_secs}s…`,'warn');
 });
 let _lastProviderErrors=[];
 listen('tag-provider-error',({payload:p})=>{
@@ -1247,13 +1294,13 @@ listen('tag-provider-error',({payload:p})=>{
 listen('scan-file-error',({payload:p})=>{
   console.warn('Scan error:',p.file,p.error);
 });
-listen('watch-new-files',({payload:p})=>{toast(`İzleme: ${p.count} yeni dosya algılandı`,'info');loadPhotos();refreshStats()});
+listen('watch-new-files',({payload:p})=>{toast(`Watch: ${p.count} new files detected`,'info');loadPhotos();refreshStats()});
 
-// Global hata yakalayıcı
+// Global error handler
 window.addEventListener('unhandledrejection',e=>{
   console.error('Unhandled rejection:',e.reason);
-  const msg=e.reason?.message||e.reason?.toString()||'Bilinmeyen hata';
-  toast('Hata: '+translateError(msg),'error');
+  const msg=e.reason?.message||e.reason?.toString()||'Unknown error';
+  toast('Error: '+translateError(msg),'error');
   e.preventDefault();
 });
 window.addEventListener('error',e=>{
@@ -1261,16 +1308,16 @@ window.addEventListener('error',e=>{
 });
 
 function translateError(msg){
-  if(!msg) return 'Bilinmeyen hata';
-  if(msg.includes('401')||msg.includes('Unauthorized')||msg.includes('invalid api key')) return 'API anahtarı geçersiz. Ayarlar\'dan kontrol edin.';
-  if(msg.includes('429')||msg.includes('rate limit')||msg.includes('Too Many')) return 'İstek limiti aşıldı. Biraz bekleyin.';
-  if(msg.includes('timeout')||msg.includes('timed out')) return 'Bağlantı zaman aşımı. İnternet bağlantınızı kontrol edin.';
-  if(msg.includes('network')||msg.includes('fetch')) return 'Ağ hatası. İnternet bağlantınızı kontrol edin.';
-  if(msg.includes('No AI providers')) return 'AI sağlayıcı tanımlı değil. Ayarlar\'dan API anahtarı ekleyin.';
-  if(msg.includes('budget')) return 'Aylık bütçe aşıldı. Ayarlar\'dan limiti artırın.';
-  if(msg.includes('not found')||msg.includes('404')) return 'Dosya veya model bulunamadı.';
-  if(msg.includes('disk full')||msg.includes('No space')) return 'Disk dolu. Alan açın.';
-  if(msg.includes('permission')||msg.includes('Access denied')) return 'İzin hatası. Klasöre erişim yok.';
+  if(!msg) return 'Unknown error';
+  if(msg.includes('401')||msg.includes('Unauthorized')||msg.includes('invalid api key')) return 'Invalid API key. Check your Settings.';
+  if(msg.includes('429')||msg.includes('rate limit')||msg.includes('Too Many')) return 'Rate limit exceeded. Please wait a moment.';
+  if(msg.includes('timeout')||msg.includes('timed out')) return 'Connection timed out. Check your internet connection.';
+  if(msg.includes('network')||msg.includes('fetch')) return 'Network error. Check your internet connection.';
+  if(msg.includes('No AI providers')) return 'No AI provider configured. Add an API key in Settings.';
+  if(msg.includes('budget')) return 'Monthly budget exceeded. Increase the limit in Settings.';
+  if(msg.includes('not found')||msg.includes('404')) return 'File or model not found.';
+  if(msg.includes('disk full')||msg.includes('No space')) return 'Disk full. Free up some space.';
+  if(msg.includes('permission')||msg.includes('Access denied')) return 'Permission error. No access to folder.';
   return msg;
 }
 
@@ -1278,42 +1325,135 @@ async function retryFailedPhotos(){
   try{
     const count=await invoke('retry_failed_photos');
     if(count>0){
-      toast(`${count} hatalı fotoğraf tekrar kuyruğa alındı`,'info');
+      toast(`${count} failed photos re-queued`,'info');
       await invoke('start_tagging');
-      toast('Yeniden etiketleme başlatıldı…','info');
+      toast('Re-tagging started…','info');
     } else {
-      toast('Yeniden denenecek fotoğraf yok','info');
+      toast('No failed photos to retry','info');
     }
-  }catch(e){toast('Hata: '+translateError(e),'error');}
+  }catch(e){toast('Error: '+translateError(e),'error');}
 }
 
 // ── Tag All ──────────────────────────────────────────────────────────────────
 $('btnTagAll').onclick=async()=>{
   try{
     const budget=await invoke('get_budget_status').catch(()=>null);
-    if(budget&&budget.is_over){toast('Aylık bütçe aşıldı! Ayarlar\'dan limiti artırın.','error');return;}
+    if(budget&&budget.is_over){toast('Monthly budget exceeded! Increase the limit in Settings.','error');return;}
     const statuses=await invoke('get_provider_statuses').catch(()=>[]);
     if(!statuses.some(s=>s.has_key||s.enabled)){
-      toast('Hiç AI sağlayıcı tanımlı değil. Önce Ayarlar\'ı açın.','error');
+      toast('No AI provider configured. Open Settings first.','error');
       openSettings();return;
     }
     const stats=await invoke('get_library_stats').catch(()=>null);
+    if(stats&&stats.total===0){
+      toast('No photos found. Scan a folder first.','info');return;
+    }
     if(stats&&stats.pending===0&&stats.error===0){
-      toast('Etiketlenecek fotoğraf yok. Önce bir klasör tara.','info');return;
+      toast('All photos are already tagged!','success');return;
     }
     await invoke('start_tagging');
-    toast('AI etiketleme başlatıldı…','info');
-  }catch(e){toast('Hata: '+translateError(String(e)),'error');}
+    toast('AI tagging started…','info');
+  }catch(e){toast('Error: '+translateError(String(e)),'error');}
 };
 
-// ── Search ────────────────────────────────────────────────────────────────────
+// ── Re-tag All ───────────────────────────────────────────────────────────────
+$('btnClearRetag').onclick=async()=>{
+  if(!confirm('This will DELETE all existing tags and re-tag every photo from scratch.\n\nAre you sure?')) return;
+  const btn=$('btnClearRetag');
+  btn.disabled=true;btn.textContent='🔄 Clearing…';
+  try{
+    const count=await invoke('clear_all_tags');
+    toast(`${count} photos cleared — starting re-tag…`,'info');
+    btn.textContent='🔄 Tagging…';
+    await loadPhotos();refreshStats();
+    await invoke('start_tagging');
+    toast('AI re-tagging started…','info');
+  }catch(e){
+    toast('Error: '+e,'error');
+  }finally{
+    btn.disabled=false;btn.textContent='🔄 Re-tag All';
+  }
+};
+
+// ── Identify Faces button ────────────────────────────────────────────────────
+$('btnScanFacesAll').onclick=async()=>{
+  const btn=$('btnScanFacesAll');
+  btn.disabled=true;btn.textContent='👤 Scanning…';
+  try{
+    // Download face models if needed
+    const hasModels=await invoke('check_face_models');
+    if(!hasModels){
+      toast('Downloading face detection models…','info');
+      await invoke('download_face_models');
+    }
+    // Detect faces in all unscanned photos
+    toast('Detecting faces in photos…','info');
+    const newFaces=await invoke('detect_faces_background').catch(e=>{throw new Error('Detection failed: '+e);});
+    if(newFaces>0) toast(`${newFaces} new face(s) detected`,'info');
+    // Recognize known faces
+    const recognized=await invoke('recognize_all_faces').catch(()=>0);
+    if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
+    // Show popup for unknown faces
+    await checkUnknownFaces(true);
+    refreshPersonsSidebar();
+    loadPhotos();
+  }catch(e){
+    toast('Error: '+e,'error');
+  }finally{
+    btn.disabled=false;btn.textContent='👤 Identify Faces';
+  }
+};
+
+// ── Unified Search (tag + semantic) ───────────────────────────────────────────
 let searchTimer=null;
 $('searchInput').oninput=e=>{
-  if(typeof _clipMode!=='undefined'&&_clipMode==='semantic') return; // handled by semantic listener
-  clearTimeout(searchTimer);const q=e.target.value.trim();
+  clearTimeout(searchTimer);
+  const q=e.target.value.trim();
+  if(!q){curSearch='';loadPhotos();$('searchHint').textContent='';return;}
   const nonEn=q&&[...q].some(c=>c.charCodeAt(0)>127);
-  $('searchHint').textContent=nonEn?'Translating…':'';
-  searchTimer=setTimeout(()=>{curSearch=q;loadPhotos().then(()=>{$('searchHint').textContent=''})},nonEn?600:300);
+  $('searchHint').textContent=nonEn?'Translating…':'🔍';
+  searchTimer=setTimeout(async()=>{
+    curSearch=q;
+    // 1. Direct tag search first
+    await loadPhotos();
+    let tagResults=[...photos];
+    let tagCount=tagResults.length;
+
+    // 2. If no results, try AI translation (works for any language including Turkish ASCII words like "adam")
+    if(tagCount===0){
+      try{
+        $('searchHint').textContent='🔄 Translating…';
+        const translated=await invoke('translate_for_clip',{query:q});
+        if(translated&&translated.toLowerCase()!==q.toLowerCase()){
+          curSearch=translated;
+          await loadPhotos();
+          tagResults=[...photos];
+          tagCount=tagResults.length;
+          if(tagCount>0) $('searchHint').textContent=`"${q}" → "${translated}" · ${tagCount} results`;
+        }
+      }catch(_){}
+    }
+
+    // 3. Semantic search (if CLIP available)
+    let semanticUnique=[];
+    try{
+      const clipQuery=(tagCount===0||nonEn)?await invoke('translate_for_clip',{query:q}).catch(()=>q):q;
+      const semResults=await invoke('semantic_search',{query:clipQuery,tier:_clipTierSelected,limit:50});
+      const tagIds=new Set(tagResults.map(p=>p.id));
+      semanticUnique=semResults.filter(p=>!tagIds.has(p.id));
+    }catch(_){}
+
+    // 4. Merge results
+    if(semanticUnique.length>0){
+      photos=[...tagResults,...semanticUnique];totalPhotos=photos.length;
+      $('searchHint').textContent=`${tagCount} tag + ${semanticUnique.length} semantic`;
+      renderGrid();
+    }else if(tagCount>0){
+      $('searchHint').textContent=`${tagCount} results`;
+    }else{
+      $('searchHint').textContent='No results';
+    }
+  },600);
 };
 $('statusFilter').onchange=e=>{curStatus=e.target.value;loadPhotos()};
 
@@ -1490,7 +1630,7 @@ const PROVIDERS=[
   {key:'openai',name:'GPT-4o',sub:'OpenAI',icon:'G',iconClass:'openai',defaultModel:'gpt-4o-mini',hint:'platform.openai.com',needsKey:true},
   {key:'gemini',name:'Gemini',sub:'Google',icon:'G',iconClass:'gemini',defaultModel:'gemini-2.0-flash',hint:'aistudio.google.com — free tier',needsKey:true},
   {key:'grok',name:'Grok',sub:'xAI',icon:'X',iconClass:'grok',defaultModel:'grok-2-vision-latest',hint:'console.x.ai',needsKey:true},
-  {key:'local',name:'Qwen2.5-VL',sub:'Local · Ollama',icon:'🤖',iconClass:'local',defaultModel:'qwen2.5vl:7b',hint:'Free, private, runs on your hardware.',needsKey:false},
+  {key:'local',name:'Local (Ollama)',sub:'Local · Ollama',icon:'🤖',iconClass:'local',defaultModel:'gemma3:4b',hint:'Free, private, runs on your hardware.',needsKey:false},
 ];
 let settingsData={};
 async function openSettings(){
@@ -1517,26 +1657,82 @@ async function openSettings(){
       const endpoint=settingsData['ollama_endpoint']||'http://localhost:11434';
       card.innerHTML=`<div class="pc-head"><div class="pc-icon ${prov.iconClass}">${prov.icon}</div>
         <div style="flex:1"><div class="pc-name">${prov.name}</div><div style="font-size:10px;color:var(--text3)">${prov.sub}</div></div>
-        <span class="free-badge">ÜCRETSİZ</span>
+        <span class="free-badge">FREE</span>
         <label class="pc-toggle"><input type="checkbox" data-setting="enabled_local" ${enabled?'checked':''}><span class="track"></span><span class="knob"></span></label></div>
-        <div class="form-hint" style="margin-bottom:10px">Tamamen ücretsiz, internet bağlantısı gerektirmez. Fotoğraflarınız cihazınızda kalır.</div>
-        <div><label class="form-label">Ollama Adresi</label><input class="form-input" data-setting="ollama_endpoint" value="${endpoint}" style="font-size:12px"></div>
+        <div class="form-hint" style="margin-bottom:10px">Completely free, no internet required. Your photos stay on your device.</div>
+        <div><label class="form-label">Ollama Address</label><input class="form-input" data-setting="ollama_endpoint" value="${endpoint}" style="font-size:12px"></div>
         <div style="margin-top:8px"><label class="form-label">Model</label>
           <div style="display:flex;gap:6px;align-items:center">
             <input class="form-input" id="localModelInput" data-setting="model_local" value="${model}" style="font-size:12px;flex:1">
-            <button class="btn-sm btn-ghost" onclick="pullOllamaModel()" title="Modeli indir">⬇ İndir</button>
+            <button class="btn-sm btn-ghost" onclick="pullOllamaModel()" title="Download model">⬇ Download</button>
           </div>
-          <div style="font-size:10px;color:var(--text3);margin-top:3px">Önerilen modeller: qwen2.5vl:7b · qwen2.5vl:3b</div>
+          <div id="modelPresetsContainer" style="margin-top:8px;display:flex;flex-direction:column;gap:4px"></div>
         </div>
-        <div id="ollamaStatusBox" style="margin-top:10px"><div class="ollama-status warn">⟳ Kontrol ediliyor…</div></div>
+        <div id="ollamaStatusBox" style="margin-top:10px"><div class="ollama-status warn">⟳ Checking…</div></div>
         <div id="ollamaControls" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-          <button class="btn-sm btn-primary" id="btnOllamaStart" onclick="startOllama()" style="flex:1">▶ Başlat</button>
-          <button class="btn-sm btn-ghost" id="btnOllamaStop" onclick="stopOllama()" style="flex:1">■ Durdur</button>
-          <button class="btn-sm btn-ghost" onclick="testOllamaRaw()" style="flex:1">🧪 Test Et</button>
-          <button class="btn-sm btn-ghost" onclick="checkOllamaStatus(document.querySelector('[data-local]'))" title="Yenile">↻</button>
+          <button class="btn btn-sm btn-primary" id="btnOllamaStart" onclick="startOllama()" style="flex:1">▶ Start</button>
+          <button class="btn btn-sm btn-ghost" id="btnOllamaStop" onclick="stopOllama()" style="flex:1">■ Stop</button>
+          <button class="btn btn-sm btn-ghost" onclick="testOllamaRaw()" style="flex:1">🧪 Test</button>
+          <button class="btn-sm btn-ghost" onclick="checkOllamaStatus(document.querySelector('[data-local]'))" title="Refresh">↻</button>
         </div>`;
       card.setAttribute('data-local','1');
       setTimeout(()=>checkOllamaStatus(card),80);
+      // Load GPU model presets
+      invoke('get_local_model_presets').then(presets=>{
+        const box=document.getElementById('modelPresetsContainer');
+        if(!box||!presets.length) return;
+        box.innerHTML='<div style="font-size:10px;font-weight:700;color:var(--text3);margin-bottom:2px">SELECT MODEL BY GPU:</div>';
+        presets.forEach(p=>{
+          const isActive=model===p.ollama_tag;
+          const el=document.createElement('div');
+          el.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;cursor:pointer;border:1px solid '+(isActive?'var(--red-dark)':'var(--border2)')+';background:'+(isActive?'var(--red-bg)':'var(--card2)')+';transition:all .15s';
+          el.innerHTML=`
+            <div style="flex:1;min-width:0">
+              <div style="font-size:11px;font-weight:700;color:var(--cream2)">${p.name} <span style="font-size:9px;color:var(--text3);font-weight:400">${p.ollama_tag}</span></div>
+              <div style="font-size:9px;color:var(--text3)">${p.description} · ${p.recommended_for}</div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
+              <div style="font-size:9px;color:var(--amber);white-space:nowrap;font-weight:600">${p.vram_gb} GB VRAM</div>
+              <div class="preset-status" style="font-size:9px;color:var(--text3)"></div>
+            </div>`;
+          el.onmouseenter=()=>{el.style.borderColor='var(--red-dark)'};
+          el.onmouseleave=()=>{if(model!==p.ollama_tag)el.style.borderColor='var(--border2)'};
+          el.onclick=async()=>{
+            // 1. Update input field immediately
+            const inp=document.getElementById('localModelInput');
+            if(inp) inp.value=p.ollama_tag;
+            // 2. Update settings data so Save will persist it
+            settingsData['model_local']=p.ollama_tag;
+            // 3. Update active highlight on all cards
+            box.querySelectorAll('div[data-preset]').forEach(d=>{d.style.borderColor='var(--border2)';d.style.background='var(--card2)'});
+            el.style.borderColor='var(--red-dark)';el.style.background='var(--red-bg)';
+            // 4. Auto-save this setting immediately
+            try{await invoke('save_setting',{key:'model_local',value:p.ollama_tag})}catch(_){}
+            // 5. Download model
+            const statusEl=el.querySelector('.preset-status');
+            statusEl.textContent='⟳ Downloading…';
+            statusEl.style.color='var(--amber)';
+            el.style.pointerEvents='none'; // prevent double-click
+            try{
+              const msg=await invoke('pull_ollama_model',{model:p.ollama_tag});
+              statusEl.textContent='✓ Ready';
+              statusEl.style.color='var(--green)';
+              toast(msg,'success');
+              // 6. Refresh Ollama status to show new model loaded
+              const localCard=document.querySelector('[data-local]');
+              if(localCard) checkOllamaStatus(localCard);
+            }catch(e){
+              statusEl.textContent='✕ Error';
+              statusEl.style.color='var(--red-light)';
+              toast('Error: '+e,'error');
+            }finally{
+              el.style.pointerEvents='';
+            }
+          };
+          el.setAttribute('data-preset',p.ollama_tag);
+          box.appendChild(el);
+        });
+      }).catch(()=>{});
     }
     container.appendChild(card);
   }
@@ -1557,34 +1753,34 @@ async function checkOllamaStatus(card){
   const btnStart=card.querySelector('#btnOllamaStart');
   const btnStop=card.querySelector('#btnOllamaStop');
   if(!box) return;
-  box.innerHTML=`<div class="ollama-status warn">⟳ Kontrol ediliyor…</div>`;
+  box.innerHTML=`<div class="ollama-status warn">⟳ Checking…</div>`;
   try{
     const s=await invoke('get_ollama_status');
     if(!s.running){
-      box.innerHTML=`<div class="ollama-status err">✕ Ollama çalışmıyor</div>
+      box.innerHTML=`<div class="ollama-status err">✕ Ollama is not running</div>
         <div style="font-size:10px;color:var(--text3);margin-top:4px">
-          Ollama yüklü değilse: <strong>ollama.com</strong> adresinden indirin<br>
-          Yüklüyse "▶ Ollama'yı Başlat" butonuna basın
+          If Ollama is not installed: download from <strong>ollama.com</strong><br>
+          If installed, click "▶ Start"
         </div>`;
-      if(btnStart){btnStart.disabled=false;btnStop.disabled=true;}
+      if(btnStart){btnStart.disabled=false;btnStart.textContent='▶ Start';btnStop.disabled=true;}
       return;
     }
     if(!s.model_loaded){
-      const m=modelInp?.value||'qwen2.5vl:7b';
-      box.innerHTML=`<div class="ollama-status warn">⚠ '${m}' modeli bulunamadı</div>`;
+      const m=modelInp?.value||'gemma3:4b';
+      box.innerHTML=`<div class="ollama-status warn">⚠ '${m}' model not found</div>`;
       if(s.models&&s.models.length){
-        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">Yüklü modeller:</div>
+        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">Loaded models:</div>
           <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${s.models.map(m=>`<span style="background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer" onclick="document.getElementById('localModelInput').value='${m}'">${m}</span>`).join('')}</div>`;
       } else {
-        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">"⬇ İndir" butonuna basarak modeli indirin</div>`;
+        box.innerHTML+=`<div style="font-size:10px;color:var(--text3);margin-top:4px">Click "⬇ Download" to download the model</div>`;
       }
-      if(btnStart){btnStart.disabled=true;btnStop.disabled=false;}
+      if(btnStart){btnStart.disabled=true;btnStart.textContent='✓ Running';btnStop.disabled=false;}
       return;
     }
-    box.innerHTML=`<div class="ollama-status ok">✓ Hazır — <strong>${modelInp?.value||'qwen2.5vl:7b'}</strong> yüklü</div>`;
-    if(btnStart){btnStart.disabled=true;btnStop.disabled=false;}
+    box.innerHTML=`<div class="ollama-status ok">✓ Ready — <strong>${modelInp?.value||'gemma3:4b'}</strong> loaded</div>`;
+    if(btnStart){btnStart.disabled=true;btnStart.textContent='✓ Running';btnStop.disabled=false;}
   }catch(e){
-    box.innerHTML=`<div class="ollama-status err">✕ Ollama'ya bağlanılamadı</div>`;
+    box.innerHTML=`<div class="ollama-status err">✕ Could not connect to Ollama</div>`;
     if(btnStart){btnStart.disabled=false;btnStop&&(btnStop.disabled=true);}
   }
 }
@@ -1592,62 +1788,92 @@ async function checkOllamaStatus(card){
 async function startOllama(){
   const card=document.querySelector('[data-local]');
   const box=card?.querySelector('#ollamaStatusBox');
-  const btn=document.getElementById('btnOllamaStart');
-  if(btn){btn.disabled=true;btn.textContent='⟳ Başlatılıyor…';}
+  const btnStart=card?.querySelector('#btnOllamaStart');
+  const btnStop=card?.querySelector('#btnOllamaStop');
+  if(btnStart){btnStart.disabled=true;btnStart.textContent='⟳ Starting…';}
   try{
     await invoke('start_ollama_service');
-    // Wait 3 seconds then check
-    setTimeout(()=>{
-      if(btn){btn.textContent='▶ Ollama\'yı Başlat';}
-      checkOllamaStatus(card);
-    },3000);
+    // Immediately show running state
+    if(btnStart){btnStart.disabled=true;btnStart.textContent='✓ Running';}
+    if(btnStop){btnStop.disabled=false;}
+    // Verify after delay
+    setTimeout(()=>checkOllamaStatus(card),3000);
   }catch(e){
     if(box) box.innerHTML=`<div class="ollama-status err">✕ ${e}</div>`;
-    if(btn){btn.disabled=false;btn.textContent='▶ Ollama\'yı Başlat';}
+    if(btnStart){btnStart.disabled=false;btnStart.textContent='▶ Start';}
   }
 }
 
 async function stopOllama(){
   const card=document.querySelector('[data-local]');
+  const btnStart=card?.querySelector('#btnOllamaStart');
+  const btnStop=card?.querySelector('#btnOllamaStop');
+  const box=card?.querySelector('#ollamaStatusBox');
+  // Immediately update UI
+  if(btnStop){btnStop.disabled=true;btnStop.textContent='⟳ Stopping…';}
   try{
     await invoke('stop_ollama_service');
-    toast('Ollama durduruldu','info');
-    setTimeout(()=>checkOllamaStatus(card),1000);
-  }catch(e){toast('Durdurulamadı: '+e,'error');}
+    toast('Ollama stopped','info');
+    // Reset buttons immediately
+    if(btnStart){btnStart.disabled=false;btnStart.textContent='▶ Start';}
+    if(btnStop){btnStop.disabled=true;btnStop.textContent='■ Stop';}
+    if(box) box.innerHTML=`<div class="ollama-status err">✕ Ollama is not running</div>`;
+    // Verify after delay
+    setTimeout(()=>checkOllamaStatus(card),2000);
+  }catch(e){
+    toast('Could not stop: '+e,'error');
+    if(btnStop){btnStop.disabled=false;btnStop.textContent='■ Stop';}
+  }
 }
 
 async function testOllamaRaw(){
   const card=document.querySelector('[data-local]');
   const box=card?.querySelector('#ollamaStatusBox');
-  if(box) box.innerHTML=`<div class="ollama-status warn">⟳ Test ediliyor… (30-60sn sürebilir)</div>`;
+  if(box) box.innerHTML=`<div class="ollama-status warn">⟳ Testing… (may take 30-60s)</div>`;
   try{
     const raw=await invoke('test_ollama_raw');
     // Parse and show result
     let parsed={};
     try{ parsed=JSON.parse(raw.split('\n').slice(2).join('\n')); }catch(e){}
     const content=parsed?.message?.content||raw;
+    const httpStatus=raw.match(/HTTP (\d+)/)?.[1]||'';
+    const isOk=httpStatus==='200'&&parsed?.done===true;
+    const borderColor=isOk?'#1F3A1F':'#3A1F1F';
+    const bgColor=isOk?'#0F1A0F':'#1A0F0F';
+    const titleIcon=isOk?'✅':'🧪';
+    const titleText=isOk?'Ollama Test — Success!':'Ollama Raw Response';
+    const titleColor=isOk?'#90EE90':'#EDE0C4';
+    // Extract tags for a nice summary
+    let tagsSummary='';
+    if(isOk&&parsed?.message?.content){
+      try{const tags=JSON.parse(parsed.message.content);if(Array.isArray(tags))tagsSummary=tags.map(t=>`<span style="display:inline-block;background:rgba(100,210,120,.12);border:1px solid rgba(100,210,120,.25);color:#90EE90;border-radius:12px;padding:2px 8px;font-size:10px;margin:2px">${t}</span>`).join('')}catch(_){}
+    }
     const modal=document.createElement('div');
     modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:9999;display:flex;align-items:center;justify-content:center';
-    modal.innerHTML=`<div style="background:#1A0F0F;border:1px solid #3A1F1F;border-radius:12px;padding:24px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto">
+    modal.innerHTML=`<div style="background:${bgColor};border:1px solid ${borderColor};border-radius:12px;padding:24px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-        <strong style="color:#EDE0C4">🧪 Ollama Ham Yanıt</strong>
+        <strong style="color:${titleColor}">${titleIcon} ${titleText}</strong>
         <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none;border:none;color:#B89A7A;cursor:pointer;font-size:18px">✕</button>
       </div>
-      <pre style="background:#0C0707;padding:12px;border-radius:8px;font-size:11px;color:#EDE0C4;white-space:pre-wrap;word-break:break-all">${content.replace(/</g,'&lt;')}</pre>
+      ${tagsSummary?`<div style="margin-bottom:12px">${tagsSummary}</div>`:''}
+      <details${isOk?' style="cursor:pointer"':' open'}>
+        <summary style="font-size:10px;color:var(--text3);margin-bottom:8px">${isOk?'Show raw response':'Raw response'}</summary>
+        <pre style="background:#0C0707;padding:12px;border-radius:8px;font-size:11px;color:#EDE0C4;white-space:pre-wrap;word-break:break-all">${content.replace(/</g,'&lt;')}</pre>
+      </details>
     </div>`;
     document.body.appendChild(modal);
     if(box) checkOllamaStatus(card);
   }catch(e){
-    if(box) box.innerHTML=`<div class="ollama-status err">✕ Test hatası: ${e}</div>`;
+    if(box) box.innerHTML=`<div class="ollama-status err">✕ Test error: ${e}</div>`;
   }
 }
 
 async function pullOllamaModel(){
-  const m=document.getElementById('localModelInput')?.value||'qwen2.5vl:7b';
+  const m=document.getElementById('localModelInput')?.value||'gemma3:4b';
   try{
     const msg=await invoke('pull_ollama_model',{model:m});
     toast(msg,'info');
-  }catch(e){toast('Hata: '+e,'error');}
+  }catch(e){toast('Error: '+e,'error');}
 }
 
 // Watch folders management
@@ -1758,56 +1984,56 @@ function initFaceRecognition() {
     const btn = $('btnScanFaces');
     const modelOk = await invoke('check_face_models').catch(() => false);
     if (!modelOk) {
-      const ok = confirm('Yüz tanıma modelleri indirilmemiş.\n\nŞimdi indirilsin mi? (~5 MB)');
+      const ok = confirm('Face detection models not downloaded.\n\nDownload now? (~5 MB)');
       if (!ok) return;
-      btn.textContent = 'İndiriliyor…';
+      btn.textContent = 'Downloading…';
       btn.disabled = true;
       try {
         const msg = await invoke('download_face_models');
         toast(msg, 'success');
       } catch (e) {
         toast('Model indirilemedi: ' + e, 'error');
-        btn.textContent = 'Yüzleri Tara'; btn.disabled = false; return;
+        btn.textContent = 'Detect Faces'; btn.disabled = false; return;
       }
     }
-    btn.textContent = 'Taranıyor…'; btn.disabled = true;
+    btn.textContent = 'Scanning…'; btn.disabled = true;
     try {
       const faces = await invoke('detect_faces_in_photo', { photoId: selectedId });
-      toast(`${faces.length} yüz bulundu`, faces.length > 0 ? 'success' : 'info');
+      toast(`${faces.length} faces found`, faces.length > 0 ? 'success' : 'info');
       renderFaceGrid(faces, selectedId);
       refreshPersonsSidebar();
     } catch (e) {
-      toast('Hata: ' + e, 'error');
+      toast('Error: ' + e, 'error');
     } finally {
-      btn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="7" r="4"/><path d="M5 20v-2a7 7 0 0114 0v2"/></svg> Yüzleri Tara';
+      btn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="7" r="4"/><path d="M5 20v-2a7 7 0 0114 0v2"/></svg> Detect Faces';
       btn.disabled = false;
     }
   };
 
   // New person button
   $('btnNewPerson').onclick = () => {
-    const name = prompt('Kişi adı:');
+    const name = prompt('Person name:');
     if (!name || !name.trim()) return;
     invoke('create_person', { name: name.trim() })
-      .then(() => { toast('Kişi eklendi', 'success'); refreshPersonsSidebar(); })
-      .catch(e => toast('Hata: ' + e, 'error'));
+      .then(() => { toast('Person added', 'success'); refreshPersonsSidebar(); })
+      .catch(e => toast('Error: ' + e, 'error'));
   };
 
   // Cluster faces button
   $('btnClusterFaces').onclick = async () => {
     const modelOk = await invoke('check_face_models').catch(() => false);
     if (!modelOk) {
-      const ok = confirm('Yüz tanıma modelleri indirilmemiş.\n\nŞimdi indirilsin mi? (~5 MB)');
+      const ok = confirm('Face detection models not downloaded.\n\nDownload now? (~5 MB)');
       if (!ok) return;
       try {
         const btn = $('btnClusterFaces');
-        btn.textContent = 'İndiriliyor…'; btn.disabled = true;
+        btn.textContent = 'Downloading…'; btn.disabled = true;
         await invoke('download_face_models');
         toast('Modeller indirildi', 'success');
-        btn.textContent = 'Grupla'; btn.disabled = false;
+        btn.textContent = 'Cluster'; btn.disabled = false;
       } catch (e) {
         toast('Model indirilemedi: ' + e, 'error');
-        $('btnClusterFaces').textContent = 'Grupla'; $('btnClusterFaces').disabled = false;
+        $('btnClusterFaces').textContent = 'Cluster'; $('btnClusterFaces').disabled = false;
         return;
       }
     }
@@ -1817,17 +2043,17 @@ function initFaceRecognition() {
   // Recognize all button
   $('btnRecognizeAll').onclick = async () => {
     const btn = $('btnRecognizeAll');
-    btn.textContent = 'Tanıyor…'; btn.disabled = true;
+    btn.textContent = 'Recognizing…'; btn.disabled = true;
     try {
       const count = await invoke('recognize_all_faces');
-      toast(`${count} yüz tanındı ve etiketlendi`, 'success');
+      toast(`${count} faces recognized and tagged`, 'success');
       if (selectedId) loadFacesForPhoto(selectedId);
       refreshPersonsSidebar();
       await loadPhotos(); // refresh tags
     } catch (e) {
       toast(e.toString(), 'error');
     } finally {
-      btn.textContent = 'Tanı'; btn.disabled = false;
+      btn.textContent = 'Recognize'; btn.disabled = false;
     }
   };
 
@@ -1839,7 +2065,7 @@ function initFaceRecognition() {
   $('btnUnassignFace').onclick = async () => {
     if (_assignFaceId == null) return;
     await invoke('assign_face_to_person', { faceId: _assignFaceId, personId: null }).catch(() => {});
-    toast('Atama kaldırıldı', 'info');
+    toast('Assignment removed', 'info');
     closeAssignModal();
     if (selectedId) loadFacesForPhoto(selectedId);
     refreshPersonsSidebar();
@@ -1852,11 +2078,11 @@ function initFaceRecognition() {
     try {
       const personId = await invoke('create_person', { name });
       await invoke('assign_face_to_person', { faceId: _assignFaceId, personId });
-      toast(`"${name}" olarak işaretlendi`, 'success');
+      toast(`Assigned as "${name}"`, 'success');
       closeAssignModal();
       if (selectedId) loadFacesForPhoto(selectedId);
       refreshPersonsSidebar();
-    } catch (e) { toast('Hata: ' + e, 'error'); }
+    } catch (e) { toast('Error: ' + e, 'error'); }
   };
 
   $('newPersonInput').addEventListener('keydown', e => {
@@ -1877,7 +2103,7 @@ function renderFaceGrid(faces, photoId) {
   const grid = $('faceGrid');
   grid.innerHTML = '';
   if (!faces || faces.length === 0) {
-    grid.innerHTML = '<div style="font-size:10px;color:var(--text3);text-align:center;padding:8px 0">Yüz bulunamadı — "Yüzleri Tara" butonuna basın</div>';
+    grid.innerHTML = '<div style="font-size:10px;color:var(--text3);text-align:center;padding:8px 0">No faces found — click "Detect Faces" to scan</div>';
     return;
   }
   for (const f of faces) {
@@ -1885,7 +2111,7 @@ function renderFaceGrid(faces, photoId) {
     div.className = 'face-thumb';
     div.dataset.faceId = f.id;
     if (f.thumbnail_b64) {
-      div.innerHTML = `<img src="data:image/jpeg;base64,${f.thumbnail_b64}" alt="yüz">`;
+      div.innerHTML = `<img src="data:image/jpeg;base64,${f.thumbnail_b64}" alt="face">`;
     } else {
       div.style.background = 'var(--card2)';
     }
@@ -1904,7 +2130,7 @@ function openAssignModal(face, photoId) {
   if (face.thumbnail_b64) {
     $('assignFaceImg').src = 'data:image/jpeg;base64,' + face.thumbnail_b64;
   }
-  $('assignFaceScore').textContent = `Güven skoru: ${(face.score * 100).toFixed(0)}%`;
+  $('assignFaceScore').textContent = `Confidence: ${(face.score * 100).toFixed(0)}%`;
   $('newPersonInput').value = '';
   // Populate persons list
   const list = $('assignPersonList');
@@ -1914,15 +2140,15 @@ function openAssignModal(face, photoId) {
     item.className = 'person-pick-item' + (face.person_id === p.id ? ' active' : '');
     item.innerHTML = `
       <div class="person-avatar">${p.thumbnail ? `<img src="data:image/jpeg;base64,${p.thumbnail}" style="width:100%;height:100%;object-fit:cover">` : '👤'}</div>
-      <div style="flex:1"><div style="font-size:12px;font-weight:700;color:var(--cream2)">${p.name}</div><div style="font-size:10px;color:var(--text3)">${p.face_count} yüz</div></div>`;
+      <div style="flex:1"><div style="font-size:12px;font-weight:700;color:var(--cream2)">${p.name}</div><div style="font-size:10px;color:var(--text3)">${p.face_count} faces</div></div>`;
     item.onclick = async () => {
       try {
         await invoke('assign_face_to_person', { faceId: _assignFaceId, personId: p.id });
-        toast(`"${p.name}" olarak işaretlendi`, 'success');
+        toast(`Assigned as "${p.name}"`, 'success');
         closeAssignModal();
         if (selectedId) loadFacesForPhoto(selectedId);
         refreshPersonsSidebar();
-      } catch (e) { toast('Hata: ' + e, 'error'); }
+      } catch (e) { toast('Error: ' + e, 'error'); }
     };
     list.appendChild(item);
   }
@@ -1955,12 +2181,12 @@ function renderPersonsSidebar(persons) {
       <div class="person-avatar">${p.thumbnail ? `<img src="data:image/jpeg;base64,${p.thumbnail}" style="width:100%;height:100%;border-radius:50%;object-fit:cover">` : '👤'}</div>
       <div class="person-info">
         <div class="person-name">${p.name}</div>
-        <div class="person-count">${p.face_count} yüz</div>
+        <div class="person-count">${p.face_count} faces</div>
       </div>
-      <button class="person-del" title="Sil" data-pid="${p.id}">&times;</button>`;
+      <button class="person-del" title="Delete" data-pid="${p.id}">&times;</button>`;
     item.querySelector('.person-del').onclick = async e => {
       e.stopPropagation();
-      if (!confirm(`"${p.name}" kişisini sil? Yüzlerdeki atamalar kaldırılır.`)) return;
+      if (!confirm(`Delete "${p.name}"? Face assignments will be removed.`)) return;
       await invoke('delete_person', { personId: p.id }).catch(() => {});
       refreshPersonsSidebar();
       if (selectedId) loadFacesForPhoto(selectedId);
@@ -1974,6 +2200,72 @@ function renderPersonsSidebar(persons) {
   }
 }
 
+// ── Unknown Face Popup ("Who is this?") ──────────────────────────────────────
+
+async function checkUnknownFaces(showEmptyToast=true){
+  try{
+    const faces=await invoke('get_unknown_faces');
+    if(!faces||faces.length===0){
+      if(showEmptyToast) toast('No unknown faces found','info');
+      return;
+    }
+    toast(`${faces.length} unknown person(s) found — please identify them!`,'info');
+    showFacePopup(faces, 0);
+  }catch(e){toast('Face check error: '+e,'error');console.error('checkUnknownFaces:',e)}
+}
+
+function showFacePopup(faces, idx){
+  if(idx>=faces.length){
+    toast('All faces identified!','success');
+    refreshPersonsSidebar();
+    loadPhotos();
+    return;
+  }
+  const face=faces[idx];
+  const remaining=faces.length-idx;
+  const modal=document.createElement('div');
+  modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;max-width:360px;width:90%;text-align:center">
+    <div style="font-size:16px;font-weight:800;color:var(--cream);margin-bottom:4px">Who is this?</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:16px">${remaining} unknown face${remaining>1?'s':''} remaining</div>
+    <img src="data:image/jpeg;base64,${face.thumbnail_b64||''}" style="width:120px;height:120px;border-radius:50%;object-fit:cover;border:3px solid var(--amber);margin-bottom:16px">
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input type="text" id="faceNameInput" placeholder="Enter name…" style="flex:1;padding:10px 14px;border-radius:8px;border:1px solid var(--border2);background:var(--card2);color:var(--text);font-size:14px;font-family:var(--font);outline:none" autofocus>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:center">
+      <button class="btn btn-primary btn-sm" id="faceNameSave" style="flex:1;padding:8px">✓ Save & Find All</button>
+      <button class="btn btn-secondary btn-sm" id="faceNameSkip" style="flex:1;padding:8px">Skip</button>
+      <button class="btn btn-secondary btn-sm" id="faceNameSkipAll" style="padding:8px;font-size:10px">Skip All</button>
+    </div>
+    <div id="faceNameStatus" style="font-size:11px;color:var(--amber);margin-top:10px;min-height:16px"></div>
+  </div>`;
+  document.body.appendChild(modal);
+  const inp=modal.querySelector('#faceNameInput');
+  setTimeout(()=>inp.focus(),100);
+  // Enter key = save
+  inp.onkeydown=e=>{if(e.key==='Enter')modal.querySelector('#faceNameSave').click()};
+  // Save button
+  modal.querySelector('#faceNameSave').onclick=async()=>{
+    const name=inp.value.trim();
+    if(!name){inp.style.borderColor='var(--red-light)';return;}
+    const statusEl=modal.querySelector('#faceNameStatus');
+    statusEl.textContent='Naming and finding matches…';
+    modal.querySelector('#faceNameSave').disabled=true;
+    try{
+      const count=await invoke('name_face_and_propagate',{faceId:face.id,name});
+      statusEl.textContent=`✓ "${name}" — ${count} face(s) tagged`;
+      setTimeout(()=>{modal.remove();showFacePopup(faces,idx+1)},800);
+    }catch(e){
+      statusEl.textContent='Error: '+e;
+      modal.querySelector('#faceNameSave').disabled=false;
+    }
+  };
+  // Skip
+  modal.querySelector('#faceNameSkip').onclick=()=>{modal.remove();showFacePopup(faces,idx+1)};
+  // Skip All
+  modal.querySelector('#faceNameSkipAll').onclick=()=>{modal.remove();refreshPersonsSidebar()};
+}
+
 // ── Cluster Modal ─────────────────────────────────────────────────────────────
 
 let _clusters = []; // current cluster data
@@ -1984,7 +2276,7 @@ function openClusterModal() {
   $('clusterGrid').innerHTML = '';
   $('clusterCount').textContent = '';
   $('clusterProgress').style.display = 'block';
-  $('clusterProgressLabel').textContent = 'Yüzler taranıyor… (bu birkaç dakika sürebilir)';
+  $('clusterProgressLabel').textContent = 'Scanning faces… (this may take a few minutes)';
   $('clusterProgressFill').style.width = '5%';
   _clusters = [];
   _clusterInputs = [];
@@ -2013,11 +2305,11 @@ function renderClusterGrid(clusters) {
   const significant = clusters.filter(c => c.count >= 1);
 
   if (significant.length === 0) {
-    grid.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:13px">Hiç yüz bulunamadı. Önce fotoğrafları tarayın.</div>';
+    grid.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:13px">No faces found. Scan photos first.</div>';
     return;
   }
 
-  $('clusterCount').textContent = `${significant.length} grup bulundu (${clusters.reduce((s,c)=>s+c.count,0)} yüz)`;
+  $('clusterCount').textContent = `${significant.length} clusters found (${clusters.reduce((s,c)=>s+c.count,0)} faces)`;
 
   for (const c of significant) {
     const card = document.createElement('div');
@@ -2042,7 +2334,7 @@ function renderClusterGrid(clusters) {
     // Count label
     const countDiv = document.createElement('div');
     countDiv.className = 'cluster-count';
-    countDiv.textContent = `${c.count} fotoğraf`;
+    countDiv.textContent = `${c.count} photos`;
 
     // Name input row
     const nameRow = document.createElement('div');
@@ -2050,7 +2342,7 @@ function renderClusterGrid(clusters) {
 
     const input = document.createElement('input');
     input.className = 'cluster-name-input' + (c.person_name ? ' assigned' : '');
-    input.placeholder = 'İsim girin…';
+    input.placeholder = 'Enter name…';
     input.value = c.person_name || '';
     if (c.person_id) input.dataset.personId = c.person_id;
 
@@ -2085,7 +2377,7 @@ function renderClusterGrid(clusters) {
 $('btnApplyClusters').onclick = async () => {
   const btn = $('btnApplyClusters');
   btn.disabled = true;
-  btn.textContent = 'Uygulanıyor…';
+  btn.textContent = 'Applying…';
 
   let applied = 0;
   let errors = 0;
@@ -2106,15 +2398,15 @@ $('btnApplyClusters').onclick = async () => {
       applied++;
     } catch (e) {
       errors++;
-      toast('Hata: ' + e, 'error');
+      toast('Error: ' + e, 'error');
     }
   }
 
   btn.disabled = false;
-  btn.textContent = 'Tüm İsimleri Uygula';
+  btn.textContent = 'Apply All Names';
 
   if (applied > 0) {
-    toast(`${applied} grup uygulandı`, 'success');
+    toast(`${applied} clusters applied`, 'success');
     await refreshPersonsSidebar();
     await loadPhotos(); // refresh tag counts
   }
@@ -2131,65 +2423,19 @@ $('clusterModal').onclick = e => { if (e.target === $('clusterModal')) $('cluste
 
 // ── CLIP Semantic Search ──────────────────────────────────────────────────────
 
-let _clipMode = 'tag';            // 'tag' | 'semantic'
 let _clipTierSelected = 'fast';  // 'fast' | 'balanced' | 'best'
+// Auto-detect best downloaded tier at startup
+invoke('get_clip_status').then(tiers => {
+  const downloaded = tiers.filter(t => t.downloaded);
+  if (downloaded.length > 0 && !downloaded.find(t => t.tier === _clipTierSelected)) {
+    _clipTierSelected = downloaded[downloaded.length - 1].tier; // prefer highest quality
+  }
+}).catch(() => {});
 const CLIP_TIER_INFO = {
-  fast:     { icon:'🚀', name:'Hızlı',    sub:'ViT-B/32 quantized · ~155 MB', desc:'Her bilgisayarda çalışır. CPU\'da bile hızlı. Başlangıç için ideal.', badge:'Önerilen' },
-  balanced: { icon:'⚖️',  name:'Dengeli',  sub:'ViT-B/32 full · ~600 MB',      desc:'Daha iyi doğruluk. Orta seviye GPU önerilir (GTX 1060+).', badge:'' },
-  best:     { icon:'🏆', name:'En İyi',   sub:'ViT-L/14 · ~1.7 GB',           desc:'En yüksek doğruluk. RTX 3090 gibi güçlü GPU için idealdir.', badge:'RTX 3090+' },
+  fast:     { icon:'🚀', name:'Fast',    sub:'ViT-B/32 quantized · ~155 MB', desc:'Runs on any computer. Fast even on CPU. Ideal for getting started.', badge:'Recommended' },
+  balanced: { icon:'⚖️',  name:'Balanced',  sub:'ViT-B/32 full · ~600 MB',      desc:'Better accuracy. Mid-range GPU recommended (GTX 1060+).', badge:'' },
+  best:     { icon:'🏆', name:'Best',   sub:'ViT-L/14 · ~1.7 GB',           desc:'Highest accuracy. Ideal for powerful GPUs like RTX 3090.', badge:'RTX 3090+' },
 };
-
-// Search mode toggle
-document.querySelectorAll('.search-mode-btn').forEach(btn => {
-  btn.onclick = () => {
-    _clipMode = btn.dataset.mode;
-    document.querySelectorAll('.search-mode-btn').forEach(b => b.classList.toggle('active', b === btn));
-    const ph = _clipMode === 'semantic'
-      ? 'Türkçe veya İngilizce cümleyle ara… "gün batımında deniz"'
-      : 'Search tags… (any language)';
-    $('searchInput').placeholder = ph;
-    if (_clipMode === 'semantic') {
-      $('searchInput').style.borderColor = 'rgba(100,160,255,.5)';
-    } else {
-      $('searchInput').style.borderColor = '';
-    }
-    // Re-run current search
-    if ($('searchInput').value.trim()) $('searchInput').dispatchEvent(new Event('input'));
-  };
-});
-
-// Intercept search for semantic mode
-const _origSearchInput = $('searchInput');
-_origSearchInput._semanticTimeout = null;
-_origSearchInput.addEventListener('input', e => {
-  if (_clipMode !== 'semantic') return; // tag search handled by original code
-  clearTimeout(_origSearchInput._semanticTimeout);
-  const q = _origSearchInput.value.trim();
-  if (!q) { loadPhotos(); return; }
-  $('searchHint').textContent = '🧠 semantic…';
-  _origSearchInput._semanticTimeout = setTimeout(async () => {
-    try {
-      const results = await invoke('semantic_search', {
-        query: q,
-        tier: _clipTierSelected,
-        limit: 100,
-      });
-      $('searchHint').textContent = `${results.length} sonuç`;
-      // Render results directly
-      renderSemanticResults(results);
-    } catch (err) {
-      $('searchHint').textContent = '';
-      toast(err.toString(), 'error');
-    }
-  }, 400);
-}, true); // capture phase — runs before original handler
-
-function renderSemanticResults(photos) {
-  // Reuse the same grid rendering as tag search
-  // Override currentPhotos temporarily
-  currentPhotos = photos;
-  renderGrid();
-}
 
 // Initialize CLIP settings panel when Settings modal opens
 function initClipSettings() {
@@ -2197,6 +2443,12 @@ function initClipSettings() {
     const list = $('clipTierList');
     if (!list) return;
     list.innerHTML = '';
+    // Auto-select first downloaded tier if current selection isn't downloaded
+    const currentDownloaded = tiers.find(t => t.tier === _clipTierSelected && t.downloaded);
+    if (!currentDownloaded) {
+      const firstDownloaded = tiers.find(t => t.downloaded);
+      if (firstDownloaded) _clipTierSelected = firstDownloaded.tier;
+    }
     tiers.forEach(t => {
       const info = CLIP_TIER_INFO[t.tier] || {};
       const card = document.createElement('div');
@@ -2209,8 +2461,8 @@ function initClipSettings() {
         </div>
         <div>
           ${t.downloaded
-            ? `<span class="clip-tier-badge ok">✓ İndirildi</span>`
-            : `<button class="clip-tier-badge dl" onclick="downloadClipTier('${t.tier}',this)">⬇ İndir (${t.size_mb} MB)</button>`
+            ? `<span class="clip-tier-badge ok">✓ Downloaded</span>`
+            : `<button class="clip-tier-badge dl" onclick="downloadClipTier('${t.tier}',this)">⬇ Download (${t.size_mb} MB)</button>`
           }
         </div>`;
       card.onclick = e => {
@@ -2228,17 +2480,17 @@ function initClipSettings() {
 
 async function downloadClipTier(tier, btn) {
   btn.disabled = true;
-  btn.textContent = 'İndiriliyor…';
+  btn.textContent = 'Downloading…';
   try {
     const msg = await invoke('download_clip_models', { tier });
     toast(msg, 'success');
     btn.className = 'clip-tier-badge ok';
-    btn.textContent = '✓ İndirildi';
+    btn.textContent = '✓ Downloaded';
     btn.onclick = null;
   } catch (e) {
-    toast('İndirme hatası: ' + e, 'error');
+    toast('Download error:' + e, 'error');
     btn.disabled = false;
-    btn.textContent = '⬇ Tekrar dene';
+    btn.textContent = '⬇ Retry';
   }
   updateClipIndexStatus();
 }
@@ -2249,31 +2501,11 @@ async function updateClipIndexStatus() {
     const totalEl = $('stTotal');
     const total = totalEl ? parseInt(totalEl.textContent) || '?' : '?';
     const el = $('clipIndexStatus');
-    if (el) el.textContent = `${count} / ${total} fotoğraf indekslenmiş`;
+    if (el) el.textContent = `${count} / ${total} photos indexed`;
   } catch (e) {}
 }
 
-// Index button
-if ($('btnClipIndex')) {
-  $('btnClipIndex').onclick = async () => {
-    const btn = $('btnClipIndex');
-    btn.disabled = true; btn.textContent = 'İndeksleniyor…';
-    // Show progress listener
-    const unsub = await listen('clip-index-progress', ev => {
-      btn.textContent = `İndeksleniyor… ${ev.payload.done}/${ev.payload.total}`;
-    });
-    try {
-      const count = await invoke('index_clip_embeddings', { tier: _clipTierSelected });
-      toast(`${count} fotoğraf semantic olarak indekslendi`, 'success');
-      updateClipIndexStatus();
-    } catch (e) {
-      toast('Hata: ' + e, 'error');
-    } finally {
-      btn.disabled = false; btn.textContent = '⚡ Semantic İndeksle';
-      unsub?.();
-    }
-  };
-}
+// Semantic indexing now runs automatically after tagging (see tag-complete listener)
 
 // Listen for face-recognized event (during batch recognition)
 listen('face-recognized', () => {

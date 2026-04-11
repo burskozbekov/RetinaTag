@@ -10,7 +10,7 @@ pub enum AiProvider {
     OpenAI,
     Gemini,
     Grok,
-    /// Local model via Ollama (e.g. qwen2.5vl:7b). No API key required.
+    /// Local model via Ollama (e.g. gemma3:4b). No API key required.
     #[serde(alias = "ollama", alias = "local")]
     Local,
 }
@@ -52,7 +52,7 @@ impl AiProvider {
             AiProvider::OpenAI => "gpt-4o-mini",
             AiProvider::Gemini => "gemini-2.0-flash",
             AiProvider::Grok => "grok-2-vision-latest",
-            AiProvider::Local => "qwen2.5vl:7b",
+            AiProvider::Local => "gemma3:4b",
         }
     }
 
@@ -371,4 +371,67 @@ pub struct DailyCost {
     pub date: String,
     pub cost: f64,
     pub count: i64,
+}
+
+// ── Local Model Presets ─────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalModelPreset {
+    pub id: String,
+    pub name: String,
+    pub ollama_tag: String,
+    pub vram_gb: f32,
+    pub size_gb: f32,
+    pub description: String,
+    pub recommended_for: String,
+}
+
+pub fn local_model_presets() -> Vec<LocalModelPreset> {
+    vec![
+        LocalModelPreset {
+            id: "moondream".into(),
+            name: "Moondream 2".into(),
+            ollama_tag: "moondream".into(),
+            vram_gb: 1.5,
+            size_gb: 1.0,
+            description: "Ultra-light vision model, good for basic tagging".into(),
+            recommended_for: "CPU only / Intel UHD / GT 1030 (2-4 GB)".into(),
+        },
+        LocalModelPreset {
+            id: "gemma3_4b".into(),
+            name: "Gemma 3 4B".into(),
+            ollama_tag: "gemma3:4b".into(),
+            vram_gb: 3.5,
+            size_gb: 3.3,
+            description: "Best quality/VRAM ratio. Free, 128K context, multilingual".into(),
+            recommended_for: "GTX 1060 / GTX 1650 / RTX 2060 (4-6 GB)".into(),
+        },
+        LocalModelPreset {
+            id: "qwen25vl_7b".into(),
+            name: "Qwen2.5-VL 7B".into(),
+            ollama_tag: "qwen2.5vl:7b".into(),
+            vram_gb: 5.5,
+            size_gb: 4.7,
+            description: "Strong all-round accuracy, excellent OCR and detail".into(),
+            recommended_for: "RTX 3060 8GB / RTX 2070 (8 GB)".into(),
+        },
+        LocalModelPreset {
+            id: "gemma3_12b".into(),
+            name: "Gemma 3 12B".into(),
+            ollama_tag: "gemma3:12b".into(),
+            vram_gb: 9.0,
+            size_gb: 8.1,
+            description: "High quality vision, great for detailed photo tagging".into(),
+            recommended_for: "RTX 3060 12GB / RTX 3070 / RTX 4060 (12 GB)".into(),
+        },
+        LocalModelPreset {
+            id: "gemma3_27b".into(),
+            name: "Gemma 3 27B".into(),
+            ollama_tag: "gemma3:27b".into(),
+            vram_gb: 18.0,
+            size_gb: 17.0,
+            description: "Near cloud-API quality. Approaches Gemini 1.5 Pro".into(),
+            recommended_for: "RTX 3090 / RTX 4090 (24 GB)".into(),
+        },
+    ]
 }

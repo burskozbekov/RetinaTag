@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{AppStats, Photo, PhotoSummary, TagEntry};
 
@@ -267,12 +267,16 @@ pub fn insert_tags(
     photo_id: i64,
     tags: &[(String, f64, String)],
 ) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)",
-    )?;
-    for (tag, conf, source) in tags {
-        stmt.execute(params![photo_id, tag, conf, source])?;
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (tag, conf, source) in tags {
+            stmt.execute(params![photo_id, tag, conf, source])?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -637,6 +641,18 @@ pub fn get_pending_photos(conn: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(rows)
 }
 
+/// Clear all tags and reset all photos to 'pending' for re-tagging
+pub fn clear_all_tags(conn: &Connection) -> Result<usize> {
+    conn.execute("DELETE FROM tags", [])?;
+    conn.execute("DELETE FROM tags_fts", [])?;
+    let count = conn.execute("UPDATE photos SET status = 'pending', tagged_at = NULL", [])?;
+    // Also clear CLIP embeddings so semantic re-index happens
+    conn.execute("UPDATE photos SET clip_emb = NULL, clip_tier = NULL WHERE clip_emb IS NOT NULL", []).ok();
+    // Clear translation cache
+    conn.execute("DELETE FROM translation_cache", []).ok();
+    Ok(count)
+}
+
 /// Reset all 'error' status photos back to 'pending' so they can be retried
 pub fn reset_error_photos(conn: &Connection) -> Result<usize> {
     let count = conn.execute(
@@ -835,22 +851,26 @@ pub fn update_watch_folder_checked(conn: &Connection, id: i64) -> Result<()> {
 // ── Tag Management ──────────────────────────────────────────────────────────
 
 pub fn merge_tags(conn: &Connection, source_tag: &str, target_tag: &str) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
     // Update all instances of source_tag to target_tag, skip if duplicate
-    let updated = conn.execute(
+    let updated = tx.execute(
         "UPDATE OR IGNORE tags SET tag = ?1 WHERE tag = ?2",
         params![target_tag, source_tag],
     )?;
     // Delete remaining (duplicates that couldn't be updated)
-    conn.execute("DELETE FROM tags WHERE tag = ?1", params![source_tag])?;
+    tx.execute("DELETE FROM tags WHERE tag = ?1", params![source_tag])?;
+    tx.commit()?;
     Ok(updated)
 }
 
 pub fn rename_tag(conn: &Connection, old_name: &str, new_name: &str) -> Result<usize> {
-    let updated = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE OR IGNORE tags SET tag = ?1 WHERE tag = ?2",
         params![new_name, old_name],
     )?;
-    conn.execute("DELETE FROM tags WHERE tag = ?1", params![old_name])?;
+    tx.execute("DELETE FROM tags WHERE tag = ?1", params![old_name])?;
+    tx.commit()?;
     Ok(updated)
 }
 
@@ -1115,6 +1135,46 @@ pub fn assign_face_to_person(
     Ok(())
 }
 
+/// Simple struct for a face region with photo_id
+pub struct FaceRegionFull {
+    pub id: i64,
+    pub photo_id: i64,
+    pub x1: i32, pub y1: i32, pub x2: i32, pub y2: i32,
+    pub score: f32,
+    pub person_id: Option<i64>,
+    pub person_name: Option<String>,
+}
+
+/// Get a single face region by ID
+pub fn get_face_region(conn: &Connection, face_id: i64) -> Result<Option<FaceRegionFull>> {
+    let mut stmt = conn.prepare(
+        "SELECT fr.id, fr.photo_id, fr.x1, fr.y1, fr.x2, fr.y2, fr.score, fr.person_id, p.name
+         FROM face_regions fr LEFT JOIN persons p ON fr.person_id = p.id
+         WHERE fr.id = ?1"
+    )?;
+    let row = stmt.query_row(params![face_id], |r| {
+        Ok(FaceRegionFull {
+            id: r.get(0)?,
+            photo_id: r.get(1)?,
+            x1: r.get(2)?, y1: r.get(3)?, x2: r.get(4)?, y2: r.get(5)?,
+            score: r.get(6)?,
+            person_id: r.get(7)?,
+            person_name: r.get(8)?,
+        })
+    }).optional()?;
+    Ok(row)
+}
+
+/// Find person by name, returns person ID
+pub fn find_person_by_name(conn: &Connection, name: &str) -> Result<Option<i64>> {
+    let id = conn.query_row(
+        "SELECT id FROM persons WHERE name = ?1 COLLATE NOCASE",
+        params![name],
+        |r| r.get(0),
+    ).optional()?;
+    Ok(id)
+}
+
 /// Returns (face_id, photo_id, embedding_bytes) for unassigned faces with embeddings.
 pub fn get_unassigned_faces_with_embeddings(
     conn: &Connection,
@@ -1244,31 +1304,34 @@ pub fn get_photos_with_clip_emb(
     conn: &Connection,
     tier: &str,
 ) -> Result<Vec<(i64, Vec<u8>)>> {
-    let sql = if tier.is_empty() {
-        "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL".to_string()
+    if tier.is_empty() {
+        let mut stmt = conn.prepare(
+            "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     } else {
-        format!(
-            "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL AND clip_tier = '{}'",
-            tier.replace('\'', "''")
-        )
-    };
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(rows)
+        let mut stmt = conn.prepare(
+            "SELECT id, clip_emb FROM photos WHERE clip_emb IS NOT NULL AND clip_tier = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![tier], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
 }
 
 /// Returns photo_ids that do NOT yet have a CLIP embedding for the given tier.
 pub fn get_photos_without_clip_emb(conn: &Connection, tier: &str) -> Result<Vec<(i64, String)>> {
-    let sql = format!(
-        "SELECT id, path FROM photos WHERE clip_emb IS NULL OR clip_tier != '{}'",
-        tier.replace('\'', "''")
-    );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM photos WHERE clip_emb IS NULL OR clip_tier != ?1",
+    )?;
     let rows: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .query_map(params![tier], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(rows)
