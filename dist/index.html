@@ -587,6 +587,9 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
       Tag with AI
     </button>
+    <button class="btn btn-danger btn-sm" id="btnStopTag" style="display:none">
+      ■ Stop
+    </button>
     <button class="btn btn-secondary btn-sm" id="btnClearRetag" title="Clear all tags and re-tag from scratch" style="font-size:10px">
       🔄 Re-tag All
     </button>
@@ -1230,6 +1233,8 @@ listen('tag-progress',({payload:p})=>{
 });
 listen('tag-complete',async({payload:p})=>{
   $('progressArea').classList.remove('active');
+  $('btnTagAll').style.display='inline-flex';
+  $('btnStopTag').style.display='none';$('btnStopTag').disabled=false;$('btnStopTag').textContent='■ Stop';
   _lastProviderErrors=[];
   const parts=p.provider_breakdown.map(b=>`${b.provider}: ${b.count}`).join(' · ');
   const failMsg=p.failed?` · ${p.failed} failed`:'';
@@ -1270,6 +1275,8 @@ listen('tag-complete',async({payload:p})=>{
 });
 listen('tag-error',({payload:m})=>{
   $('progressArea').classList.remove('active');
+  $('btnTagAll').style.display='inline-flex';
+  $('btnStopTag').style.display='none';$('btnStopTag').disabled=false;$('btnStopTag').textContent='■ Stop';
   const tr=translateError(m);
   toast(tr,'error');
 });
@@ -1353,7 +1360,18 @@ $('btnTagAll').onclick=async()=>{
     }
     await invoke('start_tagging');
     toast('AI tagging started…','info');
+    $('btnTagAll').style.display='none';
+    $('btnStopTag').style.display='inline-flex';
   }catch(e){toast('Error: '+translateError(String(e)),'error');}
+};
+
+// ── Stop Tagging ─────────────────────────────────────────────────────────────
+$('btnStopTag').onclick=async()=>{
+  try{
+    await invoke('stop_tagging');
+    toast('Stopping tagging…','info');
+    $('btnStopTag').disabled=true;$('btnStopTag').textContent='■ Stopping…';
+  }catch(e){toast('Error: '+e,'error');}
 };
 
 // ── Re-tag All ───────────────────────────────────────────────────────────────
@@ -1387,16 +1405,13 @@ $('btnScanFacesAll').onclick=async()=>{
       if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
     }catch(_){}
     let existingFaces=[];
-    try{
-      existingFaces=await invoke('get_unknown_faces');
-      toast(`get_unknown_faces returned ${existingFaces?existingFaces.length:0} faces`,'info');
-    }catch(e){
-      toast('get_unknown_faces ERROR: '+e,'error');
-    }
+    try{ existingFaces=await invoke('get_unknown_faces'); }
+    catch(e){ toast('Face scan error: '+e,'error'); }
     if(existingFaces && existingFaces.length>0){
+      toast(`${existingFaces.length} unknown person(s) — please identify them`,'info');
       showFacePopup(existingFaces, 0);
     } else {
-      toast('No unknown faces in database','warn');
+      toast('No unknown faces found','info');
     }
 
     // Step 2: Download face models if needed
