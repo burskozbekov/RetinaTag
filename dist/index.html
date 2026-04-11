@@ -1124,8 +1124,12 @@ document.querySelectorAll('.ctx-item').forEach(item=>{
     if(a==='xmp')invoke('write_xmp_for_photo',{photoId:ctxPhotoId}).then(p=>toast('XMP written: '+p,'success')).catch(e=>toast(e,'error'));
     if(a==='exif')showExif(ctxPhotoId);
     if(a==='addcol')addToCollectionPrompt(ctxPhotoId);
-    if(a==='retag'){/* re-tag: mark as pending then start tagging */
-      invoke('save_setting',{key:'_retag_'+ctxPhotoId,value:'1'}).catch(()=>{});toast('Re-tagging…','info');
+    if(a==='retag'){
+      try{
+        await invoke('retag_photo',{photoId:ctxPhotoId});
+        toast('Photo queued for re-tag. Click "Tag with AI" to start.','info');
+        loadPhotos();
+      }catch(e){toast('Re-tag error: '+e,'error');}
     }
     $('ctxMenu').classList.remove('open');
   };
