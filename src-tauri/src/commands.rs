@@ -1489,12 +1489,22 @@ pub async fn get_unknown_faces(
 
     let clusters = crate::face::cluster_embeddings(&face_data);
 
-    // Return the representative face from each cluster
+    // Return the representative face from each cluster, preferring faces with thumbnails
     let mut result = Vec::new();
     for cluster in clusters.iter().take(20) { // max 20 unknown faces at a time
-        let rep_id = cluster.representative;
+        // Try cluster representative first, fall back to any face in cluster with a thumbnail
+        let mut chosen_id = cluster.representative;
+        if face_thumb_b64(&faces_dir, chosen_id).is_none() {
+            // Representative has no thumbnail — find another face in this cluster that does
+            for &fid in &cluster.face_ids {
+                if face_thumb_b64(&faces_dir, fid).is_some() {
+                    chosen_id = fid;
+                    break;
+                }
+            }
+        }
         // Get face region info
-        if let Ok(Some(face)) = db::get_face_region(&conn, rep_id) {
+        if let Ok(Some(face)) = db::get_face_region(&conn, chosen_id) {
             result.push(FaceRegion {
                 id: face.id,
                 photo_id: face.photo_id,
