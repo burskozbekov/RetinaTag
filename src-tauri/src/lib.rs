@@ -128,6 +128,7 @@ pub fn run() {
             commands::check_for_updates,
             commands::retry_failed_photos,
             commands::clear_all_tags,
+            commands::retag_photo,
             commands::get_library_stats,
             commands::test_ollama_raw,
             commands::get_ollama_status,

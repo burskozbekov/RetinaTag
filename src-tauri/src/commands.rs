@@ -182,6 +182,7 @@ pub async fn search_photos(
         // Search with translated terms + original
         let mut all_terms = english_terms;
         all_terms.push(trimmed);
+        all_terms.sort();
         all_terms.dedup();
 
         let conn = state.db.lock().map_err(|_| "db lock")?;
@@ -1109,6 +1110,13 @@ pub async fn retry_failed_photos(state: tauri::State<'_, AppState>) -> Result<us
 pub async fn clear_all_tags(state: tauri::State<'_, AppState>) -> Result<usize, String> {
     let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
     db::clear_all_tags(&conn).map_err(|e| e.to_string())
+}
+
+/// Re-tag a single photo: delete its tags and set status to 'pending'
+#[tauri::command]
+pub async fn retag_photo(photo_id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
+    db::retag_photo(&conn, photo_id).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]

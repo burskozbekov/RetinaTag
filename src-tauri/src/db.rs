@@ -226,13 +226,23 @@ pub struct NewPhoto<'a> {
 
 pub fn insert_photo(conn: &Connection, p: &NewPhoto<'_>) -> Result<i64> {
     let now = chrono::Utc::now().to_rfc3339();
-    conn.execute(
+    let rows_affected = conn.execute(
         "INSERT OR IGNORE INTO photos
              (path, filename, folder, hash, size, width, height, created_at, status)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending')",
         params![p.path, p.filename, p.folder, p.hash, p.size, p.width, p.height, now],
     )?;
-    Ok(conn.last_insert_rowid())
+    if rows_affected == 0 {
+        // Row already exists (UNIQUE conflict on path) — fetch existing ID
+        let id: i64 = conn.query_row(
+            "SELECT id FROM photos WHERE path = ?1",
+            params![p.path],
+            |r| r.get(0),
+        )?;
+        Ok(id)
+    } else {
+        Ok(conn.last_insert_rowid())
+    }
 }
 
 pub fn update_photo_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
@@ -644,13 +654,26 @@ pub fn get_pending_photos(conn: &Connection) -> Result<Vec<(i64, String)>> {
 /// Clear all tags and reset all photos to 'pending' for re-tagging
 pub fn clear_all_tags(conn: &Connection) -> Result<usize> {
     conn.execute("DELETE FROM tags", [])?;
-    conn.execute("DELETE FROM tags_fts", [])?;
+    // Rebuild FTS index — the AFTER DELETE trigger already removed entries;
+    // 'rebuild' ensures the content-sync FTS table is consistent.
+    // (Direct DELETE FROM a content-sync FTS5 table is invalid and corrupts the index.)
+    conn.execute("INSERT INTO tags_fts(tags_fts) VALUES('rebuild')", []).ok();
     let count = conn.execute("UPDATE photos SET status = 'pending', tagged_at = NULL", [])?;
     // Also clear CLIP embeddings so semantic re-index happens
     conn.execute("UPDATE photos SET clip_emb = NULL, clip_tier = NULL WHERE clip_emb IS NOT NULL", []).ok();
     // Clear translation cache
     conn.execute("DELETE FROM translation_cache", []).ok();
     Ok(count)
+}
+
+/// Delete all tags for a single photo and reset to 'pending' for re-tagging
+pub fn retag_photo(conn: &Connection, photo_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM tags WHERE photo_id = ?1", params![photo_id])?;
+    conn.execute(
+        "UPDATE photos SET status = 'pending', tagged_at = NULL WHERE id = ?1",
+        params![photo_id],
+    )?;
+    Ok(())
 }
 
 /// Reset all 'error' status photos back to 'pending' so they can be retried
