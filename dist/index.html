@@ -1386,11 +1386,17 @@ $('btnScanFacesAll').onclick=async()=>{
       const recognized=await invoke('recognize_all_faces');
       if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
     }catch(_){}
-    const existingFaces=await invoke('get_unknown_faces').catch(()=>[]);
+    let existingFaces=[];
+    try{
+      existingFaces=await invoke('get_unknown_faces');
+      toast(`get_unknown_faces returned ${existingFaces?existingFaces.length:0} faces`,'info');
+    }catch(e){
+      toast('get_unknown_faces ERROR: '+e,'error');
+    }
     if(existingFaces && existingFaces.length>0){
-      toast(`${existingFaces.length} unknown person(s) found — please identify them!`,'info');
       showFacePopup(existingFaces, 0);
-      // Don't block — user names faces while new detection runs below
+    } else {
+      toast('No unknown faces in database','warn');
     }
 
     // Step 2: Download face models if needed
