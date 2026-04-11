@@ -155,6 +155,9 @@ pub fn run() {
             commands::semantic_search,
             commands::get_clip_index_count,
             commands::translate_for_clip,
+            commands::get_unknown_faces,
+            commands::name_face_and_propagate,
+            commands::detect_faces_background,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

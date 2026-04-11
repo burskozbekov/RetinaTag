@@ -1462,6 +1462,127 @@ pub async fn create_person(
     db::create_person(&conn, name.trim()).map_err(|e| e.to_string())
 }
 
+/// Get unassigned faces (unique per cluster) with thumbnails for "Who is this?" popup
+#[tauri::command]
+pub async fn get_unknown_faces(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<FaceRegion>, String> {
+    let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
+    let thumbs_dir = state.thumbnails_dir.clone();
+    let faces_dir = thumbs_dir.join("faces");
+
+    // Get all unassigned faces
+    let rows: Vec<(i64, i64, Vec<u8>)> = db::get_unassigned_faces_with_embeddings(&conn)
+        .map_err(|e| e.to_string())?;
+
+    if rows.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Cluster them to avoid showing duplicates — show one face per cluster
+    let face_data: Vec<(i64, Vec<f32>)> = rows.iter()
+        .filter_map(|(fid, _pid, emb)| {
+            let embedding = crate::face::bytes_to_embedding(emb);
+            if embedding.len() == 512 { Some((*fid, embedding)) } else { None }
+        })
+        .collect();
+
+    let clusters = crate::face::cluster_embeddings(&face_data);
+
+    // Return the representative face from each cluster
+    let mut result = Vec::new();
+    for cluster in clusters.iter().take(20) { // max 20 unknown faces at a time
+        let rep_id = cluster.representative;
+        // Get face region info
+        if let Ok(Some(face)) = db::get_face_region(&conn, rep_id) {
+            result.push(FaceRegion {
+                id: face.id,
+                photo_id: face.photo_id,
+                x1: face.x1, y1: face.y1, x2: face.x2, y2: face.y2,
+                score: face.score,
+                person_id: None,
+                person_name: None,
+                thumbnail_b64: face_thumb_b64(&faces_dir, face.id),
+            });
+        }
+    }
+    Ok(result)
+}
+
+/// Name a face and auto-propagate to all matching faces across all photos
+#[tauri::command]
+pub async fn name_face_and_propagate(
+    face_id: i64,
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<usize, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Name cannot be empty".into());
+    }
+
+    let db = state.db.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Create person if doesn't exist, or get existing
+        let person_id = match db::find_person_by_name(&conn, &name) {
+            Ok(Some(pid)) => pid,
+            _ => db::create_person(&conn, &name).map_err(|e| e.to_string())?,
+        };
+
+        // Assign this face to the person
+        db::assign_face_to_person(&conn, face_id, Some(person_id)).map_err(|e| e.to_string())?;
+
+        // Add person name as tag to the photo
+        if let Ok(Some(face)) = db::get_face_region(&conn, face_id) {
+            db::insert_tags(&conn, face.photo_id, &[(name.clone(), 1.0, "face".to_string())]).ok();
+        }
+
+        // Now recognize all other matching faces
+        let known = db::get_known_face_embeddings(&conn).map_err(|e| e.to_string())?;
+        if known.is_empty() { return Ok(1); }
+
+        // Build per-person average embeddings
+        let mut person_embs: std::collections::HashMap<i64, (String, Vec<f32>, usize)> = std::collections::HashMap::new();
+        for (pid, pname, emb_bytes) in &known {
+            let emb = crate::face::bytes_to_embedding(emb_bytes);
+            if emb.len() != 512 { continue; }
+            let entry = person_embs.entry(*pid).or_insert_with(|| (pname.clone(), vec![0.0; 512], 0));
+            for (i, v) in emb.iter().enumerate() { entry.1[i] += v; }
+            entry.2 += 1;
+        }
+        let person_avgs: Vec<(i64, String, Vec<f32>)> = person_embs.into_iter().map(|(pid, (n, mut emb, count))| {
+            let c = count as f32;
+            let norm: f32 = emb.iter().map(|v| (v/c)*(v/c)).sum::<f32>().sqrt();
+            if norm > 0.0 { for v in emb.iter_mut() { *v = *v / c / norm; } }
+            (pid, n, emb)
+        }).collect();
+
+        // Match unassigned faces
+        let unassigned = db::get_unassigned_faces_with_embeddings(&conn).map_err(|e| e.to_string())?;
+        let mut matched = 0usize;
+        for (fid, photo_id, emb_bytes) in &unassigned {
+            let emb = crate::face::bytes_to_embedding(emb_bytes);
+            if emb.len() != 512 { continue; }
+            let mut best_sim = 0.0f32;
+            let mut best_pid = 0i64;
+            let mut best_name = String::new();
+            for (pid, n, avg) in &person_avgs {
+                let sim: f32 = emb.iter().zip(avg.iter()).map(|(a,b)| a*b).sum();
+                if sim > best_sim { best_sim = sim; best_pid = *pid; best_name = n.clone(); }
+            }
+            if best_sim >= crate::face::RECOGNITION_THRESH {
+                db::assign_face_to_person(&conn, *fid, Some(best_pid)).ok();
+                db::insert_tags(&conn, *photo_id, &[(best_name, 1.0, "face".to_string())]).ok();
+                matched += 1;
+            }
+        }
+        Ok(matched + 1)
+    }).await.map_err(|e| e.to_string()).and_then(|r| r)
+}
+
 /// List all persons with face counts and representative thumbnail.
 #[tauri::command]
 pub async fn get_persons(
@@ -1919,6 +2040,100 @@ pub async fn scan_and_cluster_faces(
     .map_err(|e| e.to_string())?;
 
     cluster_results
+}
+
+/// Silently detect faces in all photos that don't already have face data.
+/// Called automatically after tagging completes (if face models are present).
+/// Returns the number of NEW faces detected.
+#[tauri::command]
+pub async fn detect_faces_background(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<usize, String> {
+    let models_dir = models_dir_for(&app);
+
+    // Silently skip if face models are missing — not an error
+    if !models_dir.join("det_500m.onnx").exists() || !models_dir.join("w600k_mbf.onnx").exists() {
+        return Ok(0);
+    }
+
+    let thumbs_dir = state.thumbnails_dir.clone();
+    let db_arc = state.db.clone();
+
+    // Collect all photos that don't have face detections yet
+    let photos: Vec<(i64, String)> = {
+        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, path FROM photos WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)"
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(i64, String)> = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows
+    };
+
+    if photos.is_empty() {
+        return Ok(0);
+    }
+
+    tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let face_models = crate::face::load_models(&models_dir).map_err(|e| e.to_string())?;
+        let faces_dir = thumbs_dir.join("faces");
+        std::fs::create_dir_all(&faces_dir).ok();
+
+        let mut total_detected = 0usize;
+
+        for (photo_id, path) in &photos {
+            let img = match image::open(path) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let detected = match crate::face::detect_faces(&face_models, &img) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            for face in &detected {
+                let embedding = crate::face::get_embedding(&face_models, &img, face)
+                    .unwrap_or_default();
+                let emb_bytes = crate::face::embedding_to_bytes(&embedding);
+
+                let face_id = {
+                    let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+                    db::insert_face_region(
+                        &conn, *photo_id,
+                        face.x1, face.y1, face.x2, face.y2,
+                        face.score, &emb_bytes,
+                    ).unwrap_or(0)
+                };
+                if face_id == 0 { continue; }
+
+                // Save face thumbnail
+                let (iw, ih) = (img.width() as i32, img.height() as i32);
+                let pad = ((face.x2 - face.x1).max(face.y2 - face.y1) / 5).max(8);
+                let cx1 = (face.x1 - pad).max(0) as u32;
+                let cy1 = (face.y1 - pad).max(0) as u32;
+                let cx2 = (face.x2 + pad).min(iw) as u32;
+                let cy2 = (face.y2 + pad).min(ih) as u32;
+                let crop = img.crop_imm(cx1, cy1, cx2 - cx1, cy2 - cy1)
+                    .resize(128, 128, image::imageops::FilterType::Triangle);
+                crop.save_with_format(
+                    faces_dir.join(format!("face_{}.jpg", face_id)),
+                    image::ImageFormat::Jpeg,
+                ).ok();
+
+                total_detected += 1;
+            }
+        }
+
+        Ok(total_detected)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r)
 }
 
 /// Assign all faces in a cluster to a person (create if name given, use existing if id given).

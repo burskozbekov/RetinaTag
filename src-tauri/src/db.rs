@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{AppStats, Photo, PhotoSummary, TagEntry};
 
@@ -1133,6 +1133,46 @@ pub fn assign_face_to_person(
         params![person_id, face_id],
     )?;
     Ok(())
+}
+
+/// Simple struct for a face region with photo_id
+pub struct FaceRegionFull {
+    pub id: i64,
+    pub photo_id: i64,
+    pub x1: i32, pub y1: i32, pub x2: i32, pub y2: i32,
+    pub score: f32,
+    pub person_id: Option<i64>,
+    pub person_name: Option<String>,
+}
+
+/// Get a single face region by ID
+pub fn get_face_region(conn: &Connection, face_id: i64) -> Result<Option<FaceRegionFull>> {
+    let mut stmt = conn.prepare(
+        "SELECT fr.id, fr.photo_id, fr.x1, fr.y1, fr.x2, fr.y2, fr.score, fr.person_id, p.name
+         FROM face_regions fr LEFT JOIN persons p ON fr.person_id = p.id
+         WHERE fr.id = ?1"
+    )?;
+    let row = stmt.query_row(params![face_id], |r| {
+        Ok(FaceRegionFull {
+            id: r.get(0)?,
+            photo_id: r.get(1)?,
+            x1: r.get(2)?, y1: r.get(3)?, x2: r.get(4)?, y2: r.get(5)?,
+            score: r.get(6)?,
+            person_id: r.get(7)?,
+            person_name: r.get(8)?,
+        })
+    }).optional()?;
+    Ok(row)
+}
+
+/// Find person by name, returns person ID
+pub fn find_person_by_name(conn: &Connection, name: &str) -> Result<Option<i64>> {
+    let id = conn.query_row(
+        "SELECT id FROM persons WHERE name = ?1 COLLATE NOCASE",
+        params![name],
+        |r| r.get(0),
+    ).optional()?;
+    Ok(id)
 }
 
 /// Returns (face_id, photo_id, embedding_bytes) for unassigned faces with embeddings.

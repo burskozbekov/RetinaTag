@@ -17,7 +17,7 @@ const DET_SIZE: usize = 640;   // SCRFD input
 const EMB_SIZE: usize = 112;   // MobileFaceNet input
 const SCORE_THRESH: f32 = 0.5;
 const NMS_THRESH: f32 = 0.4;
-pub const RECOGNITION_THRESH: f32 = 0.35; // cosine similarity threshold
+pub const RECOGNITION_THRESH: f32 = 0.55; // cosine similarity threshold (higher = stricter)
 
 // ── Model types ───────────────────────────────────────────────────────────────
 
