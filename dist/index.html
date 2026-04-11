@@ -1117,7 +1117,7 @@ function showCtxMenu(e,id,path){
 }
 document.addEventListener('click',()=>$('ctxMenu').classList.remove('open'));
 document.querySelectorAll('.ctx-item').forEach(item=>{
-  item.onclick=()=>{
+  item.onclick=async()=>{
     const a=item.dataset.action;
     if(a==='open')invoke('open_in_explorer',{path:ctxPhotoPath}).catch(e=>toast(e,'error'));
     if(a==='openfile')invoke('open_file',{path:ctxPhotoPath}).catch(e=>toast(e,'error'));
