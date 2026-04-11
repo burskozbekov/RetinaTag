@@ -1239,25 +1239,22 @@ listen('tag-complete',async({payload:p})=>{
     toast(`${p.tagged} photos tagged${failMsg}${parts?' — '+parts:''}`,'success');
   }
   if(p.tagged>0){
-    // Auto-run face detection + recognition
+    // Auto-run face recognition on EXISTING face data first (instant)
+    try{
+      const recognized=await invoke('recognize_all_faces').catch(()=>0);
+      if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
+      await checkUnknownFaces(false);
+    }catch(e){console.error('Face recognition error:',e);}
+    // Then detect faces in NEW photos (slow, runs in background)
     try{
       const hasModels=await invoke('check_face_models');
       if(hasModels){
-        toast('Scanning faces in photos… this may take a moment','info');
-        // Detect faces in all unprocessed photos (fast, no clustering)
-        const newFaces=await invoke('detect_faces_background').catch(e=>{
-          console.error('Face detection error:',e);return 0;
-        });
-        if(newFaces>0) toast(`${newFaces} new face(s) detected`,'info');
-        // Recognize known faces
-        const recognized=await invoke('recognize_all_faces').catch(()=>0);
-        if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
-        // Show "Who is this?" for unrecognized faces
-        await checkUnknownFaces(false); // false = auto mode (no "none found" toast)
-      } else {
-        // Face models not downloaded — skip silently (don't nag the user every tag cycle)
+        const newFaces=await invoke('detect_faces_background').catch(()=>0);
+        if(newFaces>0){
+          toast(`${newFaces} new face(s) found — click "👤 Identify Faces" to name them`,'info');
+        }
       }
-    }catch(e){console.error('Face pipeline error:',e);}
+    }catch(e){console.error('Face detection error:',e);}
     // Auto-run semantic indexing if CLIP is available
     try{
       const clipStatus=await invoke('get_clip_status');
@@ -1383,25 +1380,36 @@ $('btnScanFacesAll').onclick=async()=>{
   const btn=$('btnScanFacesAll');
   btn.disabled=true;btn.textContent='👤 Scanning…';
   try{
-    // Download face models if needed
+    // Step 1: IMMEDIATELY show popup for already-detected unknown faces
+    // (don't wait for slow face detection on new photos)
+    try{
+      const recognized=await invoke('recognize_all_faces');
+      if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
+    }catch(_){}
+    const existingFaces=await invoke('get_unknown_faces').catch(()=>[]);
+    if(existingFaces && existingFaces.length>0){
+      toast(`${existingFaces.length} unknown person(s) found — please identify them!`,'info');
+      showFacePopup(existingFaces, 0);
+      // Don't block — user names faces while new detection runs below
+    }
+
+    // Step 2: Download face models if needed
     const hasModels=await invoke('check_face_models');
     if(!hasModels){
       toast('Downloading face detection models…','info');
       await invoke('download_face_models');
     }
-    // Detect faces in all unscanned photos
-    toast('Detecting faces in photos…','info');
+
+    // Step 3: Detect faces in remaining unscanned photos (can be slow)
+    toast('Scanning remaining photos for faces…','info');
     let newFaces=0;
     try{ newFaces=await invoke('detect_faces_background'); }
     catch(e){ toast('Face detection: '+e,'warn'); }
-    if(newFaces>0) toast(`${newFaces} new face(s) detected`,'info');
-    // Recognize known faces (may fail if no persons defined yet — that's OK)
-    try{
-      const recognized=await invoke('recognize_all_faces');
-      if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
-    }catch(_){}
-    // Show popup for unknown faces
-    await checkUnknownFaces(true);
+    if(newFaces>0){
+      toast(`${newFaces} new face(s) detected! Click "👤 Identify Faces" again to name them.`,'success');
+    } else {
+      toast('Face scan complete','info');
+    }
     refreshPersonsSidebar();
     loadPhotos();
   }catch(e){
