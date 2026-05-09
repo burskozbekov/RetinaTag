@@ -65,7 +65,12 @@ pub async fn run_tagging(
         let r = router.lock().unwrap_or_else(|e| e.into_inner());
         r.is_local_only()
     };
-    let concurrency = if is_local_only { 1 } else { (provider_count * 3).max(2).min(16) };
+    let is_gemini_only = {
+        let r = router.lock().unwrap_or_else(|e| e.into_inner());
+        r.is_gemini_only()
+    };
+    // Gemini free tier: ~15 RPM → serial (1 at a time) to avoid 429 spam
+    let concurrency = if is_local_only || is_gemini_only { 1 } else { (provider_count * 3).max(2).min(16) };
     let sem = Arc::new(Semaphore::new(concurrency));
 
     // Provider breakdown tracker
@@ -188,7 +193,7 @@ pub async fn run_tagging(
                     .await;
 
                     match result {
-                        Ok(tags) if !tags.is_empty() => {
+                        Ok((tags, description, location)) if !tags.is_empty() => {
                             let cost = current_provider.cost_per_image();
                             let provider_name = current_provider.key_name().to_string();
 
@@ -203,14 +208,25 @@ pub async fn run_tagging(
                                 db::update_photo_status(&conn, photo_id, "tagged").ok();
                                 db::update_photo_provider(&conn, photo_id, &provider_name).ok();
                                 db::record_usage(&conn, &provider_name, photo_id, true, cost).ok();
+                                if let Some(desc) = description {
+                                    db::update_photo_description(&conn, photo_id, &desc).ok();
+                                }
+                                // Save AI-estimated location (only if no real GPS)
+                                if let Some((lat, lon, name)) = location {
+                                    db::update_photo_estimated_location(&conn, photo_id, lat, lon, &name).ok();
+                                }
                             }
                             { router.lock().unwrap_or_else(|e| e.into_inner()).report_success(current_provider); }
                             { let mut b = bd.lock().unwrap_or_else(|e| e.into_inner()); let e = b.entry(provider_name).or_insert((0,0.0)); e.0+=1; e.1+=cost; }
                             done.fetch_add(1, Ordering::Relaxed);
+                            // Gemini free tier: 15 RPM → enforce ≥5s between requests
+                            if current_provider == AiProvider::Gemini {
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            }
                             break;
                         }
 
-                        Ok(_) => {
+                        Ok(_) /* empty tags */ => {
                             // Empty tag list — retry same provider with brief wait
                             if attempt >= MAX_ATTEMPTS {
                                 let conn = db.lock().unwrap_or_else(|e| e.into_inner());
@@ -231,7 +247,7 @@ pub async fn run_tagging(
                                 if msg.contains("401") || msg.contains("403") || msg.contains("unauthorized") || msg.contains("invalid api key") {
                                     ApiErrorKind::AuthFailed
                                 } else if msg.contains("429") || msg.contains("rate limit") || msg.contains("too many") {
-                                    ApiErrorKind::RateLimit { retry_after_secs: 15 }
+                                    ApiErrorKind::RateLimit { retry_after_secs: 60 }
                                 } else if msg.contains("500") || msg.contains("502") || msg.contains("503") || msg.contains("timeout") {
                                     ApiErrorKind::Transient
                                 } else {

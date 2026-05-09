@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for RetinaTag","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open","dialog:allow-message","dialog:allow-confirm","dialog:allow-ask"]}}
+{"default":{"identifier":"default","description":"Default capabilities for RetinaTag","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open","dialog:allow-message","dialog:allow-confirm","dialog:allow-ask","updater:default","process:default","process:allow-restart","notification:default","drag:default"]}}

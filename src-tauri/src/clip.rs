@@ -12,6 +12,7 @@
 use anyhow::{bail, Context, Result};
 use image::DynamicImage;
 use ndarray::{Array2, Array4};
+use ort::execution_providers::DirectMLExecutionProvider;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use std::path::Path;
 
@@ -107,6 +108,67 @@ pub struct ClipEngine {
 unsafe impl Send for ClipEngine {}
 unsafe impl Sync for ClipEngine {}
 
+/// Check if directml.dll can actually be loaded by the OS.
+/// This prevents DELAYLOAD SEH crashes when the DLL is missing or broken.
+#[cfg(target_os = "windows")]
+fn can_load_directml() -> bool {
+    extern "system" {
+        fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
+        fn FreeLibrary(handle: *mut std::ffi::c_void) -> i32;
+    }
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    let name: Vec<u16> = OsStr::new("directml.dll")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let h = LoadLibraryW(name.as_ptr());
+        if !h.is_null() {
+            FreeLibrary(h);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn can_load_directml() -> bool {
+    false
+}
+
+/// Build an ONNX session, trying DirectML GPU first, falling back to CPU.
+fn build_session_with_directml(model_path: &Path) -> Result<Session> {
+    // Only attempt DirectML if the DLL is actually loadable
+    if can_load_directml() {
+        let gpu_result = (|| -> std::result::Result<Session, Box<dyn std::error::Error>> {
+            let builder = Session::builder()?;
+            let builder = builder.with_execution_providers([DirectMLExecutionProvider::default().build()])?;
+            let mut builder = builder.with_optimization_level(GraphOptimizationLevel::Level3)?;
+            Ok(builder.commit_from_file(model_path)?)
+        })();
+
+        if let Ok(session) = gpu_result {
+            return Ok(session);
+        }
+    }
+
+    // Fallback: CPU-only
+    let session = Session::builder()
+        .map_err(|e| anyhow::anyhow!("ONNX builder: {e}"))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| anyhow::anyhow!("opt level: {e}"))?
+        .commit_from_file(model_path)
+        .map_err(|e| anyhow::anyhow!("model loading: {e}"))?;
+    Ok(session)
+}
+
+/// Returns true if DirectML GPU acceleration is available for ONNX sessions.
+pub fn is_directml_available() -> bool {
+    can_load_directml()
+}
+
 pub fn load_engine(models_dir: &Path, tier: ClipTier) -> Result<ClipEngine> {
     let dir = models_dir.join(tier.dir_name());
 
@@ -122,18 +184,11 @@ pub fn load_engine(models_dir: &Path, tier: ClipTier) -> Result<ClipEngine> {
         );
     }
 
-    let visual = Session::builder()
-        .map_err(|e| anyhow::anyhow!("ONNX builder (visual): {e}"))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("opt level (visual): {e}"))?
-        .commit_from_file(&visual_path)
+    // Try DirectML (GPU) first; silently fall back to CPU if unavailable
+    let visual = build_session_with_directml(&visual_path)
         .map_err(|e| anyhow::anyhow!("visual model loading: {e}"))?;
 
-    let textual = Session::builder()
-        .map_err(|e| anyhow::anyhow!("ONNX builder (textual): {e}"))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("opt level (textual): {e}"))?
-        .commit_from_file(&textual_path)
+    let textual = build_session_with_directml(&textual_path)
         .map_err(|e| anyhow::anyhow!("textual model loading: {e}"))?;
 
     let tokenizer = ClipTokenizer::load(&dir).context("failed to load tokenizer")?;

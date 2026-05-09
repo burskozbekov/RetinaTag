@@ -56,10 +56,20 @@ impl SmartRouter {
                     keys.insert(*provider, format!("{}|{}", endpoint, local_model));
                 }
             } else {
-                let key_setting = format!("api_key_{}", provider.key_name());
-                if let Ok(Some(key)) = db::get_setting(&conn, &key_setting) {
-                    if !key.is_empty() {
-                        keys.insert(*provider, key);
+                // Cloud provider: check if enabled (default true if key exists)
+                let enabled_setting = format!("enabled_{}", provider.key_name());
+                let is_enabled = db::get_setting(&conn, &enabled_setting)
+                    .ok()
+                    .flatten()
+                    .map(|v| v != "false")
+                    .unwrap_or(true); // default: enabled if key exists
+
+                if is_enabled {
+                    let key_setting = format!("api_key_{}", provider.key_name());
+                    if let Ok(Some(key)) = db::get_setting(&conn, &key_setting) {
+                        if !key.is_empty() {
+                            keys.insert(*provider, key);
+                        }
                     }
                 }
             }
@@ -165,6 +175,12 @@ impl SmartRouter {
     pub fn is_local_only(&self) -> bool {
         let providers = self.available_providers();
         providers.len() == 1 && providers[0] == AiProvider::Local
+    }
+
+    /// Check if the only active provider is Gemini (free tier rate-limit workaround)
+    pub fn is_gemini_only(&self) -> bool {
+        let providers = self.available_providers();
+        providers.len() == 1 && providers[0] == AiProvider::Gemini
     }
 
     /// Get the cheapest available provider for text-only tasks (translation)

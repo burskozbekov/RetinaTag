@@ -3,12 +3,19 @@ node_modules/
 *.key.pub
 .ollama/
 src-tauri/target/
-src-tauri/target/
 dist/*.js.map
 .env
 *.db
 *.db-shm
 *.db-wal
+
+# Local build logs from prior releases
+build-*.log
+
+# Claude Code session state (per-machine, not source)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+.claude/worktrees/
 
 # Face recognition model binaries (download with download_models.ps1)
 src-tauri/models/*.onnx

@@ -41,65 +41,124 @@ fn classify_status(status: u16, body: &str) -> ApiErrorKind {
     }
 }
 
-const TAG_PROMPT: &str = "\
-Analyze this image and return ONLY a JSON array of 20-40 descriptive English tags. \
-No explanation, no markdown, just the raw JSON array. Be EXHAUSTIVE and SPECIFIC. \
-REQUIRED categories — include ALL that apply: \
-- PEOPLE: gender (man/woman/boy/girl), age range (baby/child/teen/young adult/middle-aged/elderly), ethnicity if visible, hair color, facial hair \
-- EMOTIONS: smiling, laughing, serious, surprised, happy, sad, romantic \
-- CLOTHING: dress, jacket, hat, scarf, glasses, casual, formal, traditional \
-- BODY: portrait, close-up, selfie, full-body, group photo, couple \
-- OBJECTS: every visible object (phone, bag, glass, plate, fork, car, etc.) \
-- FOOD & DRINK: specific food names (pasta, steak, salad, coffee, wine, etc.) \
-- LOCATION: indoor/outdoor, restaurant, street, park, museum, beach, city, nature \
-- ARCHITECTURE: building, monument, church, bridge, tower, historical \
-- COLORS: dominant colors (red, blue, green, black, white, etc.) \
-- MOOD: romantic, festive, calm, energetic, dramatic, cozy \
-- WEATHER/LIGHT: sunny, cloudy, night, golden hour, flash, dim \
-- ACTIVITY: eating, walking, posing, talking, cooking, traveling, sightseeing \
-Use lowercase. Be specific: say \"woman\" not just \"person\", say \"pasta\" not just \"food\". \
-Example: [\"woman\",\"man\",\"couple\",\"selfie\",\"smiling\",\"restaurant\",\"indoor\",\"dinner\",\"wine glass\",\"romantic\",\"evening\",\"casual\",\"happy\",\"brown hair\",\"scarf\"]";
+const TAG_PROMPT_EN: &str = "\
+Analyze this image and return a JSON object with three fields: \"tags\", \"description\", and \"location\".
+- \"tags\": array of 20-40 lowercase English tags covering people, emotions, clothing, objects, food, location, architecture, colors, mood, weather, activity. Be SPECIFIC: say \"woman\" not \"person\", say \"pasta\" not \"food\".
+- \"description\": one vivid English sentence (max 30 words) describing what is happening in the photo.
+- \"location\": your best guess of where this photo was taken, as an object with \"lat\" (number), \"lon\" (number), and \"name\" (string, e.g. \"Istanbul, Turkey\"). Use visual clues like architecture, signs, vegetation, landmarks. If you truly cannot guess, set location to null.
+Return ONLY the raw JSON object, no markdown, no explanation.
+Example: {\"tags\":[\"woman\",\"man\",\"couple\",\"selfie\",\"smiling\",\"restaurant\",\"indoor\",\"dinner\",\"wine glass\",\"romantic\"],\"description\":\"A smiling couple taking a selfie at a cozy restaurant during a romantic dinner.\",\"location\":{\"lat\":41.01,\"lon\":28.97,\"name\":\"Istanbul, Turkey\"}}";
 
-/// Detailed prompt for local Ollama models
-const OLLAMA_TAG_PROMPT: &str = "\
-Analyze this image exhaustively. Return 20-40 tags as a JSON array of lowercase English strings.
-Be VERY SPECIFIC — use exact words:
-- People: say \"man\" or \"woman\" (not just \"person\"), include age (child/young/elderly), hair color
-- Food: name the exact dish (pasta, steak, salad) not just \"food\"
-- Location: be specific (restaurant, museum, park, beach, street)
-- Objects: list every visible object (phone, glass, plate, bag, car)
-- Emotions: smiling, laughing, serious, romantic, happy
-- Clothing: jacket, dress, hat, scarf, glasses
-- Colors: dominant colors visible
-- Activity: eating, walking, posing, talking, sightseeing
-Output ONLY the JSON array, nothing else.
-Example: [\"woman\",\"man\",\"couple\",\"restaurant\",\"indoor\",\"pasta\",\"wine\",\"smiling\",\"romantic\",\"evening\",\"casual\",\"brown hair\"]";
+/// Turkish-output tag prompt. Uses native Turkish vocabulary so tags read
+/// naturally ("köpek" not "dog", "düğün" not "wedding"). We still ask for
+/// the location `name` in "Şehir, Ülke" form.
+const TAG_PROMPT_TR: &str = "\
+Bu fotoğrafı analiz et ve üç alanlı bir JSON nesnesi döndür: \"tags\", \"description\", \"location\".
+- \"tags\": 20-40 adet küçük harfli TÜRKÇE etiket dizisi. Kişi, duygu, kıyafet, nesne, yemek, konum, mimari, renk, atmosfer, hava, aktivite kategorilerini kapsasın. SPESİFİK ol: \"insan\" yerine \"kadın\", \"yemek\" yerine \"makarna\" yaz. İngilizce etiket KULLANMA.
+- \"description\": Fotoğrafta ne olduğunu anlatan, en fazla 30 kelimelik bir TÜRKÇE cümle.
+- \"location\": Fotoğrafın nerede çekildiğine dair en iyi tahminin; {\"lat\":sayı,\"lon\":sayı,\"name\":\"Şehir, Ülke\"} biçiminde. Mimari, tabelalar, bitki örtüsü, önemli yapılar gibi görsel ipuçlarını kullan. Tahmin edemiyorsan null döndür.
+SADECE ham JSON nesnesini döndür; markdown, açıklama veya kod bloğu ekleme.
+Örnek: {\"tags\":[\"kadın\",\"erkek\",\"çift\",\"selfie\",\"gülümseyen\",\"restoran\",\"iç mekan\",\"akşam yemeği\",\"şarap kadehi\",\"romantik\"],\"description\":\"Bir çift, romantik bir akşam yemeğinde sıcak bir restoranda selfie çekiyor.\",\"location\":{\"lat\":41.01,\"lon\":28.97,\"name\":\"İstanbul, Türkiye\"}}";
 
-/// Parse AI response into tag list, handling various response formats
-pub fn extract_tags(text: &str) -> Vec<String> {
+/// Detailed prompt for local Ollama models (English)
+const OLLAMA_TAG_PROMPT_EN: &str = "\
+Analyze this image. Return a JSON object with three fields:
+- \"tags\": array of 20-40 lowercase English tags (people, food, location, objects, emotions, clothing, colors, activity)
+- \"description\": one English sentence (max 25 words) describing the scene
+- \"location\": your best guess where this was taken: {\"lat\":number,\"lon\":number,\"name\":\"City, Country\"}. Use visual clues. If unknown, set to null.
+Be SPECIFIC: say \"man\" not \"person\", say \"pasta\" not \"food\".
+Output ONLY the raw JSON object, nothing else.
+Example: {\"tags\":[\"woman\",\"man\",\"couple\",\"restaurant\",\"indoor\",\"pasta\",\"wine\",\"smiling\",\"romantic\"],\"description\":\"A couple enjoying pasta and wine at a restaurant.\",\"location\":{\"lat\":41.01,\"lon\":28.97,\"name\":\"Istanbul, Turkey\"}}";
+
+const OLLAMA_TAG_PROMPT_TR: &str = "\
+Bu fotoğrafı analiz et. Üç alanlı JSON nesnesi döndür:
+- \"tags\": 20-40 küçük harf TÜRKÇE etiket dizisi (kişi, yemek, konum, nesne, duygu, kıyafet, renk, aktivite)
+- \"description\": Sahneyi anlatan en fazla 25 kelimelik bir TÜRKÇE cümle
+- \"location\": Nerede çekildiğine dair tahminin: {\"lat\":sayı,\"lon\":sayı,\"name\":\"Şehir, Ülke\"}. Görsel ipuçları kullan. Bilmiyorsan null.
+SPESİFİK ol: \"insan\" yerine \"kadın\", \"yemek\" yerine \"makarna\" kullan.
+SADECE ham JSON nesnesi döndür, başka hiçbir şey yazma.
+Örnek: {\"tags\":[\"kadın\",\"erkek\",\"çift\",\"restoran\",\"iç mekan\",\"makarna\",\"şarap\",\"gülümseyen\",\"romantik\"],\"description\":\"Bir çift restoranda makarna ve şarabın tadını çıkarıyor.\",\"location\":{\"lat\":41.01,\"lon\":28.97,\"name\":\"İstanbul, Türkiye\"}}";
+
+/// Global language toggle. 0 = English (default), 1 = Turkish. Set via
+/// `set_tag_language` command from the frontend. Providers read this at
+/// the start of each request.
+pub static TAG_LANG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn current_tag_prompt() -> &'static str {
+    if TAG_LANG.load(std::sync::atomic::Ordering::Relaxed) == 1 { TAG_PROMPT_TR } else { TAG_PROMPT_EN }
+}
+
+pub fn current_ollama_tag_prompt() -> &'static str {
+    if TAG_LANG.load(std::sync::atomic::Ordering::Relaxed) == 1 { OLLAMA_TAG_PROMPT_TR } else { OLLAMA_TAG_PROMPT_EN }
+}
+
+/// Estimated location from AI
+pub type EstimatedLocation = (f64, f64, String); // (lat, lon, name)
+
+/// Parse AI response into (tags, description, location)
+pub fn extract_tags_and_description(text: &str) -> (Vec<String>, Option<String>, Option<EstimatedLocation>) {
     let text = text.trim();
-
-    // Strip markdown code blocks: ```json ... ``` or ``` ... ```
     let cleaned = if let Some(inner) = text.strip_prefix("```json").or_else(|| text.strip_prefix("```")) {
         inner.trim_end_matches("```").trim()
     } else {
         text
     };
 
-    // Try direct JSON parse
-    if let Ok(tags) = serde_json::from_str::<Vec<String>>(cleaned) {
-        return normalize_tags(tags);
+    fn parse_location(obj: &serde_json::Value) -> Option<EstimatedLocation> {
+        let loc = obj.get("location")?;
+        if loc.is_null() { return None; }
+        let lat = loc.get("lat")?.as_f64()?;
+        let lon = loc.get("lon")?.as_f64()?;
+        let name = loc.get("name")?.as_str().unwrap_or("Unknown").to_string();
+        // Sanity check: valid coordinates
+        if lat.abs() > 90.0 || lon.abs() > 180.0 { return None; }
+        Some((lat, lon, name))
     }
 
-    // Find first JSON array in response
-    if let (Some(start), Some(end)) = (cleaned.find('['), cleaned.rfind(']')) {
-        let slice = &cleaned[start..=end];
-        if let Ok(tags) = serde_json::from_str::<Vec<String>>(slice) {
-            return normalize_tags(tags);
+    // Try parsing as {"tags": [...], "description": "...", "location": {...}}
+    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(cleaned) {
+        if let Some(tags_val) = obj.get("tags") {
+            if let Ok(tags) = serde_json::from_value::<Vec<String>>(tags_val.clone()) {
+                let desc = obj.get("description")
+                    .and_then(|d| d.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let loc = parse_location(&obj);
+                return (normalize_tags(tags), desc, loc);
+            }
+        }
+        // Maybe it's just an array
+        if let Ok(tags) = serde_json::from_value::<Vec<String>>(obj.clone()) {
+            return (normalize_tags(tags), None, None);
         }
     }
 
-    // Handle "- tag" or "* tag" bullet list format
+    // Find JSON object {...}
+    if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
+        let slice = &cleaned[start..=end];
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(slice) {
+            if let Some(tags_val) = obj.get("tags") {
+                if let Ok(tags) = serde_json::from_value::<Vec<String>>(tags_val.clone()) {
+                    let desc = obj.get("description")
+                        .and_then(|d| d.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    let loc = parse_location(&obj);
+                    return (normalize_tags(tags), desc, loc);
+                }
+            }
+        }
+    }
+
+    // Find JSON array [...]
+    if let (Some(start), Some(end)) = (cleaned.find('['), cleaned.rfind(']')) {
+        let slice = &cleaned[start..=end];
+        if let Ok(tags) = serde_json::from_str::<Vec<String>>(slice) {
+            return (normalize_tags(tags), None, None);
+        }
+    }
+
+    // Bullet list fallback
     let bullet_tags: Vec<String> = cleaned
         .lines()
         .filter_map(|l| {
@@ -112,21 +171,15 @@ pub fn extract_tags(text: &str) -> Vec<String> {
         })
         .collect();
     if bullet_tags.len() >= 3 {
-        return normalize_tags(bullet_tags);
+        return (normalize_tags(bullet_tags), None, None);
     }
 
-    // Last resort: split by comma
-    let tags: Vec<String> = cleaned
-        .lines()
-        .flat_map(|l| l.split(','))
-        .map(|s| {
-            s.trim_matches(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-')
-                .trim()
-                .to_lowercase()
-        })
-        .filter(|s| !s.is_empty() && s.len() < 60 && s.len() > 1)
-        .collect();
-    tags
+    (vec![], None, None)
+}
+
+/// Legacy: kept for translate_for_clip usage
+pub fn extract_tags(text: &str) -> Vec<String> {
+    extract_tags_and_description(text).0
 }
 
 fn normalize_tags(tags: Vec<String>) -> Vec<String> {
@@ -138,7 +191,7 @@ fn normalize_tags(tags: Vec<String>) -> Vec<String> {
 
 // ── Claude (Anthropic) ───────────────────────────────────────────────────────
 
-pub async fn call_claude(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
+pub async fn call_claude(image_b64: &str, api_key: &str, model: &str) -> Result<(Vec<String>, Option<String>, Option<EstimatedLocation>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -157,7 +210,7 @@ pub async fn call_claude(image_b64: &str, api_key: &str, model: &str) -> Result<
                         "data": image_b64
                     }
                 },
-                { "type": "text", "text": TAG_PROMPT }
+                { "type": "text", "text": current_tag_prompt() }
             ]
         }]
     });
@@ -183,13 +236,13 @@ pub async fn call_claude(image_b64: &str, api_key: &str, model: &str) -> Result<
         ));
     }
 
-    let text = json["content"][0]["text"].as_str().unwrap_or("[]");
-    Ok(extract_tags(text))
+    let text = json["content"][0]["text"].as_str().unwrap_or("{}");
+    Ok(extract_tags_and_description(text))
 }
 
 // ── OpenAI (GPT-4o) ─────────────────────────────────────────────────────────
 
-pub async fn call_openai(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
+pub async fn call_openai(image_b64: &str, api_key: &str, model: &str) -> Result<(Vec<String>, Option<String>, Option<EstimatedLocation>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -207,7 +260,7 @@ pub async fn call_openai(image_b64: &str, api_key: &str, model: &str) -> Result<
                         "detail": "low"
                     }
                 },
-                { "type": "text", "text": TAG_PROMPT }
+                { "type": "text", "text": current_tag_prompt() }
             ]
         }]
     });
@@ -234,13 +287,13 @@ pub async fn call_openai(image_b64: &str, api_key: &str, model: &str) -> Result<
 
     let text = json["choices"][0]["message"]["content"]
         .as_str()
-        .unwrap_or("[]");
-    Ok(extract_tags(text))
+        .unwrap_or("{}");
+    Ok(extract_tags_and_description(text))
 }
 
 // ── Google Gemini ────────────────────────────────────────────────────────────
 
-pub async fn call_gemini(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
+pub async fn call_gemini(image_b64: &str, api_key: &str, model: &str) -> Result<(Vec<String>, Option<String>, Option<EstimatedLocation>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -259,7 +312,7 @@ pub async fn call_gemini(image_b64: &str, api_key: &str, model: &str) -> Result<
                         "data": image_b64
                     }
                 },
-                { "text": TAG_PROMPT }
+                { "text": current_tag_prompt() }
             ]
         }],
         "generationConfig": {
@@ -288,13 +341,13 @@ pub async fn call_gemini(image_b64: &str, api_key: &str, model: &str) -> Result<
 
     let text = json["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
-        .unwrap_or("[]");
-    Ok(extract_tags(text))
+        .unwrap_or("{}");
+    Ok(extract_tags_and_description(text))
 }
 
 // ── xAI Grok ─────────────────────────────────────────────────────────────────
 
-pub async fn call_grok(image_b64: &str, api_key: &str, model: &str) -> Result<Vec<String>> {
+pub async fn call_grok(image_b64: &str, api_key: &str, model: &str) -> Result<(Vec<String>, Option<String>, Option<EstimatedLocation>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -312,7 +365,7 @@ pub async fn call_grok(image_b64: &str, api_key: &str, model: &str) -> Result<Ve
                         "detail": "low"
                     }
                 },
-                { "type": "text", "text": TAG_PROMPT }
+                { "type": "text", "text": current_tag_prompt() }
             ]
         }]
     });
@@ -339,8 +392,8 @@ pub async fn call_grok(image_b64: &str, api_key: &str, model: &str) -> Result<Ve
 
     let text = json["choices"][0]["message"]["content"]
         .as_str()
-        .unwrap_or("[]");
-    Ok(extract_tags(text))
+        .unwrap_or("{}");
+    Ok(extract_tags_and_description(text))
 }
 
 // ── Ollama (local) ────────────────────────────────────────────────────────────
@@ -350,7 +403,7 @@ pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
 /// Call a local Ollama model with vision support (e.g. gemma3:4b, qwen2.5vl:7b).
 /// Ollama uses the `/api/chat` endpoint with `images` field for base64 data.
-pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result<Vec<String>> {
+pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result<(Vec<String>, Option<String>, Option<EstimatedLocation>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
@@ -368,7 +421,7 @@ pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result
         },
         "messages": [{
             "role": "user",
-            "content": OLLAMA_TAG_PROMPT,
+            "content": current_ollama_tag_prompt(),
             "images": [image_b64]
         }]
     });
@@ -405,10 +458,9 @@ pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result
         return Err(anyhow::anyhow!("Ollama returned empty response for model '{}'", model));
     }
 
-    let tags = extract_tags(text);
+    let (tags, desc, loc) = extract_tags_and_description(text);
 
     if tags.is_empty() {
-        // Log the raw response to help debug
         let preview = &text[..text.len().min(200)];
         return Err(anyhow::anyhow!(
             "Ollama response could not be parsed into tags. Raw: {}",
@@ -416,7 +468,7 @@ pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result
         ));
     }
 
-    Ok(tags)
+    Ok((tags, desc, loc))
 }
 
 /// Check if Ollama is reachable and the model is available.
@@ -461,20 +513,19 @@ pub async fn check_ollama_status(
 
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
-/// Call the appropriate provider API
+/// Call the appropriate provider API — returns (tags, description)
 pub async fn call_provider(
     provider: AiProvider,
     image_b64: &str,
-    api_key: &str,  // For Local provider: this holds the Ollama endpoint URL
+    api_key: &str,
     model: &str,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Option<String>, Option<EstimatedLocation>)> {
     match provider {
         AiProvider::Claude => call_claude(image_b64, api_key, model).await,
         AiProvider::OpenAI => call_openai(image_b64, api_key, model).await,
         AiProvider::Gemini => call_gemini(image_b64, api_key, model).await,
         AiProvider::Grok => call_grok(image_b64, api_key, model).await,
         AiProvider::Local => {
-            // api_key may be "endpoint|model" or just "endpoint"
             let endpoint = if api_key.is_empty() {
                 DEFAULT_OLLAMA_URL
             } else {

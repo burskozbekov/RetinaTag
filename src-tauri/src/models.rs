@@ -138,6 +138,8 @@ pub struct Photo {
     pub status: String,
     pub provider_used: Option<String>,
     pub tags: Vec<TagEntry>,
+    pub description: Option<String>,
+    pub estimated_location: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -156,6 +158,17 @@ pub struct PhotoSummary {
     pub provider_used: Option<String>,
     pub tags: Vec<String>,
     pub tag_count: i64,
+    pub media_type: String,
+    pub date_taken: Option<String>,
+    pub duration_secs: Option<i32>,
+    pub rating: i32,
+    pub favorite: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimelineGroup {
+    pub date: String,
+    pub photos: Vec<PhotoSummary>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -272,7 +285,7 @@ pub struct ExportResult {
 
 // ── EXIF / GPS ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct PhotoExif {
     pub camera: Option<String>,
     pub lens: Option<String>,
@@ -293,6 +306,8 @@ pub struct GpsPhoto {
     pub lat: f64,
     pub lon: f64,
     pub tag_count: i64,
+    pub source: String,           // "gps" or "ai"
+    pub location_name: Option<String>, // AI-estimated location name
 }
 
 // ── Duplicate Detection ─────────────────────────────────────────────────────
@@ -301,6 +316,71 @@ pub struct GpsPhoto {
 pub struct DuplicateGroup {
     pub hash: String,
     pub photos: Vec<PhotoSummary>,
+}
+
+/// Cleanup view — rich per-photo info with everything the UI needs to
+/// visualize a duplicate group or a blurry-photo row.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CleanupPhoto {
+    pub id: i64,
+    pub path: String,
+    pub filename: String,
+    pub folder: String,
+    pub width: i32,
+    pub height: i32,
+    pub size_bytes: i64,
+    pub rating: i32,
+    pub favorite: bool,
+    pub blur_score: Option<f32>,
+    pub date_taken: Option<String>,
+    /// Number of user-assigned tags (protect signal).
+    pub tag_count: i64,
+    /// Number of assigned named persons (protect signal).
+    pub person_count: i64,
+    /// Number of collections this photo belongs to (protect signal).
+    pub collection_count: i64,
+    /// True if the photo's status indicates XMP metadata has been written.
+    pub has_xmp: bool,
+    /// True if ANY investment signal is present — UI shows a lock badge and
+    /// auto-select skips these rows.
+    pub is_invested: bool,
+    /// Computed keeper-score — highest in the group = auto-picked keeper.
+    pub keeper_score: f64,
+    /// Set by the backend for duplicate groups: true for the auto-picked
+    /// keeper, false for every other member (= deletion candidate).
+    pub is_keeper: bool,
+    /// Short human-readable reasons for the keeper score — shown as tooltip
+    /// in the UI (e.g. "24 MP", "sharp (1523)", "❤ favorite").
+    pub keeper_reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CleanupDuplicateGroup {
+    pub hash: String,
+    pub photos: Vec<CleanupPhoto>,
+    /// Total bytes that would be freed if every non-keeper photo is deleted.
+    pub bytes_reclaimable: i64,
+    /// 0.0–1.0 confidence that these really are duplicates worth acting on.
+    /// Currently: 1.0 for exact pHash match (what we support today). Lower
+    /// values are reserved for future near-duplicate groups via Hamming
+    /// distance so the UI can badge "likely" vs "definite" duplicates.
+    pub confidence: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CleanupSummary {
+    pub duplicate_groups: i64,
+    pub duplicate_photos: i64,
+    pub duplicate_bytes_reclaimable: i64,
+    pub blurry_photos: i64,
+    pub blurry_bytes: i64,
+    pub photos_without_phash: i64,
+    pub photos_without_blur_score: i64,
+    pub total_photos: i64,
+    /// Recommended blur threshold based on the library's own distribution
+    /// (10th percentile of existing blur_scores). None if there aren't
+    /// enough scored photos yet — UI falls back to 100.
+    pub suggested_blur_threshold: Option<f32>,
 }
 
 // ── Tag Management ──────────────────────────────────────────────────────────
@@ -344,6 +424,9 @@ pub struct FaceRegion {
     pub person_id: Option<i64>,
     pub person_name: Option<String>,
     pub thumbnail_b64: Option<String>, // base64-encoded 128×128 JPEG crop
+    /// All face IDs in this cluster (for batch skip/assign)
+    #[serde(default)]
+    pub cluster_face_ids: Vec<i64>,
 }
 
 // ── Cost Dashboard ──────────────────────────────────────────────────────────
@@ -403,7 +486,7 @@ pub fn local_model_presets() -> Vec<LocalModelPreset> {
             ollama_tag: "gemma3:4b".into(),
             vram_gb: 3.5,
             size_gb: 3.3,
-            description: "Best quality/VRAM ratio. Free, 128K context, multilingual".into(),
+            description: "Solid quality/VRAM ratio. Free, 128K context, multilingual".into(),
             recommended_for: "GTX 1060 / GTX 1650 / RTX 2060 (4-6 GB)".into(),
         },
         LocalModelPreset {
@@ -416,22 +499,83 @@ pub fn local_model_presets() -> Vec<LocalModelPreset> {
             recommended_for: "RTX 3060 8GB / RTX 2070 (8 GB)".into(),
         },
         LocalModelPreset {
-            id: "gemma3_12b".into(),
-            name: "Gemma 3 12B".into(),
-            ollama_tag: "gemma3:12b".into(),
+            id: "gemma4_12b".into(),
+            name: "Gemma 4 12B".into(),
+            ollama_tag: "gemma4:12b".into(),
             vram_gb: 9.0,
             size_gb: 8.1,
-            description: "High quality vision, great for detailed photo tagging".into(),
+            description: "Latest Gemma generation — better vision understanding than Gemma 3".into(),
             recommended_for: "RTX 3060 12GB / RTX 3070 / RTX 4060 (12 GB)".into(),
         },
         LocalModelPreset {
-            id: "gemma3_27b".into(),
-            name: "Gemma 3 27B".into(),
-            ollama_tag: "gemma3:27b".into(),
+            id: "qwen25vl_32b".into(),
+            name: "Qwen2.5-VL 32B ⭐ Best".into(),
+            ollama_tag: "qwen2.5vl:32b".into(),
+            vram_gb: 20.0,
+            size_gb: 19.0,
+            description: "Top-tier vision model. Exceptional detail, OCR, scene understanding — best for photo tagging".into(),
+            recommended_for: "RTX 3090 / RTX 4090 / RTX 4080 (24 GB) ← senin kartın".into(),
+        },
+        LocalModelPreset {
+            id: "gemma4_27b".into(),
+            name: "Gemma 4 27B".into(),
+            ollama_tag: "gemma4:27b".into(),
             vram_gb: 18.0,
             size_gb: 17.0,
-            description: "Near cloud-API quality. Approaches Gemini 1.5 Pro".into(),
+            description: "Latest Gemma, near cloud-API quality. Great all-rounder".into(),
             recommended_for: "RTX 3090 / RTX 4090 (24 GB)".into(),
         },
     ]
+}
+
+// ── Similar Photo Result ───────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SimilarResult {
+    pub photo: PhotoSummary,
+    pub similarity: f32,
+}
+
+// ── Calendar View ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CalendarDay {
+    pub day: u32,
+    pub count: i64,
+    pub first_photo_id: Option<i64>,
+}
+
+// ── Library Analytics ──────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LibraryAnalytics {
+    pub photos_by_month: Vec<(String, i64)>,
+    pub top_tags: Vec<(String, i64)>,
+    pub camera_stats: Vec<(String, i64)>,
+    pub media_type_breakdown: Vec<(String, i64)>,
+    pub rating_distribution: Vec<(i32, i64)>,
+    pub top_locations: Vec<(String, i64)>,
+    pub storage_by_folder: Vec<(String, i64)>,
+    pub total_photos: i64,
+    pub total_size_bytes: i64,
+}
+
+// ── Health Check ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HealthReport {
+    pub orphaned_entries: Vec<(i64, String)>,
+    pub missing_thumbnails: i64,
+    pub total_checked: i64,
+}
+
+// ── Smart Rename ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RenamePreview {
+    pub photo_id: i64,
+    pub old_name: String,
+    pub new_name: String,
+    pub old_path: String,
+    pub new_path: String,
 }

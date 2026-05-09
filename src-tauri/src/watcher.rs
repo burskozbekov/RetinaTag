@@ -23,12 +23,16 @@ impl FolderWatcher {
         db_conn: Arc<Mutex<rusqlite::Connection>>,
         thumbnails_dir: std::path::PathBuf,
         app_handle: tauri::AppHandle,
+        auto_tag_folders: HashSet<String>,
+        tag_running: Arc<AtomicBool>,
+        tag_stop: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         let pending_files: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let pending_clone = pending_files.clone();
         let db_clone = db_conn.clone();
         let thumbs_clone = thumbnails_dir.clone();
         let ah_clone = app_handle.clone();
+        let auto_tag_clone = Arc::new(auto_tag_folders);
 
         // Debounce: process new files every 5 seconds
         let debounce_running = Arc::new(AtomicBool::new(false));
@@ -54,11 +58,11 @@ impl FolderWatcher {
                             let thumbs_ref = thumbs_clone.clone();
                             let ah_ref = ah_clone.clone();
                             let running_ref = debounce_running2.clone();
+                            let auto_tag_ref = auto_tag_clone.clone();
+                            let tag_running_ref = tag_running.clone();
+                            let tag_stop_ref = tag_stop.clone();
 
                             std::thread::spawn(move || {
-                                // Keep looping until the pending set stays empty after a full
-                                // debounce window — this closes the race where files arrive
-                                // between the drain and the running=false store.
                                 loop {
                                     std::thread::sleep(Duration::from_secs(5));
 
@@ -68,14 +72,67 @@ impl FolderWatcher {
                                     };
 
                                     if files.is_empty() {
-                                        // Nothing arrived during the sleep window — safe to exit.
                                         running_ref.store(false, Ordering::SeqCst);
                                         break;
                                     }
 
-                                    process_new_files(files, &db_ref, &thumbs_ref, &ah_ref);
-                                    // Loop: sleep again to catch any files that arrived while
-                                    // process_new_files was running.
+                                    let new_count = process_new_files(&files, &db_ref, &thumbs_ref, &ah_ref);
+
+                                    // Keep the "Last check" timestamp in the
+                                    // Watch Folders UI fresh. The watcher
+                                    // does see activity here — skipping the
+                                    // touch would leave the UI lying about
+                                    // when we last looked. Dedupe parents so
+                                    // we only issue one UPDATE per folder.
+                                    {
+                                        let parents: HashSet<String> = files
+                                            .iter()
+                                            .filter_map(|f| {
+                                                std::path::Path::new(f)
+                                                    .parent()
+                                                    .map(|p| p.to_string_lossy().into_owned())
+                                            })
+                                            .collect();
+                                        if !parents.is_empty() {
+                                            if let Ok(conn) = db_ref.lock() {
+                                                for p in &parents {
+                                                    let _ = db::update_watch_folder_checked_by_path(&conn, p);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Auto-tag: if any new file is in an auto_tag folder, trigger tagging
+                                    if new_count > 0 {
+                                        let should_auto_tag = files.iter().any(|f| {
+                                            auto_tag_ref.iter().any(|folder| {
+                                                let norm_f = f.replace('\\', "/");
+                                                let norm_folder = folder.replace('\\', "/");
+                                                norm_f.starts_with(&norm_folder)
+                                            })
+                                        });
+
+                                        if should_auto_tag && !tag_running_ref.swap(true, Ordering::SeqCst) {
+                                            let db_tag = db_ref.clone();
+                                            let stop_tag = tag_stop_ref.clone();
+                                            let ah_tag = ah_ref.clone();
+                                            let running_tag = tag_running_ref.clone();
+
+                                            ah_ref.emit("auto-tag-started", serde_json::json!({
+                                                "count": new_count,
+                                                "source": "watch-folder"
+                                            })).ok();
+
+                                            tauri::async_runtime::spawn(async move {
+                                                stop_tag.store(false, Ordering::SeqCst);
+                                                let result = crate::tagger::run_tagging(
+                                                    db_tag, stop_tag, ah_tag.clone(),
+                                                ).await;
+                                                running_tag.store(false, Ordering::SeqCst);
+                                                ah_tag.emit("tag-complete", result).ok();
+                                            });
+                                        }
+                                    }
                                 }
                             });
                         }
@@ -96,15 +153,16 @@ impl FolderWatcher {
     }
 }
 
+/// Process new files — returns count of successfully imported photos
 fn process_new_files(
-    files: Vec<String>,
+    files: &[String],
     db_conn: &Arc<Mutex<rusqlite::Connection>>,
     thumbnails_dir: &std::path::Path,
     app_handle: &tauri::AppHandle,
-) {
+) -> usize {
     let mut new_count = 0;
 
-    for file_path in &files {
+    for file_path in files {
         let path = std::path::Path::new(file_path);
         if !path.exists() {
             continue;
@@ -142,6 +200,23 @@ fn process_new_files(
 
         let size = std::fs::metadata(file_path).map(|m| m.len() as i64).unwrap_or(0);
 
+        let mtype = crate::scanner::media_type_for_path(std::path::Path::new(file_path));
+        let date_taken = crate::exif_reader::read_exif(file_path)
+            .ok().and_then(|e| e.date_taken)
+            .or_else(|| {
+                std::fs::metadata(file_path).ok().and_then(|m| {
+                    m.created().or_else(|_| m.modified()).ok().map(|t| {
+                        let dt: chrono::DateTime<chrono::Local> = t.into();
+                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                    })
+                })
+            });
+        let duration_secs = if mtype == "video" {
+            crate::scanner::extract_video_duration_pub(file_path)
+        } else {
+            None
+        };
+
         let new_photo = db::NewPhoto {
             path: file_path,
             filename: &filename,
@@ -150,12 +225,15 @@ fn process_new_files(
             size,
             width,
             height,
+            media_type: mtype,
+            date_taken,
+            duration_secs,
         };
 
         if let Ok(photo_id) = db::insert_photo(&conn, &new_photo) {
             if photo_id > 0 {
-                if let Ok(_) = crate::thumbnail::get_or_create_thumbnail(file_path, &hash, thumbnails_dir, 200) {
-                    let cache_name = format!("{}.jpg", &hash[..hash.len().min(24)]);
+                if let Ok(_) = crate::thumbnail::get_or_create_thumbnail(file_path, &hash, thumbnails_dir, 256) {
+                    let cache_name = crate::thumbnail::thumb_cache_name(&hash);
                     let thumb_path = thumbnails_dir.join(&cache_name);
                     db::update_thumbnail_path(&conn, photo_id, &thumb_path.to_string_lossy()).ok();
                 }
@@ -172,4 +250,6 @@ fn process_new_files(
             }))
             .ok();
     }
+
+    new_count
 }

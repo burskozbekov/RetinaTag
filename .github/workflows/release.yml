@@ -38,17 +38,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'RetinaTag ${{ github.ref_name }}'
+          releaseName: 'RetinaTag ${{ github.ref_name }} (Windows)'
           releaseBody: |
-            ## RetinaTag ${{ github.ref_name }}
+            ## RetinaTag ${{ github.ref_name }} — Windows
 
             ### Kurulum
-            - **Windows (Önerilen)**: `RetinaTag_x64-setup.exe` dosyasını indir ve çalıştır
-            - **Windows MSI**: `RetinaTag_x64_en-US.msi` dosyasını indir ve çalıştır
+            - **Önerilen**: `RetinaTag_x64-setup.exe` dosyasını indir ve çalıştır
+            - **Alternatif (MSI)**: `RetinaTag_x64_en-US.msi` dosyasını indir ve çalıştır
 
             ### Otomatik Güncelleme
-            Uygulamayı zaten kurduysanız, uygulama açıldığında otomatik olarak güncelleme bildirimi alacaksınız.
+            Uygulamayı zaten kurduysanız, açıldığında otomatik güncelleme bildirimi alacaksınız.
+
+            ---
+            *Bu release Windows binary'lerini barındırır. Cross-platform updater manifest'i `mac-latest` release'inde bulunur.*
           releaseDraft: false
-          prerelease: false
+          # prerelease=true so this Windows-only release does NOT become the
+          # auto-flagged "latest" GitHub release. The cross-platform updater
+          # manifest lives at the `mac-latest` tag and references binaries
+          # from BOTH this release (windows-x86_64) and mac-latest (darwin).
+          # Keeping prerelease=true prevents Mac users from being routed to
+          # a Windows-only manifest by /releases/latest/ redirect.
+          prerelease: true
