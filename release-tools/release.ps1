@@ -47,9 +47,18 @@ $sigPath = "${exePath}.sig"
 if (-not (Test-Path $exePath)) { throw "Installer not found: $exePath" }
 if (-not (Test-Path $sigPath)) { throw "Signature not found: $sigPath. Check signing key env vars." }
 
+# Stable, version-less aliases so the public download URL never changes
+# across releases. Updater manifest also references these.
+$exeAlias = Join-Path $nsisDir "RetinaTag-setup.exe"
+$sigAlias = "${exeAlias}.sig"
+Copy-Item -Force $exePath $exeAlias
+Copy-Item -Force $sigPath $sigAlias
+
 # 3. Upload to windows-latest rolling release (overwrites previous).
+# Both versioned (audit trail / direct-download fallback) and aliased
+# (the URL we publish on the website) artifacts are uploaded.
 Write-Host "Uploading to windows-latest..." -ForegroundColor Cyan
-gh release upload windows-latest $exePath $sigPath --clobber --repo burskozbekov/RetinaTag
+gh release upload windows-latest $exePath $sigPath $exeAlias $sigAlias --clobber --repo burskozbekov/RetinaTag
 if ($LASTEXITCODE -ne 0) { throw "gh release upload (windows-latest) failed" }
 
 # Update title + notes for the windows-latest release.
@@ -88,7 +97,7 @@ $manifest = [ordered]@{
         }
         'windows-x86_64' = [ordered]@{
             signature = $signature
-            url       = "https://github.com/burskozbekov/RetinaTag/releases/download/windows-latest/RetinaTag_${version}_x64-setup.exe"
+            url       = "https://github.com/burskozbekov/RetinaTag/releases/download/windows-latest/RetinaTag-setup.exe"
         }
     }
 }
