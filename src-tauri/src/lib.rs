@@ -1,3 +1,34 @@
+// v1.5.73 — Critical bug-fix release. Commercial sale hardening.
+//
+// Backend
+// • Single-instance plugin (tauri-plugin-single-instance): second
+//   launches now activate the existing window instead of spawning a
+//   parallel process that fought over the same SQLite WAL and ONNX
+//   sessions.
+// • Vault P0 leak fixes — every code path that flipped `private = 1`
+//   on a photo now routes through `move_photo_private`, which encrypts
+//   the original file + thumbnail and rolls back the on-disk rename if
+//   the DB write fails. Patched call sites:
+//     - batch_set_private (was a flag-flip only, plaintext stayed
+//       readable in Explorer)
+//     - toggle_photo_private (used to silently no-op encryption when
+//       the vault was locked but still wrote private=1; now hard-fails
+//       so the user unlocks first)
+//     - auto_hide_nsfw (used to call set_photo_private(true) inline)
+//
+// Frontend
+// • XSS / render-corruption hardening: filenames, tags, descriptions,
+//   and meta fields are now passed through _esc before innerHTML
+//   interpolation. A file named "cat<3.jpg" or a user-added tag
+//   containing "&" no longer breaks the card grid.
+// • selectPhoto: guards against await race that overwrote a newer
+//   selection's detail panel with the previous click's resolved data.
+// • _loadDescriptionFor: auto-saves the previous photo's dirty
+//   description instead of silently dropping it when the user clicks
+//   another photo mid-edit.
+// • created_at null guard in detail panel render — restored backups
+//   with missing timestamps no longer crash the whole panel.
+//
 // v1.5.72 — Startup-freeze fix on large libraries.
 // • Frontend init: gallery loads first; sidebar widgets fire sequentially
 //   on setTimeout(0) microtasks instead of Promise.all, so UI clicks
@@ -164,6 +195,20 @@ fn suppress_windows_error_dialogs() {}
 pub fn run() {
     suppress_windows_error_dialogs();
     tauri::Builder::default()
+        // v1.5.73 — single-instance guard. Second launches (Start menu,
+        // tray double-click, file-association open) hand their argv off to
+        // this primary instance instead of spawning a parallel process,
+        // which used to result in two RetinaTag windows fighting over the
+        // same SQLite DB (.wal race) and two CLIP/Ollama subprocess pools.
+        // The closure runs on the primary; we just unminimise + focus.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            use tauri::Manager;
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

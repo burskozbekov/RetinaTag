@@ -3199,9 +3199,13 @@ function updateCards(cols){
         }
       }
     }
+    // v1.5.73 — filenames are user-supplied and may contain < " &.
+    // Escape both the title attribute and the visible name so a file
+    // named e.g. `cat<3.jpg` doesn't break the card render.
+    const _fn = _esc(p.filename || '');
     card.innerHTML=`<div class="thumb-placeholder" data-tid="${p.id}">${mb}${favBadge}${ratingBadge}${stackBadge}${simBadge}${matchChip}
         <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-      </div><div class="photo-info"><div class="photo-name" title="${p.filename}">${p.filename}</div>
+      </div><div class="photo-info"><div class="photo-name" title="${_fn}">${_fn}</div>
         <div class="photo-meta"><span class="status-dot ${p.status}"></span>${p.tag_count} tag${p.tag_count!==1?'s':''}${pb}</div></div>`;
     if(selectedIds.has(p.id))card.classList.add('multi-selected');
     card.onclick=(e)=>{
@@ -3412,6 +3416,12 @@ async function selectPhoto(id,path){
   const oldStarRow=$('starRow');if(oldStarRow)oldStarRow.remove();
   try{
     const p=await invoke('get_photo_detail',{photoId:id});
+    // v1.5.73 — Guard against an in-flight click being overwritten by an
+    // earlier one. Clicking photo A then quickly clicking photo B used to
+    // race: A's get_photo_detail would resolve after B's, overwriting
+    // detailFilename / tags / description with A's data while the gallery
+    // showed B as selected. Bail out if the selection moved on.
+    if (selectedId !== id) return;
     selectedPath=p.path;
     // v1.4.75 — click-to-copy (filename or, with Shift, full path). We rebind
     // onclick every selectPhoto to capture the current photo's path, since
@@ -3445,15 +3455,22 @@ async function selectPhoto(id,path){
       }catch(err){ toast('Copy failed: '+err,'error'); }
     };
     const _metaEl = $('detailMeta');
+    // v1.5.73 — escape AI-generated description (model output can include
+    // angle brackets and HTML-shaped tokens) and guard against null
+    // created_at (rows from failed imports/restored backups crashed the
+    // whole panel render with `.slice on undefined`).
+    const _added = (typeof p.created_at === 'string' && p.created_at.length >= 10)
+      ? _esc(p.created_at.slice(0, 10))
+      : '—';
     _metaEl.innerHTML=`
       <div class="meta-row" id="detailDateTaken"><span class="meta-key">Date Taken</span><span class="meta-val" id="detailDateTakenVal" style="cursor:pointer" title="Click to edit (use YYYY-MM-DD or just YYYY)">—</span></div>
       <div class="meta-row" id="detailLocation" style="display:none"><span class="meta-key">Location</span><span class="meta-val" id="detailLocationVal">—</span></div>
-      ${p.description?`<div class="meta-desc">${p.description}</div>`:''}
+      ${p.description?`<div class="meta-desc">${_esc(p.description)}</div>`:''}
       <div class="meta-row"><span class="meta-key">Size</span><span class="meta-val">${fmtB(p.size)}</span></div>
       ${p.width?`<div class="meta-row"><span class="meta-key">Dimensions</span><span class="meta-val">${p.width} × ${p.height}</span></div>`:''}
-      <div class="meta-row"><span class="meta-key">Status</span><span class="meta-val">${p.status}</span></div>
-      ${p.provider_used?`<div class="meta-row"><span class="meta-key">Provider</span><span class="meta-val">${p.provider_used}</span></div>`:''}
-      <div class="meta-row"><span class="meta-key">Added</span><span class="meta-val">${p.created_at.slice(0,10)}</span></div>
+      <div class="meta-row"><span class="meta-key">Status</span><span class="meta-val">${_esc(p.status||'')}</span></div>
+      ${p.provider_used?`<div class="meta-row"><span class="meta-key">Provider</span><span class="meta-val">${_esc(p.provider_used)}</span></div>`:''}
+      <div class="meta-row"><span class="meta-key">Added</span><span class="meta-val">${_added}</span></div>
       `;
     // v1.4.85 — click any meta-val to copy just that value. Delegated handler
     // is attached once (guarded by a dataset flag) so we don't stack listeners
@@ -3637,10 +3654,28 @@ async function saveAiLocation(photoId){
 // ── Description editor (detail panel) ───────────────────────────────────────
 let _descPid=null, _descSaved='';
 function _loadDescriptionFor(pid, text){
+  // v1.5.73 — Don't silently discard unsaved edits.
+  // Was a P0: typing a description then clicking another photo lost
+  // everything the user typed (overwrote the textarea with the new
+  // photo's saved description). Now we detect a dirty buffer for a
+  // DIFFERENT pid and auto-save it instead of dropping. Same-pid reload
+  // (no-op refresh) skips the prompt.
+  const ta=$('descInput');
+  if(!ta){ _descPid=pid; _descSaved=text||''; return; }
+  const currentText = ta.value || '';
+  const dirty = _descPid != null && _descPid !== pid && currentText !== (_descSaved||'');
+  if (dirty) {
+    const prevPid = _descPid;
+    const prevText = currentText.replace(/\s+$/, '');
+    // Fire-and-forget save so the user doesn't lose work. We don't
+    // await — selectPhoto wants to keep moving — but we surface a
+    // toast on failure so it's not silent.
+    invoke('set_photo_description', { photoId: prevPid, description: prevText })
+      .then(()=>{ try{ toast('Saved description for previous photo','success'); }catch(_){} })
+      .catch(e=>{ try{ toast('Could not save previous description: '+e,'error'); }catch(_){} });
+  }
   _descPid=pid;
   _descSaved=text||'';
-  const ta=$('descInput');
-  if(!ta)return;
   ta.value=_descSaved;
   _setDescDirty(false);
 }
@@ -3730,7 +3765,10 @@ function renderTags(tags,pid){
     if(hiTerms.some(q=>tagLow.includes(q)))chip.classList.add('tag-hi');
     chip.style.cursor='pointer';
     chip.title=`Click: "${t.tag}" ile filtrele · Alt+click: kopyala`;
-    chip.innerHTML=`${t.tag}${confBadge}<button class="tag-del" title="Remove">&times;</button>`;
+    // v1.5.73 — user-added tags can contain < & " (we accept any UTF-8
+    // text). Escape before injecting into innerHTML or one bad tag
+    // breaks every chip rendered after it on the same photo.
+    chip.innerHTML=`${_esc(t.tag)}${confBadge}<button class="tag-del" title="Remove">&times;</button>`;
     // Clicking the chip body (not the × button) searches by that tag — the
     // existing tag-cloud click-to-filter pattern, now consistent in the
     // detail panel so users can pivot from any photo to its tag cohort.

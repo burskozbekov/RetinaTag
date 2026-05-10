@@ -7986,6 +7986,14 @@ pub async fn batch_set_favorite(photo_ids: Vec<i64>, favorite: bool, state: taur
 /// Bulk-move photos into (or out of) the private vault. Mirrors
 /// `toggle_photo_private` but for a selection — the batch-toolbar "🔒 Vault"
 /// button uses this so the user can hide sensitive sets in one shot.
+///
+/// v1.5.73 — was a P0 leak: previously this just flipped the `private`
+/// flag in the DB without going through `vault_files::encrypt_in_place`,
+/// so a user multi-selecting "🔒 Vault" got photos marked private while
+/// the originals stayed readable in Explorer. Now we route every id
+/// through the same encrypt+mark logic as `toggle_photo_private`, and
+/// hard-fail if the vault is locked (the user has to unlock first so
+/// the KEK is available).
 #[tauri::command]
 pub async fn batch_set_private(
     photo_ids: Vec<i64>,
@@ -7995,14 +8003,146 @@ pub async fn batch_set_private(
     if photo_ids.is_empty() {
         return Ok(0);
     }
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let mut n = 0usize;
-    for id in &photo_ids {
-        if db::set_photo_private(&conn, *id, private).is_ok() {
-            n += 1;
-        }
+    let kek_opt: Option<[u8; 32]> = {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        *g
+    };
+    if kek_opt.is_none() {
+        return Err("Vault is locked — unlock it first before moving photos into the vault.".into());
     }
-    Ok(n)
+    let db_arc = state.db.clone();
+    let thumbs_dir = state.thumbnails_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let kek = kek_opt.unwrap();
+        let mut n = 0usize;
+        for id in &photo_ids {
+            match move_photo_private(&db_arc, *id, private, &kek, &thumbs_dir) {
+                Ok(_) => n += 1,
+                Err(e) => eprintln!("batch_set_private: id {} failed: {}", id, e),
+            }
+        }
+        Ok(n)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// v1.5.73 — Shared "move one photo in/out of vault" helper. Used by
+/// `batch_set_private`, `toggle_photo_private`, and `auto_hide_nsfw`,
+/// so every code path that flips the private flag also encrypts the
+/// underlying file + thumbnail (or decrypts on un-vault).
+///
+/// Caller must have verified the vault is unlocked. Acquires the db
+/// mutex internally for short windows so we don't hold the lock across
+/// the (slow) AES-GCM seal/open.
+fn move_photo_private(
+    db_arc: &std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+    photo_id: i64,
+    new_private: bool,
+    kek: &[u8; 32],
+    thumbs_dir: &std::path::Path,
+) -> Result<(), String> {
+    // Snapshot row state.
+    let (was_private, hash, current_path, saved_orig_path) = {
+        let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+        conn.query_row(
+            "SELECT private, COALESCE(hash, ''), path, original_path
+             FROM photos WHERE id = ?1",
+            rusqlite::params![photo_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)? == 1,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?
+    };
+    // No-op if already in the target state.
+    if was_private == new_private {
+        return Ok(());
+    }
+    let cache_name = if !hash.is_empty() {
+        thumbnail::thumb_cache_name(&hash)
+    } else {
+        String::new()
+    };
+    let thumb_path = if !cache_name.is_empty() {
+        thumbs_dir.join(&cache_name)
+    } else {
+        std::path::PathBuf::new()
+    };
+    if new_private {
+        let orig_path_pb = std::path::PathBuf::from(&current_path);
+        if !crate::vault_files::is_encrypted_path(&orig_path_pb) && orig_path_pb.is_file() {
+            crate::vault_files::cleanup_partial(&orig_path_pb);
+            let enc_path = crate::vault_files::encrypt_in_place(&orig_path_pb, kek)?;
+            // DB write — if this fails, roll back the on-disk rename so
+            // the user doesn't lose the photo. encrypt_in_place wrote
+            // .rtenc and deleted the original; we decrypt back if the
+            // DB write below errors.
+            let enc_path_str = enc_path.to_string_lossy().to_string();
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            if let Err(e) =
+                db::mark_photo_encrypted(&conn, photo_id, &enc_path_str, &current_path)
+            {
+                drop(conn);
+                // Best-effort rollback so the user keeps their file.
+                let _ = crate::vault_files::decrypt_to_file(
+                    &enc_path,
+                    &orig_path_pb,
+                    kek,
+                );
+                let _ = std::fs::remove_file(&enc_path);
+                return Err(format!("DB write failed, rolled back: {}", e));
+            }
+        }
+        if thumb_path.is_file() {
+            if let Ok(bytes) = std::fs::read(&thumb_path) {
+                let sealed = crate::vault_crypto::seal(kek, &bytes).map_err(|e| e.to_string())?;
+                let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+                db::store_encrypted_thumb(&conn, photo_id, &sealed).map_err(|e| e.to_string())?;
+                drop(conn);
+                let _ = std::fs::remove_file(&thumb_path);
+            }
+        }
+        let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+        db::set_photo_private(&conn, photo_id, true).map_err(|e| e.to_string())?;
+    } else {
+        let cur = std::path::PathBuf::from(&current_path);
+        if crate::vault_files::is_encrypted_path(&cur) && cur.is_file() {
+            let dest = saved_orig_path
+                .clone()
+                .map(std::path::PathBuf::from)
+                .or_else(|| crate::vault_files::original_path_for(&cur))
+                .ok_or_else(|| "cannot determine restore path".to_string())?;
+            if dest.exists() {
+                let _ = std::fs::remove_file(&dest);
+            }
+            crate::vault_files::decrypt_to_file(&cur, &dest, kek)?;
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            db::mark_photo_decrypted(&conn, photo_id, &dest.to_string_lossy())
+                .map_err(|e| e.to_string())?;
+        }
+        let blob_opt: Option<Vec<u8>> = {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            db::get_encrypted_thumb(&conn, photo_id).map_err(|e| e.to_string())?
+        };
+        if let Some(blob) = blob_opt {
+            if !thumb_path.as_os_str().is_empty() {
+                if let Ok(plain) = crate::vault_crypto::open(kek, &blob) {
+                    let _ = std::fs::write(&thumb_path, &plain);
+                    let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+                    let _ = db::clear_encrypted_thumb(&conn, photo_id);
+                }
+            }
+        }
+        let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+        db::set_photo_private(&conn, photo_id, false).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -10011,105 +10151,32 @@ pub async fn toggle_photo_private(
     photo_id: i64,
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
+    // v1.5.73 — Was a P0 leak: when the vault was locked (kek_opt = None)
+    // the encryption block was skipped but db::set_photo_private(true) ran
+    // anyway, leaving the original file readable on disk while the UI
+    // marked it private. Now we reject up-front when locked so the user
+    // sees the failure and unlocks first.
     let kek_opt: Option<[u8; 32]> = {
         let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
         *g
     };
+    let kek = kek_opt
+        .ok_or_else(|| "Vault is locked — unlock it first to change a photo's private state.".to_string())?;
     let db_arc = state.db.clone();
     let thumbs_dir = state.thumbnails_dir.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
-        // Snapshot row state.
-        let (was_private, hash, current_path, saved_orig_path) = {
+        // Read the current private flag so we can return the new one.
+        let was_private: bool = {
             let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-            let row: (i64, String, String, Option<String>) = conn
-                .query_row(
-                    "SELECT private, COALESCE(hash, ''), path, original_path
-                     FROM photos WHERE id = ?1",
-                    rusqlite::params![photo_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .map_err(|e| e.to_string())?;
-            (row.0 == 1, row.1, row.2, row.3)
+            conn.query_row(
+                "SELECT private FROM photos WHERE id = ?1",
+                rusqlite::params![photo_id],
+                |r| Ok(r.get::<_, i64>(0)? == 1),
+            )
+            .map_err(|e| e.to_string())?
         };
         let new_private = !was_private;
-        let cache_name = if !hash.is_empty() {
-            thumbnail::thumb_cache_name(&hash)
-        } else {
-            String::new()
-        };
-        let thumb_path = if !cache_name.is_empty() {
-            thumbs_dir.join(&cache_name)
-        } else {
-            std::path::PathBuf::new()
-        };
-
-        if new_private {
-            if let Some(kek) = kek_opt {
-                let orig_path_pb = std::path::PathBuf::from(&current_path);
-                if !crate::vault_files::is_encrypted_path(&orig_path_pb) {
-                    crate::vault_files::cleanup_partial(&orig_path_pb);
-                    if orig_path_pb.is_file() {
-                        let enc_path = crate::vault_files::encrypt_in_place(&orig_path_pb, &kek)?;
-                        let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-                        db::mark_photo_encrypted(
-                            &conn,
-                            photo_id,
-                            &enc_path.to_string_lossy(),
-                            &current_path,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
-                }
-                if thumb_path.is_file() {
-                    let bytes = std::fs::read(&thumb_path).map_err(|e| e.to_string())?;
-                    let sealed = crate::vault_crypto::seal(&kek, &bytes)
-                        .map_err(|e| e.to_string())?;
-                    let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-                    db::store_encrypted_thumb(&conn, photo_id, &sealed)
-                        .map_err(|e| e.to_string())?;
-                    drop(conn);
-                    let _ = std::fs::remove_file(&thumb_path);
-                }
-            }
-            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-            db::set_photo_private(&conn, photo_id, true).map_err(|e| e.to_string())?;
-        } else {
-            if let Some(kek) = kek_opt {
-                let cur = std::path::PathBuf::from(&current_path);
-                if crate::vault_files::is_encrypted_path(&cur) && cur.is_file() {
-                    let dest = saved_orig_path
-                        .clone()
-                        .map(std::path::PathBuf::from)
-                        .or_else(|| crate::vault_files::original_path_for(&cur))
-                        .ok_or_else(|| "cannot determine restore path".to_string())?;
-                    if dest.exists() {
-                        let _ = std::fs::remove_file(&dest);
-                    }
-                    crate::vault_files::decrypt_to_file(&cur, &dest, &kek)?;
-                    let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-                    db::mark_photo_decrypted(&conn, photo_id, &dest.to_string_lossy())
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            let blob_opt: Option<Vec<u8>> = {
-                let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-                db::get_encrypted_thumb(&conn, photo_id).map_err(|e| e.to_string())?
-            };
-            if let (Some(blob), Some(kek)) = (blob_opt, kek_opt) {
-                if !thumb_path.as_os_str().is_empty() {
-                    let plain = crate::vault_crypto::open(&kek, &blob)
-                        .map_err(|e| e.to_string())?;
-                    if let Some(parent) = thumb_path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    std::fs::write(&thumb_path, &plain).map_err(|e| e.to_string())?;
-                }
-                let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-                db::clear_encrypted_thumb(&conn, photo_id).map_err(|e| e.to_string())?;
-            }
-            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-            db::set_photo_private(&conn, photo_id, false).map_err(|e| e.to_string())?;
-        }
+        move_photo_private(&db_arc, photo_id, new_private, &kek, &thumbs_dir)?;
         Ok(new_private)
     })
     .await
@@ -10358,6 +10425,14 @@ pub async fn auto_hide_nsfw(
 
     let db_arc = state.db.clone();
     let tier_key = tier.dir_name().to_string();
+    // v1.5.73 — capture vault state so we can encrypt flagged photos
+    // through move_photo_private instead of leaking plaintext via
+    // set_photo_private(true).
+    let kek_opt: Option<[u8; 32]> = {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        *g
+    };
+    let thumbs_dir = state.thumbnails_dir.clone();
 
     // A compact NSFW prompt set — we average their embeddings so no single
     // phrasing dominates. These stay in English because CLIP was trained
@@ -10398,8 +10473,12 @@ pub async fn auto_hide_nsfw(
         let n = prompt_embs.len() as f32;
         for v in avg.iter_mut() { *v /= n; }
 
-        // Score every photo, hide those above the threshold.
-        let mut hidden = 0usize;
+        // v1.5.73 — score every photo, hide those above the threshold.
+        // "Hide" used to call set_photo_private(true) directly, leaking the
+        // original file. We now collect ids to hide and route them through
+        // move_photo_private which encrypts the file + thumb. Skip
+        // encryption (and the whole hide step) if the vault is locked.
+        let mut hidden_ids: Vec<i64> = Vec::new();
         let mut scored = 0usize;
         {
             let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
@@ -10409,12 +10488,27 @@ pub async fn auto_hide_nsfw(
                 let _ = db::set_photo_nsfw_score(&conn, *pid, sim);
                 scored += 1;
                 if sim >= threshold {
-                    let _ = db::set_photo_private(&conn, *pid, true);
+                    hidden_ids.push(*pid);
+                }
+            }
+        }
+        // Encrypt the flagged ones (no-op when KEK is None — leave scoring
+        // intact so the user can re-run after unlocking).
+        let mut hidden = 0usize;
+        if let Some(kek) = kek_opt {
+            for pid in &hidden_ids {
+                if move_photo_private(&db_arc, *pid, true, &kek, &thumbs_dir).is_ok() {
                     hidden += 1;
                 }
             }
         }
-        Ok(serde_json::json!({ "scored": scored, "hidden": hidden, "threshold": threshold }))
+        Ok(serde_json::json!({
+            "scored": scored,
+            "hidden": hidden,
+            "flagged": hidden_ids.len(),
+            "vault_locked": kek_opt.is_none(),
+            "threshold": threshold,
+        }))
     })
     .await
     .map_err(|e| e.to_string())??;
