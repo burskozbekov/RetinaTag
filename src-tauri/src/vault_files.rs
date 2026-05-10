@@ -169,8 +169,20 @@ pub fn decrypt_to_bytes(encrypted_path: &Path, kek: &[u8; 32]) -> Result<Vec<u8>
         ));
     }
     // Body is `nonce ‖ ciphertext+tag`. `vault_crypto::open` re-splits.
+    // v1.5.74 — Was: `let _ = f.read_to_end(...)` silently dropped short
+    // reads / disk errors and let the downstream AES-GCM open() fail with
+    // a confusing "auth tag mismatch" / "vault corrupt" message. Users
+    // would panic and run recovery, potentially overwriting a salvageable
+    // vault. Now we surface the read error verbatim so support can tell
+    // disk problems apart from real tag mismatches.
     let mut body = Vec::new();
-    let _ = f.read_to_end(&mut body); // I/O errors below produce the same error
+    f.read_to_end(&mut body).map_err(|e| {
+        format!(
+            "{}: disk read error ({}). Check the drive — this is NOT a vault corruption.",
+            encrypted_path.display(),
+            e
+        )
+    })?;
     let mut nonce_and_ct = Vec::with_capacity(12 + body.len());
     nonce_and_ct.extend_from_slice(&header[8..20]); // the nonce
     nonce_and_ct.extend_from_slice(&body);

@@ -6462,144 +6462,143 @@ pub async fn recognize_all_faces(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<usize, String> {
+    // v1.5.74 — Was a P1 freeze: this fan-out (cosine sim across all faces
+    // × all persons, plus per-match db.lock() + insert_tags + emit) ran
+    // inline on the async-runtime worker thread. On a 50K-photo / 5K-face
+    // library it took minutes and saturated the same worker pool that
+    // dispatches every other IPC. The whole UI hung until recognition
+    // finished. Now wrapped in spawn_blocking so the runtime keeps
+    // dispatching while we churn.
     let folder_filter: Option<String> = folder
         .as_ref()
         .and_then(|s| if s.trim().is_empty() { None } else { Some(s.clone()) });
-    let known = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::get_known_face_embeddings(&conn).map_err(|e| e.to_string())?
-    };
+    let db_arc = state.db.clone();
 
-    if known.is_empty() {
-        // No known persons yet — nothing to recognize against, that's fine
-        return Ok(0);
-    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let known = {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            db::get_known_face_embeddings(&conn).map_err(|e| e.to_string())?
+        };
 
-    // Group all named embeddings by person_id, keeping EVERY embedding
-    // individually (no averaging). Each person now has a list of reference
-    // vectors covering their pose/lighting variation.
-    let mut person_map: std::collections::HashMap<i64, (String, Vec<Vec<f32>>)> =
-        std::collections::HashMap::new();
-    for (pid, pname, bytes) in &known {
-        let emb = crate::face::bytes_to_embedding(bytes);
-        if emb.len() != 512 { continue; }
-        person_map
-            .entry(*pid)
-            .or_insert_with(|| (pname.clone(), Vec::new()))
-            .1.push(emb);
-    }
-    let persons: Vec<(i64, String, Vec<Vec<f32>>)> = person_map
-        .into_iter()
-        .filter_map(|(pid, (name, embs))| {
-            if embs.is_empty() { None } else { Some((pid, name, embs)) }
-        })
-        .collect();
-
-    let unassigned = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        match &folder_filter {
-            Some(f) => db::get_unassigned_faces_with_embeddings_in_folder(&conn, f)
-                .map_err(|e| e.to_string())?,
-            None => db::get_unassigned_faces_with_embeddings(&conn)
-                .map_err(|e| e.to_string())?,
+        if known.is_empty() {
+            // No known persons yet — nothing to recognize against, that's fine.
+            return Ok(0);
         }
-    };
 
-    // Recognition thresholds — calibrated for the max-sim-to-any-named-face
-    // strategy. Much more forgiving than the 0.60 mean-embedding threshold
-    // (0.60 against a mean corresponds to ~0.70+ against the closest seed
-    // for typical 5-10 photo collections).
-    //
-    //   RECOGNIZE_SIM   — best sim to ANY named face of the winning person
-    //   RECOGNIZE_MARGIN — winner must beat runner-up by this much (prevents
-    //                      ambiguous assignments when two persons look alike)
-    //   AGREE_SIM       — "agreement" threshold used with AGREE_MIN_PERSON.
-    //                     Guards against single-outlier matches: if the user
-    //                     has ≥3 named faces for the winning person, at least
-    //                     2 of them must have sim ≥ this value. Prevents the
-    //                     classic failure mode where one misaligned named
-    //                     embedding acts as a "magnet" for unrelated faces.
-    //   AGREE_MIN_PERSON — minimum named-face count before the 2-of-N
-    //                      agreement rule kicks in; small collections still
-    //                      get the generous max-sim-only rule.
-    const RECOGNIZE_SIM:     f32   = 0.55;
-    const RECOGNIZE_MARGIN:  f32   = 0.08;
-    const AGREE_SIM:         f32   = 0.45;
-    const AGREE_MIN_PERSON:  usize = 3;
-
-    let mut matched = 0usize;
-
-    for (face_id, photo_id, emb_bytes) in &unassigned {
-        let emb = crate::face::bytes_to_embedding(emb_bytes);
-        if emb.len() != 512 { continue; }
-
-        // For each person, compute max sim AND count of embeddings with
-        // sim ≥ AGREE_SIM. The `support` count is the 2-of-N evidence we
-        // use below to reject outlier matches.
-        let mut scored: Vec<(i64, &str, f32, usize, usize)> = persons.iter()
-            .map(|(pid, name, embs)| {
-                let mut best = f32::NEG_INFINITY;
-                let mut support = 0usize;
-                for e in embs {
-                    let sim = crate::face::cosine_similarity(&emb, e);
-                    if sim > best { best = sim; }
-                    if sim >= AGREE_SIM { support += 1; }
-                }
-                (*pid, name.as_str(), best, embs.len(), support)
+        // Group all named embeddings by person_id, keeping EVERY embedding
+        // individually (no averaging). Each person now has a list of
+        // reference vectors covering their pose/lighting variation.
+        let mut person_map: std::collections::HashMap<i64, (String, Vec<Vec<f32>>)> =
+            std::collections::HashMap::new();
+        for (pid, pname, bytes) in &known {
+            let emb = crate::face::bytes_to_embedding(bytes);
+            if emb.len() != 512 { continue; }
+            person_map
+                .entry(*pid)
+                .or_insert_with(|| (pname.clone(), Vec::new()))
+                .1.push(emb);
+        }
+        let persons: Vec<(i64, String, Vec<Vec<f32>>)> = person_map
+            .into_iter()
+            .filter_map(|(pid, (name, embs))| {
+                if embs.is_empty() { None } else { Some((pid, name, embs)) }
             })
             .collect();
-        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
-        let (pid, person_name, best_sim, named_count, support) = match scored.first() {
-            Some(&t) => t,
-            None => continue,
-        };
-        let runner_up = scored.get(1).map(|s| s.2).unwrap_or(0.0);
-
-        // 2-of-N agreement only gates when the person has enough named
-        // faces to make the rule meaningful. Users with 1-2 named faces
-        // still benefit from recognition — the margin guard is enough there.
-        let agreement_ok = if named_count >= AGREE_MIN_PERSON {
-            support >= 2
-        } else {
-            true
+        let unassigned = {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            match &folder_filter {
+                Some(f) => db::get_unassigned_faces_with_embeddings_in_folder(&conn, f)
+                    .map_err(|e| e.to_string())?,
+                None => db::get_unassigned_faces_with_embeddings(&conn)
+                    .map_err(|e| e.to_string())?,
+            }
         };
 
-        let ok = best_sim >= RECOGNIZE_SIM
-            && (best_sim - runner_up) >= RECOGNIZE_MARGIN
-            && agreement_ok;
-        if !ok { continue; }
+        // Recognition thresholds — calibrated for the max-sim-to-any-named-
+        // face strategy. Much more forgiving than the 0.60 mean-embedding
+        // threshold (0.60 against a mean corresponds to ~0.70+ against the
+        // closest seed for typical 5-10 photo collections).
+        //
+        //   RECOGNIZE_SIM    — best sim to ANY named face of the winner.
+        //   RECOGNIZE_MARGIN — winner must beat runner-up by this much
+        //                       (prevents ambiguous assignments).
+        //   AGREE_SIM        — "agreement" threshold for the 2-of-N rule.
+        //   AGREE_MIN_PERSON — min named-face count before agreement kicks in.
+        const RECOGNIZE_SIM:    f32   = 0.55;
+        const RECOGNIZE_MARGIN: f32   = 0.08;
+        const AGREE_SIM:        f32   = 0.45;
+        const AGREE_MIN_PERSON: usize = 3;
 
-        eprintln!(
-            "[face] recognize: face {} -> '{}' sim={:.4} (2nd={:.4}, {}/{} support)",
-            face_id, person_name, best_sim, runner_up, support, named_count
-        );
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::assign_face_to_person(&conn, *face_id, Some(pid)).ok();
-        // Add person name as a tag (canonical casing — NO to_lowercase,
-        // otherwise we get duplicates like "Buğra" + "buğra" because
-        // SQLite's UNIQUE(photo_id, tag) is case-sensitive for Unicode).
-        db::insert_tags(
-            &conn,
-            *photo_id,
-            &[(person_name.to_string(), best_sim as f64, "face".to_string())],
-        )
-        .ok();
-        matched += 1;
-        app_handle
-            .emit(
-                "face-recognized",
-                serde_json::json!({
-                    "face_id": face_id,
-                    "photo_id": photo_id,
-                    "person": person_name,
-                    "similarity": best_sim
-                }),
-            )
-            .ok();
-    }
+        let mut matched = 0usize;
 
-    Ok(matched)
+        for (face_id, photo_id, emb_bytes) in &unassigned {
+            let emb = crate::face::bytes_to_embedding(emb_bytes);
+            if emb.len() != 512 { continue; }
+
+            let mut scored: Vec<(i64, &str, f32, usize, usize)> = persons.iter()
+                .map(|(pid, name, embs)| {
+                    let mut best = f32::NEG_INFINITY;
+                    let mut support = 0usize;
+                    for e in embs {
+                        let sim = crate::face::cosine_similarity(&emb, e);
+                        if sim > best { best = sim; }
+                        if sim >= AGREE_SIM { support += 1; }
+                    }
+                    (*pid, name.as_str(), best, embs.len(), support)
+                })
+                .collect();
+            scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+            let (pid, person_name, best_sim, named_count, support) = match scored.first() {
+                Some(&t) => t,
+                None => continue,
+            };
+            let runner_up = scored.get(1).map(|s| s.2).unwrap_or(0.0);
+
+            let agreement_ok = if named_count >= AGREE_MIN_PERSON {
+                support >= 2
+            } else {
+                true
+            };
+
+            let ok = best_sim >= RECOGNIZE_SIM
+                && (best_sim - runner_up) >= RECOGNIZE_MARGIN
+                && agreement_ok;
+            if !ok { continue; }
+
+            eprintln!(
+                "[face] recognize: face {} -> '{}' sim={:.4} (2nd={:.4}, {}/{} support)",
+                face_id, person_name, best_sim, runner_up, support, named_count
+            );
+            {
+                let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+                db::assign_face_to_person(&conn, *face_id, Some(pid)).ok();
+                db::insert_tags(
+                    &conn,
+                    *photo_id,
+                    &[(person_name.to_string(), best_sim as f64, "face".to_string())],
+                )
+                .ok();
+            }
+            matched += 1;
+            app_handle
+                .emit(
+                    "face-recognized",
+                    serde_json::json!({
+                        "face_id": face_id,
+                        "photo_id": photo_id,
+                        "person": person_name,
+                        "similarity": best_sim
+                    }),
+                )
+                .ok();
+        }
+
+        Ok(matched)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Download face recognition models to the models directory.
@@ -9200,15 +9199,57 @@ pub async fn generate_smart_names(photo_ids: Vec<i64>, state: tauri::State<'_, A
 
 #[tauri::command]
 pub async fn apply_rename(renames: Vec<RenamePreview>, state: tauri::State<'_, AppState>) -> Result<usize, String> {
-    let mut count = 0;
-    for r in &renames {
-        if std::fs::rename(&r.old_path, &r.new_path).is_ok() {
-            let conn = state.db.lock().map_err(|_| "db lock")?;
-            db::update_photo_path(&conn, r.photo_id, &r.new_path, &r.new_name).ok();
-            count += 1;
+    // v1.5.74 — Was a P1 split-brain bug: previously each iteration did
+    // `fs::rename` then `state.db.lock()` then `update_photo_path` — but
+    // if the DB write failed (lock poisoned, DB locked by another writer)
+    // the file was on disk under the new name while the DB still pointed
+    // at the old path → photo "disappeared" from the gallery and the user
+    // thought it was lost. Also re-acquired the lock per iteration, so a
+    // 1000-photo rename took 1000 lock round-trips.
+    //
+    // Fix: hold one transaction across the whole batch. For each rename,
+    // try the FS rename first; if the DB update fails, roll back the FS
+    // rename (move file back to old path) so the on-disk state matches
+    // the DB state. The transaction itself rolls back any pending DB
+    // writes on commit failure.
+    let db_arc = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let mut conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut count = 0usize;
+        // Track FS renames so we can undo them if the transaction commit
+        // fails. (Inside the loop, a per-row DB error already triggers an
+        // immediate FS rollback for that row — see the inner `if let Err`.)
+        let mut applied: Vec<(String, String)> = Vec::new(); // (new_path, old_path)
+        for r in &renames {
+            if std::fs::rename(&r.old_path, &r.new_path).is_err() {
+                continue;
+            }
+            // rusqlite::Transaction Deref's to Connection so &*tx works
+            // wherever &Connection is required.
+            match db::update_photo_path(&*tx, r.photo_id, &r.new_path, &r.new_name) {
+                Ok(_) => {
+                    applied.push((r.new_path.clone(), r.old_path.clone()));
+                    count += 1;
+                }
+                Err(_) => {
+                    // Undo the FS rename so disk + DB stay in sync.
+                    let _ = std::fs::rename(&r.new_path, &r.old_path);
+                }
+            }
         }
-    }
-    Ok(count)
+        if let Err(e) = tx.commit() {
+            // Transaction rolled back. Undo all FS renames we'd applied
+            // so the user's library isn't half-renamed with no DB record.
+            for (new_p, old_p) in applied.iter().rev() {
+                let _ = std::fs::rename(new_p, old_p);
+            }
+            return Err(format!("rename transaction failed: {}", e));
+        }
+        Ok(count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 27. Clear all face data (reset face detection) ───────────────────────────

@@ -1,3 +1,35 @@
+// v1.5.74 — P1 bug-fix cycle. Eliminates the freeze + data-integrity
+// classes the v1.5.73 audit surfaced.
+//
+// Backend
+// • recognize_all_faces: now wrapped in spawn_blocking. The cosine-sim
+//   fan-out plus per-match db.lock() + insert_tags + emit used to run
+//   inline on the async-runtime worker thread; on a 50K-photo / 5K-face
+//   library this took minutes and froze every other IPC.
+// • Watcher.process_new_files: no longer holds the db mutex across slow
+//   I/O (image_dimensions, EXIF read, ffprobe, thumbnail generation).
+//   Previously each watched-file import wedged every DB command for
+//   1–3 s. Now the lock is taken only around the dedup query and the
+//   final insert.
+// • apply_rename: wrapped in a single transaction and rolls back the
+//   on-disk rename if the DB update fails (per-row), and rolls back
+//   every applied rename if the transaction commit fails. Eliminates
+//   the "photo disappeared from gallery" outcome of a half-applied
+//   batch rename.
+// • vault_files::decrypt_to_bytes: was silently dropping
+//   `read_to_end` errors and surfacing them as "vault corrupt / auth
+//   tag mismatch", panicking users into running recovery. Now the
+//   disk error is propagated verbatim.
+//
+// Frontend
+// • Search pipeline: monotonic _searchSeq guard inserted after every
+//   await. Fast typing in a 60K library used to render results for a
+//   query the user had already typed past; now stale resolutions bail
+//   out before mutating photos / curSearch.
+// • toast / toastAction: escape the message + label before innerHTML
+//   interpolation. Backend errors with `<` or `&` in them no longer
+//   break the toast render.
+//
 // v1.5.73 — Critical bug-fix release. Commercial sale hardening.
 //
 // Backend

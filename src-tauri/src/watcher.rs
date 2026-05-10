@@ -160,6 +160,13 @@ fn process_new_files(
     thumbnails_dir: &std::path::Path,
     app_handle: &tauri::AppHandle,
 ) -> usize {
+    // v1.5.74 — Was a P1 freeze: this loop used to acquire `db_conn.lock()`
+    // once at the top of each iteration and hold it through image_dimensions,
+    // EXIF read, video duration (ffprobe subprocess), and thumbnail
+    // generation — easily 1-3 seconds per file. Every Tauri command that
+    // touched the DB blocked for the duration of one watched-file import.
+    // Now we only hold the lock around the actual DB queries, and run all
+    // the slow I/O outside the critical section.
     let mut new_count = 0;
 
     for file_path in files {
@@ -173,18 +180,21 @@ fn process_new_files(
             Err(_) => continue,
         };
 
-        let conn = match db_conn.lock() {
-            Ok(c) => c,
+        // Short lock — dedup check only.
+        let already_in_library = match db_conn.lock() {
+            Ok(c) => db::photo_exists_by_hash(&c, &hash).unwrap_or(true),
             Err(_) => continue,
         };
-
-        if db::photo_exists_by_hash(&conn, &hash).unwrap_or(true) {
+        if already_in_library {
             continue;
         }
 
         let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let folder = path.parent().unwrap_or(path).to_string_lossy().to_string();
 
+        // SLOW I/O — no lock held. image_dimensions decodes the image
+        // header (~30 ms typical, 500 ms+ for HEIC); EXIF reads a few KB
+        // off disk; video duration may spawn ffprobe.
         let (width, height) = {
             let fp = file_path.clone();
             let (tx, rx) = std::sync::mpsc::channel();
@@ -217,6 +227,16 @@ fn process_new_files(
             None
         };
 
+        // Thumbnail also slow — generate before re-locking.
+        let thumb_path = crate::thumbnail::get_or_create_thumbnail(
+            file_path, &hash, thumbnails_dir, 256,
+        )
+        .ok()
+        .map(|_| {
+            let cache_name = crate::thumbnail::thumb_cache_name(&hash);
+            thumbnails_dir.join(&cache_name)
+        });
+
         let new_photo = db::NewPhoto {
             path: file_path,
             filename: &filename,
@@ -230,14 +250,15 @@ fn process_new_files(
             duration_secs,
         };
 
-        if let Ok(photo_id) = db::insert_photo(&conn, &new_photo) {
-            if photo_id > 0 {
-                if let Ok(_) = crate::thumbnail::get_or_create_thumbnail(file_path, &hash, thumbnails_dir, 256) {
-                    let cache_name = crate::thumbnail::thumb_cache_name(&hash);
-                    let thumb_path = thumbnails_dir.join(&cache_name);
-                    db::update_thumbnail_path(&conn, photo_id, &thumb_path.to_string_lossy()).ok();
+        // Short lock — insert + thumb-path update.
+        if let Ok(conn) = db_conn.lock() {
+            if let Ok(photo_id) = db::insert_photo(&conn, &new_photo) {
+                if photo_id > 0 {
+                    if let Some(tp) = thumb_path {
+                        db::update_thumbnail_path(&conn, photo_id, &tp.to_string_lossy()).ok();
+                    }
+                    new_count += 1;
                 }
-                new_count += 1;
             }
         }
     }

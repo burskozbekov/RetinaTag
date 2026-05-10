@@ -2642,7 +2642,17 @@ function toast(msg,type='info'){
   const icon=icons[type]||icons.info;
   const el=document.createElement('div');
   el.className=`toast-item ${type}`;
-  el.innerHTML=`<span class="toast-icon">${icon}</span><span>${msg}</span>`;
+  // v1.5.74 — escape `msg` before interpolation. Was a P1: backend errors
+  // and user-supplied strings flowed through toast() raw, so anything
+  // containing `<` (e.g. a filename, a path with a typo'd extension, or
+  // a future error message) broke the toast render. Forty-plus call sites
+  // pass error payloads directly — escape here once so every caller is
+  // safe by default. _esc isn't defined yet at this point in the file, so
+  // we inline the same replace chain.
+  const safe = String(msg==null?'':msg)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  el.innerHTML=`<span class="toast-icon">${icon}</span><span>${safe}</span>`;
   // v1.4.81 — click-to-dismiss. Useful when errors or long strings stack up
   // and the user wants their attention back. Pointer cursor hints at it.
   // v1.5.9 — Shift+click copies the toast's text to the clipboard before
@@ -2688,9 +2698,15 @@ function toastAction(msg, type, label, onAction){
   const el=document.createElement('div');
   el.className=`toast-item ${type}`;
   el.style.gap='8px';
+  // v1.5.74 — escape msg + label before innerHTML interpolation, same
+  // reasoning as toast() above.
+  const esc = s => String(s==null?'':s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  const safeMsg = esc(msg), safeLabel = esc(label);
   // Inline button styled to match btn-secondary but compact so it sits
   // inside the toast without blowing it up vertically.
-  el.innerHTML=`<span class="toast-icon">${icon}</span><span style="flex:1">${msg}</span><button class="btn btn-secondary btn-sm" style="padding:4px 10px;font-size:11px;white-space:nowrap">${label}</button>`;
+  el.innerHTML=`<span class="toast-icon">${icon}</span><span style="flex:1">${safeMsg}</span><button class="btn btn-secondary btn-sm" style="padding:4px 10px;font-size:11px;white-space:nowrap">${safeLabel}</button>`;
   const btn=el.querySelector('button');
   if(btn){
     btn.onclick=(ev)=>{
@@ -6005,6 +6021,8 @@ function _renderDiscoverChips(){
 
 // ── Unified Search (tag + person + semantic) ────────────────────────────────
 let searchTimer=null;
+// v1.5.74 — Monotonic search seq guard against the fast-typing race.
+let _searchSeq=0;
 // Inline X clear-button handler (shows whenever the input has a value).
 (function wireSearchClear(){
   const x=$('searchClearX'), inp=$('searchInput');
@@ -6041,6 +6059,13 @@ $('searchInput').oninput=e=>{
   if(!q){curSearch='';_searchProgressHide();_hideRefineBar();loadPhotos();$('searchHint').textContent='';return;}
   $('searchHint').textContent='🔍';
   _searchProgressShow();
+  // v1.5.74 — Sequence guard. Every keystroke increments _searchSeq;
+  // every pipeline stage that awaits then checks the captured `mySeq`
+  // against the current `_searchSeq`. If the user typed more after we
+  // started, our results are stale and we bail before mutating photos
+  // or curSearch. Was a P1 — fast typing in a 60K library used to land
+  // on results for a query 2-3 keystrokes behind the visible input.
+  const mySeq = ++_searchSeq;
   searchTimer=setTimeout(async()=>{
     // v1.5.44 — Wrap the whole pipeline in a try/finally so the progress
     // strip always hides, even when one of the stages throws. Without
@@ -6050,6 +6075,7 @@ $('searchInput').oninput=e=>{
     // 1. Run FTS tag search first
     curSearch=q;
     await loadPhotos();
+    if (mySeq !== _searchSeq) return; // newer search is running
     let tagResults=[...photos];
     let tagCount=tagResults.length;
 
@@ -6058,6 +6084,7 @@ $('searchInput').oninput=e=>{
     try{
       $('searchHint').textContent=tagCount>0?`${tagCount} results`:'🔄 Translating...';
       translated=await invoke('translate_for_clip',{query:q});
+      if (mySeq !== _searchSeq) return;
       if(translated&&translated.toLowerCase()===q.toLowerCase()) translated=null; // same word
     }catch(_){}
 
@@ -6065,6 +6092,7 @@ $('searchInput').oninput=e=>{
     if(translated){
       curSearch=translated;
       await loadPhotos();
+      if (mySeq !== _searchSeq) return;
       const tagIds=new Set(tagResults.map(p=>p.id));
       const extraTag=photos.filter(p=>!tagIds.has(p.id));
       tagResults=[...tagResults,...extraTag];
@@ -6087,6 +6115,7 @@ $('searchInput').oninput=e=>{
     try{
       const clipQuery=translated||q;
       const semResults=await invoke('semantic_search',{query:clipQuery,tier:_clipTierSelected,limit:50});
+      if (mySeq !== _searchSeq) return;
       const tagIds=new Set(tagResults.map(p=>p.id));
       semanticUnique=semResults.filter(p=>!tagIds.has(p.id));
     }catch(_){}
@@ -6131,11 +6160,13 @@ $('searchInput').oninput=e=>{
       try{
         $('searchHint').textContent+=' · 🤖...';
         const aiTags=await invoke('ai_search_expand',{query:q});
+        if (mySeq !== _searchSeq) return;
         if(aiTags&&aiTags.length>0){
           // Search with AI-generated tags
           const aiQuery=aiTags.join(' ');
           curSearch=aiQuery;
           await loadPhotos();
+          if (mySeq !== _searchSeq) return;
           curSearch=q;
           const existingIds=new Set((tagResults.concat(semanticUnique)).map(p=>p.id));
           const aiExtra=photos.filter(p=>!existingIds.has(p.id));
