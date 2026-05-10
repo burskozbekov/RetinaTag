@@ -5347,8 +5347,16 @@ $('btnScanFacesAll').onclick=async()=>{
             toast(`${revived.length} face cluster(s) ready to review`, 'info');
             await new Promise(resolve => {
               showFacePopup(revived, 0);
+              // v1.5.75 — bounded poll. Was an unbounded setInterval that
+              // span forever if showFacePopup threw before the popup
+              // mounted, or if the input got destroyed by a re-render.
+              // Now: 60-second hard cap + 500ms interval (= 120 ticks
+              // max), and any race that leaves no popup mounted resolves
+              // promptly so the caller isn't stuck.
+              let ticks = 0;
               const ck = setInterval(() => {
-                if (!document.querySelector('#faceNameInput')) {
+                ticks++;
+                if (!document.querySelector('#faceNameInput') || ticks > 120) {
                   clearInterval(ck); resolve();
                 }
               }, 500);
@@ -5603,8 +5611,11 @@ $('btnScanFacesAll').onclick=async()=>{
           toast(`${unknownFaces.length} unknown face(s) — please identify them`, 'info');
           await new Promise(resolve => {
             showFacePopup(unknownFaces, 0);
+            // v1.5.75 — bounded poll (see same fix above for explanation).
+            let ticks = 0;
             const checkInterval = setInterval(() => {
-              if (!document.querySelector('#faceNameInput')) {
+              ticks++;
+              if (!document.querySelector('#faceNameInput') || ticks > 120) {
                 clearInterval(checkInterval);
                 resolve();
               }
@@ -8118,14 +8129,21 @@ function _cuShowDeleteModal(photos, totalSize) {
   document.body.appendChild(modal);
 
   return new Promise((resolve) => {
-    const close = (ok) => { modal.remove(); resolve(ok); };
+    // v1.5.75 — Was a P2 listener leak: only the Escape branch removed
+    // its `keydown` handler. Cancel / Confirm / overlay-click all called
+    // close() without removing the listener, so each Cleanup-Delete
+    // cycle stacked another permanent handler on `document`. After many
+    // sessions the user's Escape key fired N stale handlers. Now close()
+    // is the single place that detaches the listener.
+    const onKey = (e) => { if (e.key === 'Escape') close(false); };
+    const close = (ok) => {
+      document.removeEventListener('keydown', onKey);
+      modal.remove();
+      resolve(ok);
+    };
     modal.querySelector('#cuDelCancel').onclick = () => close(false);
     modal.querySelector('#cuDelConfirm').onclick = () => close(true);
     modal.onclick = (e) => { if (e.target === modal) close(false); };
-    // Escape cancels
-    const onKey = (e) => {
-      if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); close(false); }
-    };
     document.addEventListener('keydown', onKey);
   });
 }
@@ -9695,8 +9713,29 @@ $('btnSettingsSave').onclick=async()=>{
 
 // ── Keyboard Shortcuts ───────────────────────────────────────────────────────
 document.addEventListener('keydown',e=>{
-  // Lightbox navigation takes priority
+  // v1.5.75 — Was a P2 UX bug: gallery shortcuts (p, n, g, /, s, [, ],
+  // r, f, x, d, 0-5, etc.) were globally bound on `document` with no
+  // input-focus guard. Typing "next photo" muscle-memory of `p` inside
+  // the description editor or filename-rename field navigated the
+  // gallery instead of inserting the letter. The lightbox branch
+  // already had its own input check; outside the lightbox we now skip
+  // every gallery shortcut when an editable element has focus.
+  // Modifier-bearing chords (Ctrl+S, Ctrl+Z, Ctrl+K, Cmd+K, etc.) are
+  // intentional global ones (VSCode-style), so we let those through
+  // even in inputs.
   const lb=$('lightbox');
+  const _lbOpen = lb && lb.style.display === 'flex';
+  if (!_lbOpen) {
+    const _ae = document.activeElement;
+    const _typing = _ae && (
+      _ae.tagName === 'INPUT' ||
+      _ae.tagName === 'TEXTAREA' ||
+      _ae.isContentEditable
+    );
+    const _hasMod = e.ctrlKey || e.metaKey || e.altKey;
+    if (_typing && !_hasMod) return;
+  }
+  // Lightbox navigation takes priority
   if(lb&&lb.style.display==='flex'){
     // v1.5.36 — When the user is typing into the face-name input, do NOT let
     // the lightbox shortcuts swallow the keystroke. Previously arrow keys
@@ -11531,8 +11570,13 @@ async function checkUnknownFaces(showEmptyToast=true){
     // but we also call it here as a belt-and-suspenders safety net for any early dismissal)
     await new Promise(resolve => {
       showFacePopup(faces, 0);
+      // v1.5.75 — bounded poll, 60s cap (see _vault*Interval pattern).
+      let ticks = 0;
       const t = setInterval(() => {
-        if(!document.querySelector('#faceNameInput')){ clearInterval(t); resolve(); }
+        ticks++;
+        if(!document.querySelector('#faceNameInput') || ticks > 120){
+          clearInterval(t); resolve();
+        }
       }, 500);
     });
     // Belt-and-suspenders: skip anything still unassigned from this batch
@@ -14322,7 +14366,17 @@ async function lbNav(dir) {
   // Reset zoom on navigation
   _lbZoom = 1; _lbPanX = 0; _lbPanY = 0;
   const img = document.getElementById('lbImg');
-  if (img) img.style.transform = '';
+  if (img) {
+    img.style.transform = '';
+    // v1.5.75 — Release the previous photo's <img src> immediately so the
+    // WebView doesn't keep it alive in memory until GC pressure. This
+    // matters most for vault photos: get_private_photo_data returns a
+    // base64 data URL that can be 5-20 MB; navigating through 100 vault
+    // photos used to hold ~1.5 GB of stale data URLs in the WebView's
+    // resource cache. Setting src='' tells the engine it can drop the
+    // resource right away.
+    try { img.removeAttribute('src'); } catch(_){}
+  }
   // v1.5.30 — close any open "who is this?" popup before we slide to the
   // next photo. The overlay itself is refreshed in openLightbox once the
   // new image loads, so we don't need to clear it here.

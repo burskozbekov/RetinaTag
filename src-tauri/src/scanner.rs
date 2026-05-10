@@ -438,7 +438,20 @@ fn scan_folder_parallel(
         if stop_flag.load(Ordering::Relaxed) { return; }
 
         let path_str = path.to_string_lossy().to_string();
-        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        // v1.5.75 — guard against empty filename. A drive root like `D:\`
+        // (which some WalkDir entries return) has no file_name → empty
+        // string, and that empty string flowed into DB.filename. Later
+        // operations (XMP write, rename UI, search highlight) all break
+        // on a "" filename. Skip these rows entirely.
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let filename = match filename {
+            Some(f) => f,
+            None => return,
+        };
         let folder_str = path.parent().unwrap_or(path).to_string_lossy().to_string();
         let mtype = media_type_for_path(path);
 

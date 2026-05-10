@@ -45,7 +45,17 @@ impl FolderWatcher {
                         for path in &event.paths {
                             if scanner::is_image_file(path) {
                                 if let Some(s) = path.to_str() {
-                                    let mut pending = pending_clone.lock().unwrap();
+                                    // v1.5.75 — poison-tolerant lock. Was
+                                    // `.unwrap()` which crashed the watcher
+                                    // callback (and silently killed
+                                    // watch-folders for the session) if any
+                                    // sibling thread had panicked while
+                                    // holding this mutex. into_inner just
+                                    // takes the data anyway — duplicates in
+                                    // the pending set are harmless.
+                                    let mut pending = pending_clone
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
                                     pending.insert(s.to_string());
                                 }
                             }

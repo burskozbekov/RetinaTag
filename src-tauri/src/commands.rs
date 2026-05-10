@@ -8659,17 +8659,49 @@ pub async fn run_health_check(state: tauri::State<'_, AppState>) -> Result<Healt
 
 #[tauri::command]
 pub async fn fix_health_issues(state: tauri::State<'_, AppState>) -> Result<usize, String> {
-    let orphaned = {
+    // v1.5.75 — Was deleting orphan DB rows but leaving their cached
+    // thumbnail files (<hash>.jpg) and any .rtenc vault blobs on disk.
+    // Over a long-running library that grew → shrank, the thumbnails dir
+    // could be many GB of leaked files invisible to the UI. Now we look
+    // up the hash + path before delete so we can wipe the thumbnail and
+    // any encrypted blob too.
+    let thumbs_dir = state.thumbnails_dir.clone();
+    let orphan_rows: Vec<(i64, String, String)> = {
         let conn = state.db.lock().map_err(|_| "db lock")?;
-        let all = db::get_all_photo_paths(&conn).map_err(|e| e.to_string())?;
-        all.into_iter()
-            .filter(|(_, path)| !std::path::Path::new(path).exists())
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, COALESCE(hash, ''), path FROM photos",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(i64, String, String)> = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .filter(|(_, _, p)| !std::path::Path::new(p).exists())
+            .collect();
+        rows
     };
-
-    if orphaned.is_empty() { return Ok(0); }
-
+    if orphan_rows.is_empty() {
+        return Ok(0);
+    }
+    // Delete the thumbnail + .rtenc files BEFORE removing the DB rows so a
+    // crash mid-delete leaves recoverable state (next health-check will
+    // see the orphans again and retry).
+    for (_id, hash, path) in &orphan_rows {
+        if !hash.is_empty() {
+            let cache = thumbnail::thumb_cache_name(hash);
+            let tp = thumbs_dir.join(&cache);
+            let _ = std::fs::remove_file(&tp);
+        }
+        // .rtenc vault blob (in case the user un-vaulted then deleted the
+        // restored file outside RetinaTag).
+        if path.ends_with(".rtenc") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    let orphaned: Vec<i64> = orphan_rows.iter().map(|(id, _, _)| *id).collect();
     let conn = state.db.lock().map_err(|_| "db lock")?;
     db::delete_photos_by_ids(&conn, &orphaned).map_err(|e| e.to_string())
 }
@@ -9111,10 +9143,32 @@ pub async fn delete_photos(photo_ids: Vec<i64>, delete_file: bool, state: tauri:
                      }}",
                     temp_str
                 );
-                let _ = std::process::Command::new("powershell.exe")
+                // v1.5.75 — log PS failure instead of silently dropping it.
+                // If powershell.exe isn't on PATH (locked-down build) or the
+                // process exits non-zero, we still proceed to clean up the
+                // DB + thumbs (the user asked for delete) but record what
+                // failed so support can see why files might still be on
+                // disk after a "delete to recycle bin" action.
+                match std::process::Command::new("powershell.exe")
                     .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
                     .creation_flags(0x08000000)
-                    .output();
+                    .output()
+                {
+                    Ok(out) if !out.status.success() => {
+                        eprintln!(
+                            "[delete] PowerShell recycle exited {:?}: stderr={}",
+                            out.status.code(),
+                            String::from_utf8_lossy(&out.stderr)
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[delete] PowerShell recycle failed to spawn: {} — files left on disk",
+                            e
+                        );
+                    }
+                    _ => {}
+                }
                 std::fs::remove_file(&temp).ok();
             }
         }
@@ -10504,6 +10558,18 @@ pub async fn auto_hide_nsfw(
                 e
             };
             prompt_embs.push(emb);
+        }
+        // v1.5.75 — bounds check on prompt_embs[0]. Without this, a model
+        // misload / GPU OOM (where encode_text fails for EVERY prompt but
+        // we keep going on the cache path) leaves prompt_embs empty and
+        // indexing [0] panics the entire spawn_blocking task. The user
+        // sees a generic IPC error and has no idea CLIP failed to load.
+        if prompt_embs.is_empty() {
+            return Err(
+                "Could not encode any NSFW prompt — CLIP model may be missing or out of GPU memory. \
+                 Try Settings → Re-download CLIP models."
+                    .to_string(),
+            );
         }
         // Mean-pool into a single query vector.
         let dim = prompt_embs[0].len();

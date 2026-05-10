@@ -1,3 +1,43 @@
+// v1.5.75 — Audit cleanup cycle. The P0/P1 work shipped in 1.5.73/1.5.74
+// covered the catastrophic stuff; this pass closes the long tail of P2
+// gotchas the audit surfaced.
+//
+// Backend
+// • watcher.rs callback: lock with unwrap_or_else(into_inner) instead of
+//   .unwrap() so a poisoned mutex from a sibling thread can't kill the
+//   watcher callback silently (the file-watching feature used to die
+//   for the rest of the session with no log line).
+// • auto_hide_nsfw: bounds-check prompt_embs[0] before indexing — a
+//   total CLIP encode failure (model missing / GPU OOM) used to panic
+//   inside spawn_blocking and surface as a generic IPC error.
+// • Delete-to-recycle: PowerShell stderr / spawn failure is now logged
+//   to eprintln instead of being swallowed by `let _ = .output()`.
+//   The DB row + thumbnail are still cleaned up (the user asked for
+//   delete) but support can see why files might still be on disk.
+// • fix_health_issues: also wipes the cached thumbnail and any .rtenc
+//   blob for each orphan photo it deletes. The thumbnails dir used to
+//   grow unboundedly over a "library shrink" cycle.
+// • scanner.rs: skip walker entries whose `file_name()` is empty
+//   (drive roots like `D:\`). They used to land in the DB with
+//   `filename = ""` and silently break XMP write / rename UI.
+//
+// Frontend
+// • _cuShowDeleteModal: keydown listener detached on every close path,
+//   not just Escape. Was a slow-burn leak — each Cleanup-Delete cycle
+//   added a permanent `document` listener.
+// • Face-popup polls: 60-second hard cap on the setInterval that waits
+//   for #faceNameInput to unmount. Three call sites used to spin
+//   forever if the popup never mounted (showFacePopup throw, re-render
+//   race).
+// • Gallery shortcuts: input-focus guard. Typing into the description
+//   editor / filename rename / search box no longer triggers gallery
+//   shortcuts (p/n/g/s/r/f/x/[/]/0-5/etc.). Modifier chords (Ctrl+S,
+//   Ctrl+Z, Ctrl+K, Cmd+K) still pass through.
+// • lbNav: drops the previous photo's <img src> before loading the
+//   next so the WebView doesn't hold base64 data URLs from
+//   get_private_photo_data alive across vault-lightbox navigation
+//   (was ~5-20 MB per photo, easily 1+ GB after a long browse).
+//
 // v1.5.74 — P1 bug-fix cycle. Eliminates the freeze + data-integrity
 // classes the v1.5.73 audit surfaced.
 //
