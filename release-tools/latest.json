@@ -1,14 +1,14 @@
 {
-  "version": "1.5.71",
-  "notes": "RetinaTag 1.5.71 — Windows + macOS\n\nHighlights:\n- AI-powered photo tagging (multi-provider routing)\n- Semantic search via CLIP\n- On-device face recognition\n- Vault for private photos (AES-256 file encryption, BIP39 recovery, Windows Hello / Touch ID)\n- iPhone / MTP import\n- Cross-platform auto-updater\n\nv1.5.71 specific:\n- Search overhaul: stop-word filtering, per-concept AND logic, Turkish vehicle disambiguation\n- Trending Tags panel removed (per user request)\n\nWindows: x86_64 NSIS installer.\nmacOS: Apple Silicon (M1/M2/M3+). Intel Mac on the roadmap.",
-  "pub_date": "2026-05-09T15:00:00Z",
+  "version": "1.5.72",
+  "notes": "RetinaTag 1.5.72 — Windows startup-freeze fix\n\nFixed:\n- Large-library launch freeze: backend DB commands now run on Tauri's blocking pool via spawn_blocking, freeing the async-runtime worker pool for IPC dispatch. UI clicks register immediately on launch even on 60K+ photo libraries.\n- Frontend init: photo grid loads first, sidebar widgets fire sequentially in the background instead of saturating the worker pool with parallel DB queries.\n\nFrom v1.5.71:\n- Search overhaul (stop-word filtering, per-concept AND logic, Turkish vehicle disambiguation)\n- Trending Tags panel removed\n\nFrom v1.5.62..v1.5.70:\n- Vault private photos (AES-256, BIP39 recovery, Windows Hello)\n- Auto-updater\n- Lightbox UI polish\n- Modal overflow fixes\n\nWindows: x86_64 NSIS installer.\nmacOS: Apple Silicon (M1/M2/M3+).",
+  "pub_date": "2026-05-10T18:10:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSaDlkbXZzRlZISS80TUxoaU50U0ZzZnBZYjBQaGpJZURNMkNkSElxdlc3T1poVWdoM05FTkJ3TzNIRzFjUnNMbG5JdHNCWmgwSzc5UmpJVngrUlVVVTdOSmcrZ1hhWlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzE0ODIyCWZpbGU6UmV0aW5hVGFnLmFwcC50YXIuZ3oKNWswVnYxZnlBc3dlaWdMSmh1TFFac3ZsMFJleCszMjFaMVBGbzJwUzZJdVMvNnZLc3BXVXNHazEvODdzYUtUOG01bXpheHpSMStnK3JENnV2MTZuQmc9PQo=",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/mac-latest/RetinaTag.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNR3dBWHUrejFodWhnNVJ3ZCtLNDNubHplaktuSTF3TmZtRDFyS09JbjFyRU5WUWN1cjNKaldoWEZRYllkdk9rU3IzaDJPeWxjYkYrUmJpS2lGMVhPNkFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzI2NDU1CWZpbGU6UmV0aW5hVGFnXzEuNS43MV94NjQtc2V0dXAuZXhlCkRxbjZQNXVnRStNcjN6V0czZFdPQ2g3OUZlRDkxMCtjUTR4ZnA5ajVCeUVaWG9MYjNxenFkVjF1Qlk0aTUwanBFK1N2RTN4cXlUNnVHWDF2eVF4NkNBPT0K",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNRy9FOWVLYkVBRVRhQm5IMzNWYVJyWnJ5YkpPWDRBM3BhcXV4MnFiSXBRRGJVWklRWVoxaHRlQ2xmVlFjMEIwbzRtNnUwSGw5ZFNSUzRxNUtNc2lOWWc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDM2MTM2CWZpbGU6UmV0aW5hVGFnXzEuNS43Ml94NjQtc2V0dXAuZXhlCnVTK3NRQTBFanhvRk0wdkU0N2xvSEJHYVdUMDV0dnhWOHZOWE5yQW9TbDF3YUhpYnpXdlV1NmIvVDF6VjlOclhiQldGcktYblFkZkxEL092SDJyekNBPT0K",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/windows-latest/RetinaTag-setup.exe"
     }
   }

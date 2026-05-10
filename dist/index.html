@@ -10583,8 +10583,26 @@ $('btnWelcomeSkip').onclick=()=>{$('welcomeModal').classList.remove('open');invo
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async function init(){
-  await Promise.all([refreshStats(),refreshFolders(),refreshProviders(),refreshCollections()]);
+  // v1.5.72 — Photo grid first, sidebar widgets in the background.
+  //
+  // Was: Promise.all([refreshStats, refreshFolders, refreshProviders,
+  //                   refreshCollections]) followed by loadPhotos.
+  // Problem: each of those invokes hits a synchronous state.db.lock()
+  // on the Rust side. On a 60K+ photo library every query takes ~1s,
+  // and firing four in parallel saturates Tauri's async worker pool
+  // before the gallery's get_photos call even gets scheduled — so
+  // every IPC message (including UI clicks) queues behind them and
+  // the WebView appears to hang for ~5–10s on launch.
+  //
+  // Fix: paint the gallery first (loadPhotos) so the user has
+  // something to click on, then fire the sidebar widgets sequentially
+  // on a setTimeout(0) microtask break. Each one only takes a single
+  // DB lock at a time and the UI thread paints between them.
   await loadPhotos();
+  setTimeout(()=>{ refreshStats().catch(()=>{}); }, 0);
+  setTimeout(()=>{ refreshFolders().catch(()=>{}); }, 80);
+  setTimeout(()=>{ refreshProviders().catch(()=>{}); }, 160);
+  setTimeout(()=>{ refreshCollections().catch(()=>{}); }, 240);
   // v1.4.64 — restore the last active view. Runs after loadPhotos so the
   // gallery grid is primed (user may switch back via 'G' without extra wait).
   // 'gallery' is the default startup view so no explicit switch needed.

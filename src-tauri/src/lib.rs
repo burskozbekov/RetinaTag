@@ -1,3 +1,14 @@
+// v1.5.72 — Startup-freeze fix on large libraries.
+// • Frontend init: gallery loads first; sidebar widgets fire sequentially
+//   on setTimeout(0) microtasks instead of Promise.all, so UI clicks
+//   register immediately on launch.
+// • Backend: get_photos / get_photo_detail / get_stats / get_folders /
+//   get_folders_with_status / get_collections wrap their work in
+//   tauri::async_runtime::spawn_blocking, freeing the async-runtime
+//   worker pool for IPC dispatch while the DB query runs on the
+//   blocking pool. On a 60K+ photo library the WebView used to appear
+//   frozen for 5–10s on launch as parallel state.db.lock() calls
+//   saturated the worker pool — this restores responsive launch.
 // v1.5.71 — Search quality overhaul + remove Trending Tags:
 // • English multi-word queries now use stop-word filtering + per-concept
 //   group-AND logic. "couple on the boat" strips "on"/"the", then intersects

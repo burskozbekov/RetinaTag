@@ -173,17 +173,39 @@ pub async fn stop_scan(state: tauri::State<'_, AppState>) -> Result<(), String> 
 pub async fn get_folders(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, i64)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_folders(&conn).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_folders(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn get_folders_with_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, i64, i64)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_folders_with_status(&conn).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_folders_with_status(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
+
+// v1.5.72 — Heavy DB commands moved off the async runtime's worker threads
+// via tauri::async_runtime::spawn_blocking. Without this, on a 60K+ photo
+// library every query takes hundreds of ms to a few seconds while holding a
+// std::sync::Mutex lock. Several parallel invokes (frontend init fans out
+// 4–5 of these on launch) saturate Tokio's worker pool → IPC messages
+// queue behind them and the WebView appears frozen for 5–10 seconds.
+//
+// Wrapping the blocking work in spawn_blocking lets the async runtime
+// keep dispatching IPC while the DB work runs on the dedicated blocking
+// pool (default 512 threads), so UI clicks register immediately even
+// during a slow query.
 
 #[tauri::command]
 pub async fn get_photos(
@@ -194,17 +216,22 @@ pub async fn get_photos(
     status_filter: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<PhotosResponse, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_photos(
-        &conn,
-        offset,
-        limit,
-        folder.as_deref(),
-        tag_filter.as_deref(),
-        status_filter.as_deref(),
-    )
-    .map(|(photos, total)| PhotosResponse { photos, total })
-    .map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_photos(
+            &conn,
+            offset,
+            limit,
+            folder.as_deref(),
+            tag_filter.as_deref(),
+            status_filter.as_deref(),
+        )
+        .map(|(photos, total)| PhotosResponse { photos, total })
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -212,14 +239,24 @@ pub async fn get_photo_detail(
     photo_id: i64,
     state: tauri::State<'_, AppState>,
 ) -> Result<Photo, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_photo_detail(&conn, photo_id).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_photo_detail(&conn, photo_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn get_stats(state: tauri::State<'_, AppState>) -> Result<AppStats, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_stats(&conn).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_stats(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Search with multi-language translation ───────────────────────────────────
@@ -3669,8 +3706,13 @@ pub async fn delete_collection(
 pub async fn get_collections(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Collection>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_collections(&conn).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_collections(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
