@@ -1,3 +1,19 @@
+// v1.5.77 — UI-freeze regression rollback for v1.5.76's LAN sync.
+//
+// v1.5.76 shipped LAN sync infrastructure (Phase-1) AND its UI in one
+// commit. The combination froze the WebView on launch. Bisect on
+// v1.5.77 isolated the cause: the frontend changes are SAFE in
+// isolation (JS gracefully hides the Network Sync nav when the
+// backend command is missing — try/catch around invoke). This
+// release ships just the v1.5.76 frontend on top of the v1.5.75
+// backend. Network Sync nav is auto-hidden because the
+// sync_get_state command doesn't exist on this build; everything
+// else behaves identically to v1.5.75.
+//
+// The actual LAN sync backend (5 new deps, sync.rs, DB migration,
+// 10 commands) will land in v1.5.78+ one piece at a time so we can
+// identify exactly which piece broke v1.5.76's WebView.
+//
 // v1.5.75 — Audit cleanup cycle. The P0/P1 work shipped in 1.5.73/1.5.74
 // covered the catastrophic stuff; this pass closes the long tail of P2
 // gotchas the audit surfaced.

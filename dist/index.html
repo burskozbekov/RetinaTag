@@ -2096,6 +2096,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
           <div class="settings-nav-item" data-pane="search"><span class="nav-ico">🔍</span>Search</div>
           <div class="settings-nav-item" data-pane="display"><span class="nav-ico">🏷</span>Display</div>
           <div class="settings-nav-item" data-pane="alerts"><span class="nav-ico">🔔</span>Notifications</div>
+          <div class="settings-nav-item" data-pane="network"><span class="nav-ico">📡</span>Network Sync <span style="font-size:9px;opacity:.7;background:var(--card2);padding:1px 4px;border-radius:3px;margin-left:4px">BETA</span></div>
           <div class="settings-nav-item" data-pane="tools"><span class="nav-ico">🛠</span>Tools</div>
           <div class="settings-nav-item" data-pane="about"><span class="nav-ico">ℹ️</span>About</div>
         </nav>
@@ -2213,6 +2214,75 @@ select.tb-select:focus{border-color:var(--red-dark)}
               <span>Notify on errors</span>
             </label>
             <div class="form-hint">Closing the window hides RetinaTag to the system tray so watch-folder scans keep running. Right-click the tray icon to quit.</div>
+          </div>
+        </section>
+
+        <!-- ── Network Sync (Beta) ────────────────────────────────────── -->
+        <!-- v1.5.76 Phase-1: discovery + pairing + transport infrastructure.
+             Tag/rating/favorite/description sync arrives in v1.5.77+. -->
+        <section class="settings-pane" data-pane="network" hidden>
+          <h3 class="pane-title">Network Sync <span style="font-size:11px;color:var(--amber);font-weight:normal">(Beta)</span></h3>
+          <p class="pane-sub">Discover other RetinaTag installs on your Wi-Fi and pair them. Phase-1 sets up the secure channel; tag &amp; rating sync arrive in a follow-up release. <b style="color:var(--cream2)">Nothing is broadcast on your network until you toggle this on.</b></p>
+
+          <div class="pane-section">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+              <input type="checkbox" id="syncEnabledToggle" style="width:18px;height:18px">
+              <div>
+                <div style="color:var(--cream);font-weight:600">Enable network sync</div>
+                <div class="form-hint" style="margin-top:2px">Starts mDNS discovery and the local HTTP listener. Other devices can only see this one after you pair manually.</div>
+              </div>
+            </label>
+          </div>
+
+          <div class="pane-section">
+            <div class="sb-label">This device</div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input class="form-input" id="syncDeviceName" type="text" placeholder="Device name" style="flex:1;font-size:12px">
+              <button class="btn btn-xs btn-secondary" id="btnSyncSaveName">Save</button>
+            </div>
+            <div class="form-hint" id="syncIdentityInfo" style="margin-top:6px;font-family:var(--mono,monospace);font-size:10.5px">—</div>
+          </div>
+
+          <div class="pane-section" id="syncPairSection" style="display:none">
+            <div class="sb-label">Add a device</div>
+            <div style="font-size:12px;color:var(--text2);line-height:1.55;margin-bottom:10px">
+              On the OTHER device, open Settings → Network Sync, then enter the values below.
+            </div>
+            <div style="display:flex;gap:10px;margin-bottom:10px">
+              <div style="flex:1">
+                <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px">This device's address</div>
+                <div id="syncMyAddr" style="font-family:var(--mono,monospace);font-size:13px;color:var(--cream);padding:6px 8px;background:var(--card2);border-radius:6px">—</div>
+              </div>
+              <div style="flex:1">
+                <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px">Pair code (refreshes every 5 min)</div>
+                <div id="syncMyCode" style="font-family:var(--mono,monospace);font-size:18px;letter-spacing:3px;color:var(--cream);padding:4px 8px;background:var(--card2);border-radius:6px;text-align:center;font-weight:700">—</div>
+              </div>
+            </div>
+            <button class="btn btn-xs btn-secondary" id="btnSyncMintCode">New code</button>
+
+            <div style="border-top:1px solid var(--border);margin:14px 0 10px"></div>
+            <div style="font-size:12px;color:var(--text2);line-height:1.55;margin-bottom:8px">
+              <b>Or:</b> add the OTHER device here using its address + the code shown on it.
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:8px">
+              <input class="form-input" id="syncPairAddr" type="text" placeholder="192.168.1.42:43210" style="flex:1;font-size:12px;font-family:var(--mono,monospace)">
+              <input class="form-input" id="syncPairCode" type="text" placeholder="123456" maxlength="6" style="width:90px;font-size:14px;text-align:center;letter-spacing:2px;font-family:var(--mono,monospace)">
+              <button class="btn btn-xs btn-primary" id="btnSyncPair">Pair</button>
+            </div>
+            <div class="form-hint" id="syncPairHint"></div>
+          </div>
+
+          <div class="pane-section" id="syncNearbySection" style="display:none">
+            <div class="sb-label" style="display:flex;align-items:center;justify-content:space-between">
+              <span>Nearby on Wi-Fi</span>
+              <button class="btn btn-xs btn-secondary" id="btnSyncRefreshNearby">↻</button>
+            </div>
+            <div id="syncNearbyList" style="font-size:12px;color:var(--text3)">Looking…</div>
+          </div>
+
+          <div class="pane-section" style="border-bottom:none">
+            <div class="sb-label">Paired devices</div>
+            <div id="syncPeersList" style="font-size:12px;color:var(--text3)">No paired devices yet.</div>
           </div>
         </section>
 
@@ -9148,8 +9218,192 @@ async function openSettings(){
       catch(err){toast('Error: '+err,'error')}
     }
   };
+  // v1.5.76 — populate Network Sync (Beta) pane.
+  try { _syncRefreshUI(); } catch(_) {}
   $('settingsModal').classList.add('open');
 }
+
+// ── Network Sync (Beta) UI ──────────────────────────────────────────────
+// Phase-1: discovery, pairing, transport. Phase-2 (next release) adds
+// the actual tag/rating/favorite/description sync.
+async function _syncRefreshUI() {
+  let state;
+  try {
+    state = await invoke('sync_get_state');
+  } catch (e) {
+    // Backend doesn't know about sync yet (very old install) — hide UI.
+    const nav = document.querySelector('.settings-nav-item[data-pane="network"]');
+    if (nav) nav.style.display = 'none';
+    return;
+  }
+  const t = document.getElementById('syncEnabledToggle');
+  if (t) t.checked = !!state.enabled;
+  const nm = document.getElementById('syncDeviceName');
+  if (nm && document.activeElement !== nm) nm.value = state.device_name || '';
+  const info = document.getElementById('syncIdentityInfo');
+  if (info) {
+    info.textContent =
+      'device_id: ' + (state.device_id || '?') +
+      (state.port ? ' · port: ' + state.port : '') +
+      ' · pubkey: ' + ((state.public_key_b64 || '').slice(0, 12) + '…');
+  }
+  const pair = document.getElementById('syncPairSection');
+  const nearby = document.getElementById('syncNearbySection');
+  if (pair) pair.style.display = state.enabled ? '' : 'none';
+  if (nearby) nearby.style.display = state.enabled ? '' : 'none';
+  if (state.enabled) {
+    // Show this device's reachable address (local IP + port). The
+    // browser doesn't expose the LAN IP to JS, so we fetch it from
+    // the backend's identity info indirectly via a quick "what does
+    // /ping look like at 127.0.0.1:port" check, then surface the
+    // port — the user knows their own IP.
+    const addrEl = document.getElementById('syncMyAddr');
+    if (addrEl) {
+      // Port is reliable from backend. IP we display as "<your local IP>"
+      // because the WebView's window.location is tauri://localhost so we
+      // can't introspect it from JS.
+      addrEl.textContent = '<your local IP>:' + state.port;
+    }
+    const codeEl = document.getElementById('syncMyCode');
+    if (codeEl) codeEl.textContent = state.pair_code || '— click "New code"';
+  }
+  await _syncRefreshPeers();
+  if (state.enabled) await _syncRefreshNearby();
+}
+
+async function _syncRefreshPeers() {
+  const host = document.getElementById('syncPeersList');
+  if (!host) return;
+  try {
+    const peers = await invoke('sync_list_peers');
+    if (!peers.length) {
+      host.textContent = 'No paired devices yet.';
+      return;
+    }
+    host.innerHTML = peers.map(p => {
+      const last = p.last_seen
+        ? new Date(p.last_seen * 1000).toLocaleString()
+        : '—';
+      const addr = p.last_addr || '—';
+      const safeName = _esc(p.device_name || p.device_id);
+      const safeId = _esc(p.device_id);
+      return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="flex:1">
+          <div style="color:var(--cream);font-weight:600;font-size:13px">${safeName}</div>
+          <div style="font-size:10.5px;color:var(--text3);font-family:var(--mono,monospace)">${safeId} · last seen ${_esc(last)} · ${_esc(addr)}</div>
+        </div>
+        <button class="btn btn-xs btn-danger" data-rm="${safeId}">Remove</button>
+      </div>`;
+    }).join('');
+    host.querySelectorAll('button[data-rm]').forEach(b => {
+      b.onclick = async () => {
+        if (!confirm(`Forget ${b.dataset.rm}? Future sync from that device will be rejected until you pair again.`)) return;
+        try {
+          await invoke('sync_remove_peer', { deviceId: b.dataset.rm });
+          toast('Peer removed', 'success');
+          _syncRefreshPeers();
+        } catch (e) { toast('Remove failed: ' + e, 'error'); }
+      };
+    });
+  } catch (e) {
+    host.textContent = 'Could not load peers: ' + e;
+  }
+}
+
+async function _syncRefreshNearby() {
+  const host = document.getElementById('syncNearbyList');
+  if (!host) return;
+  try {
+    const list = await invoke('sync_list_nearby');
+    if (!list.length) {
+      host.textContent = 'No other RetinaTag devices found on this network yet. Make sure sync is enabled on the other device too.';
+      return;
+    }
+    host.innerHTML = list.map(p => {
+      const safeName = _esc(p.device_name || p.device_id);
+      const safeAddr = _esc(p.addr + ':' + p.port);
+      const status = p.already_paired ? '✓ paired' : 'not paired';
+      const statusColor = p.already_paired ? 'var(--green,#4ade80)' : 'var(--amber)';
+      return `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <div style="flex:1">
+          <div style="color:var(--cream);font-size:12px">${safeName} · <span style="color:${statusColor}">${status}</span></div>
+          <div style="font-size:10.5px;color:var(--text3);font-family:var(--mono,monospace)">${safeAddr}</div>
+        </div>
+        ${p.already_paired ? '' : `<button class="btn btn-xs btn-secondary" data-fill="${safeAddr}">Use</button>`}
+      </div>`;
+    }).join('');
+    host.querySelectorAll('button[data-fill]').forEach(b => {
+      b.onclick = () => {
+        const inp = document.getElementById('syncPairAddr');
+        if (inp) { inp.value = b.dataset.fill; inp.focus(); }
+      };
+    });
+  } catch (e) {
+    host.textContent = 'Nearby scan unavailable: ' + e;
+  }
+}
+
+(function _wireSyncUI(){
+  const t = document.getElementById('syncEnabledToggle');
+  if (t) t.onchange = async () => {
+    try {
+      if (t.checked) {
+        await invoke('sync_enable');
+        toast('Network sync enabled', 'success');
+      } else {
+        await invoke('sync_disable');
+        toast('Network sync disabled', 'info');
+      }
+    } catch (e) {
+      toast('Sync toggle failed: ' + e, 'error');
+      t.checked = !t.checked; // revert
+    }
+    _syncRefreshUI();
+  };
+  const saveBtn = document.getElementById('btnSyncSaveName');
+  if (saveBtn) saveBtn.onclick = async () => {
+    const nm = document.getElementById('syncDeviceName');
+    if (!nm) return;
+    try {
+      await invoke('sync_set_device_name', { name: nm.value });
+      toast('Device name saved', 'success');
+      _syncRefreshUI();
+    } catch (e) { toast('Save failed: ' + e, 'error'); }
+  };
+  const mintBtn = document.getElementById('btnSyncMintCode');
+  if (mintBtn) mintBtn.onclick = async () => {
+    try {
+      const code = await invoke('sync_mint_pair_code');
+      const el = document.getElementById('syncMyCode');
+      if (el) el.textContent = code;
+    } catch (e) { toast('Could not mint code: ' + e, 'error'); }
+  };
+  const pairBtn = document.getElementById('btnSyncPair');
+  if (pairBtn) pairBtn.onclick = async () => {
+    const a = document.getElementById('syncPairAddr');
+    const c = document.getElementById('syncPairCode');
+    const hint = document.getElementById('syncPairHint');
+    if (!a || !c) return;
+    const addr = (a.value||'').trim();
+    const code = (c.value||'').trim();
+    if (!addr || !code) {
+      if (hint) hint.textContent = 'Both address and code are required.';
+      return;
+    }
+    if (hint) hint.textContent = 'Connecting…';
+    try {
+      const peer = await invoke('sync_pair_with', { addr, code });
+      if (hint) hint.textContent = '';
+      toast('Paired with ' + (peer.device_name || peer.device_id), 'success');
+      a.value = ''; c.value = '';
+      _syncRefreshUI();
+    } catch (e) {
+      if (hint) hint.textContent = 'Pair failed: ' + e;
+    }
+  };
+  const refreshBtn = document.getElementById('btnSyncRefreshNearby');
+  if (refreshBtn) refreshBtn.onclick = () => _syncRefreshNearby();
+})();
 async function checkOllamaStatus(card){
   if(!card) card=document.querySelector('[data-local]');
   if(!card) return;
