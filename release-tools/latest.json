@@ -1,14 +1,14 @@
 {
-  "version": "1.5.78",
-  "notes": "RetinaTag 1.5.77 \u00e2\u20ac\u201d Stable rollback of v1.5.76's freeze regression\n\nFixed:\n- v1.5.76 froze the WebView on launch due to backend LAN sync changes. v1.5.77 keeps the v1.5.76 frontend changes (which are safe in isolation) on top of the v1.5.75 backend, so the UI is responsive again. Network Sync (Beta) nav is auto-hidden because the backend sync command is missing on this build.\n\nFrom v1.5.75: Audit cleanup (watcher panic, NSFW bounds, PS delete log, orphan thumbs, scanner empty filename, modal leaks, polling caps, input-focus guard, lightbox memory)\nFrom v1.5.74: P1 freeze + data-integrity fixes\nFrom v1.5.73: Vault P0 leaks + single-instance + XSS hardening\nFrom v1.5.72: Large-library launch freeze fix\n\nLAN sync infrastructure will land piece-by-piece in v1.5.78+ once we identify which v1.5.76 backend change broke the WebView.\n\nWindows: x86_64 NSIS installer.\nmacOS: Apple Silicon (M1/M2/M3+).",
-  "pub_date": "2026-05-11T02:30:00Z",
+  "version": "1.5.81",
+  "notes": "RetinaTag 1.5.81 - LAN sync restored. Fixed v1.5.76 UI-freeze regression via 5-round bisect (root cause: build cache corruption, not the code). Full LAN sync Phase-1 (mDNS discovery, Ed25519 identity, axum HTTP, 6-digit pair flow) with WebView staying responsive. Settings > Network Sync (Beta) is functional.",
+  "pub_date": "2026-05-11T03:30:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSaDlkbXZzRlZISS80TUxoaU50U0ZzZnBZYjBQaGpJZURNMkNkSElxdlc3T1poVWdoM05FTkJ3TzNIRzFjUnNMbG5JdHNCWmgwSzc5UmpJVngrUlVVVTdOSmcrZ1hhWlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzE0ODIyCWZpbGU6UmV0aW5hVGFnLmFwcC50YXIuZ3oKNWswVnYxZnlBc3dlaWdMSmh1TFFac3ZsMFJleCszMjFaMVBGbzJwUzZJdVMvNnZLc3BXVXNHazEvODdzYUtUOG01bXpheHpSMStnK3JENnV2MTZuQmc9PQo=",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/mac-latest/RetinaTag.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNRzlybkUxMTlpUWF4Z3VweVdkenJJUHNkb1p1TmV6NlcvaWNxRjh1NktPWkVjNWFBSGtLdURHZTlMdUNYNG9hVXFDU2gxWjZwQlpIMTE2Rkg4dW1ZSGdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDU0MzIwCWZpbGU6UmV0aW5hVGFnXzEuNS43OF94NjQtc2V0dXAuZXhlCnF0cmZXYXpsNEVkV0UySXQxN3NhSDltcmxCYjZRcnBwNTNWMXdSOUIwRmZsV0d0Myszbkl5TFJHd2lNaEZLTWZIL2JqWkZaT1NVOHpoVXFadXZVQkN3PT0K\n",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNR3h4b0FVeVpWZ20vUTZ4K3IwY0F5b3NSV1ZYanpqN1ZtMGVrREVmN1JYWCtOZU1hWDhoVXI0Nk1pcExYRVJUQWhtR1BJZWZScjM3anRsdTcrcXdTWkFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDU2MDM0CWZpbGU6UmV0aW5hVGFnXzEuNS44MV94NjQtc2V0dXAuZXhlCmNHNnh0TWxIZ1BsRERJWUtrcCtyVUNIUmhNUkViNTU0b0dWVjZZU1dUL0psa1RCdXNNVXpJbkxmYjN5SlJRWkJpRjZxbWRMak9GZWJEd214MllLWUJnPT0K",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/windows-latest/RetinaTag-setup.exe"
     }
   }
