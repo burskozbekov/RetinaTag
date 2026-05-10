@@ -11189,3 +11189,212 @@ pub async fn get_trending_tags(
 
     Ok(out)
 }
+
+// ── LAN Sync (Phase-1 commands) ─────────────────────────────────────────
+//
+// These bridge the JS-side "Network Sync (Beta)" settings page to
+// the `sync` module. Every command is a no-op unless the user has
+// explicitly enabled sync, so reaching for these has zero impact on
+// users who never turn it on.
+
+#[derive(serde::Serialize)]
+pub struct SyncState {
+    pub enabled: bool,
+    pub device_id: String,
+    pub device_name: String,
+    pub public_key_b64: String,
+    pub port: Option<u16>,
+    pub pair_code: Option<String>,
+}
+
+/// Snapshot of the local sync service. The UI polls this to show
+/// enabled/disabled, the device name, the current pair code if one is
+/// outstanding, and the port the HTTP server is listening on (handy
+/// for the user typing into the OTHER device).
+#[tauri::command]
+pub async fn sync_get_state(
+    state: tauri::State<'_, AppState>,
+) -> Result<SyncState, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    let (identity, _sk) = crate::sync::load_or_create_identity(&conn, &default_device_name())
+        .map_err(|e| e.to_string())?;
+    let enabled_flag = crate::sync::identity_enabled(&conn);
+    drop(conn);
+    let (port, pair_code) = {
+        let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
+        match svc.as_ref() {
+            Some(s) => (Some(s.port), s.current_pair_code()),
+            None => (None, None),
+        }
+    };
+    Ok(SyncState {
+        enabled: enabled_flag && port.is_some(),
+        device_id: identity.device_id,
+        device_name: identity.device_name,
+        public_key_b64: identity.public_key_b64,
+        port,
+        pair_code,
+    })
+}
+
+#[tauri::command]
+pub async fn sync_set_device_name(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("device name cannot be empty".into());
+    }
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    crate::sync::set_identity_name(&conn, trimmed).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_enable(state: tauri::State<'_, AppState>) -> Result<SyncState, String> {
+    // MutexGuards must not be held across awaits — the future would
+    // otherwise not be Send, which tauri::generate_handler requires.
+    // Compute booleans first, drop the guard, then await.
+    let already_running = {
+        let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
+        svc.is_some()
+    };
+    if already_running {
+        return sync_get_state(state).await;
+    }
+    let (identity, signing) = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let (id, sk) = crate::sync::load_or_create_identity(&conn, &default_device_name())
+            .map_err(|e| e.to_string())?;
+        crate::sync::set_identity_enabled(&conn, true).map_err(|e| e.to_string())?;
+        (id, sk)
+    };
+    let db_arc = state.db.clone();
+    let svc = crate::sync::SyncService::start(db_arc, identity, signing)
+        .map_err(|e| e.to_string())?;
+    {
+        let mut slot = state.sync_service.lock().map_err(|_| "sync lock")?;
+        *slot = Some(svc);
+    }
+    sync_get_state(state).await
+}
+
+#[tauri::command]
+pub async fn sync_disable(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // Drop the service (its Drop impl tears down mDNS + axum).
+    {
+        let mut slot = state.sync_service.lock().map_err(|_| "sync lock")?;
+        slot.take();
+    }
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    crate::sync::set_identity_enabled(&conn, false).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_list_peers(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::sync::PairedPeer>, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    crate::sync::list_peers(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sync_list_nearby(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::sync::NearbyPeer>, String> {
+    let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
+    match svc.as_ref() {
+        Some(s) => Ok(s.nearby_peers()),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_mint_pair_code(
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
+    match svc.as_ref() {
+        Some(s) => Ok(s.mint_pair_code()),
+        None => Err("Sync is not enabled".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_pair_with(
+    addr: String,
+    code: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::sync::PairedPeer, String> {
+    // 1. Ping the peer first. Catches "wrong address" / "not a
+    //    RetinaTag device" before we send a pair code anywhere. The
+    //    response itself isn't used — /pair returns the canonical
+    //    identity record after the code check, which is what we
+    //    persist below.
+    crate::sync::ping_peer(&addr).await.map_err(|e| e.to_string())?;
+    // 2. Our identity for the outbound request.
+    let me = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let (id, _sk) = crate::sync::load_or_create_identity(&conn, &default_device_name())
+            .map_err(|e| e.to_string())?;
+        id
+    };
+    // 3. Send the code. On success, persist the peer locally.
+    let resp = crate::sync::pair_with_peer(&addr, &code, &me)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pk = base64_url_decode(&resp.identity.public_key_b64)?;
+    {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        crate::sync::insert_peer(
+            &conn,
+            &resp.identity.device_id,
+            &resp.identity.device_name,
+            &pk,
+            Some(&addr),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(crate::sync::PairedPeer {
+        device_id: resp.identity.device_id,
+        device_name: resp.identity.device_name,
+        public_key_b64: resp.identity.public_key_b64,
+        last_addr: Some(addr),
+        last_seen: Some(resp.paired_at),
+        paired_at: resp.paired_at,
+    })
+}
+
+#[tauri::command]
+pub async fn sync_remove_peer(
+    device_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    crate::sync::remove_peer(&conn, &device_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sync_ping_peer(addr: String) -> Result<crate::sync::PingPayload, String> {
+    crate::sync::ping_peer(&addr).await.map_err(|e| e.to_string())
+}
+
+fn default_device_name() -> String {
+    // Pull the OS hostname for a sensible default. The user can rename
+    // anytime via sync_set_device_name.
+    if let Ok(hn) = std::env::var("COMPUTERNAME") {
+        return hn;
+    }
+    if let Ok(hn) = std::env::var("HOSTNAME") {
+        return hn;
+    }
+    "RetinaTag".to_string()
+}
+
+fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    URL_SAFE_NO_PAD.decode(s).map_err(|e| e.to_string())
+}

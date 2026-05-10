@@ -661,6 +661,17 @@ pub fn run() {
             commands::merge_duplicate_photos,
             commands::save_all_folders_as_collections,
             commands::get_trending_tags,
+            // v1.5.81 bisect — LAN sync command registry (Phase-1).
+            commands::sync_get_state,
+            commands::sync_set_device_name,
+            commands::sync_enable,
+            commands::sync_disable,
+            commands::sync_list_peers,
+            commands::sync_list_nearby,
+            commands::sync_mint_pair_code,
+            commands::sync_pair_with,
+            commands::sync_remove_peer,
+            commands::sync_ping_peer,
         ])
         // Intercept window close on the main window. If the `close_to_tray`
         // preference is enabled we hide the window instead of exiting, so the
