@@ -219,6 +219,7 @@ mod watcher;
 mod xmp;
 mod device_monitor;
 mod tray;
+mod sync;
 #[cfg(windows)]
 mod mtp;
 
@@ -236,6 +237,8 @@ pub struct AppState {
     pub face_stop: Arc<AtomicBool>,
     pub watcher: Mutex<Option<watcher::FolderWatcher>>,
     pub device_monitor: Mutex<Option<device_monitor::DeviceMonitor>>,
+    /// v1.5.80 — LAN sync service slot. None until the user enables.
+    pub sync_service: Mutex<Option<sync::SyncService>>,
     /// Face IDs returned by the last get_unknown_faces call.
     /// On the NEXT call, any still-unassigned faces here are auto-skipped.
     pub last_shown_face_ids: Mutex<Vec<i64>>,
@@ -377,6 +380,7 @@ pub fn run() {
                 watcher: Mutex::new(None),
                 device_monitor: Mutex::new(None),
                 last_shown_face_ids: Mutex::new(Vec::new()),
+                sync_service: Mutex::new(None),
                 vault_kek: Mutex::new(None),
             });
 
