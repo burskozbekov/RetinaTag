@@ -1,14 +1,14 @@
 {
-  "version": "1.5.77",
-  "notes": "RetinaTag 1.5.77 — Stable rollback of v1.5.76's freeze regression\n\nFixed:\n- v1.5.76 froze the WebView on launch due to backend LAN sync changes. v1.5.77 keeps the v1.5.76 frontend changes (which are safe in isolation) on top of the v1.5.75 backend, so the UI is responsive again. Network Sync (Beta) nav is auto-hidden because the backend sync command is missing on this build.\n\nFrom v1.5.75: Audit cleanup (watcher panic, NSFW bounds, PS delete log, orphan thumbs, scanner empty filename, modal leaks, polling caps, input-focus guard, lightbox memory)\nFrom v1.5.74: P1 freeze + data-integrity fixes\nFrom v1.5.73: Vault P0 leaks + single-instance + XSS hardening\nFrom v1.5.72: Large-library launch freeze fix\n\nLAN sync infrastructure will land piece-by-piece in v1.5.78+ once we identify which v1.5.76 backend change broke the WebView.\n\nWindows: x86_64 NSIS installer.\nmacOS: Apple Silicon (M1/M2/M3+).",
-  "pub_date": "2026-05-11T02:00:00Z",
+  "version": "1.5.78",
+  "notes": "RetinaTag 1.5.77 \u00e2\u20ac\u201d Stable rollback of v1.5.76's freeze regression\n\nFixed:\n- v1.5.76 froze the WebView on launch due to backend LAN sync changes. v1.5.77 keeps the v1.5.76 frontend changes (which are safe in isolation) on top of the v1.5.75 backend, so the UI is responsive again. Network Sync (Beta) nav is auto-hidden because the backend sync command is missing on this build.\n\nFrom v1.5.75: Audit cleanup (watcher panic, NSFW bounds, PS delete log, orphan thumbs, scanner empty filename, modal leaks, polling caps, input-focus guard, lightbox memory)\nFrom v1.5.74: P1 freeze + data-integrity fixes\nFrom v1.5.73: Vault P0 leaks + single-instance + XSS hardening\nFrom v1.5.72: Large-library launch freeze fix\n\nLAN sync infrastructure will land piece-by-piece in v1.5.78+ once we identify which v1.5.76 backend change broke the WebView.\n\nWindows: x86_64 NSIS installer.\nmacOS: Apple Silicon (M1/M2/M3+).",
+  "pub_date": "2026-05-11T02:30:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSaDlkbXZzRlZISS80TUxoaU50U0ZzZnBZYjBQaGpJZURNMkNkSElxdlc3T1poVWdoM05FTkJ3TzNIRzFjUnNMbG5JdHNCWmgwSzc5UmpJVngrUlVVVTdOSmcrZ1hhWlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzE0ODIyCWZpbGU6UmV0aW5hVGFnLmFwcC50YXIuZ3oKNWswVnYxZnlBc3dlaWdMSmh1TFFac3ZsMFJleCszMjFaMVBGbzJwUzZJdVMvNnZLc3BXVXNHazEvODdzYUtUOG01bXpheHpSMStnK3JENnV2MTZuQmc9PQo=",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/mac-latest/RetinaTag.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNRy9peWN2bzYxclN2SStSY29Tb3VLZ204d0RvM1NyK3BWcUhqNDgxdGFKZnZUZm9yN3U2d3hsczFJSnpIc2kvVlFzbDQxbEtwaE40WTFQRzhkWldpd0FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDUzNDgzCWZpbGU6UmV0aW5hVGFnXzEuNS43N194NjQtc2V0dXAuZXhlCkFMRW40MzkxS0kwMEE2STgxeU82WjRwbWs3enFFV25CZnNac3RVMDdGYVE1Rmp3MnZlY2hoVUR6QXVqU3NoZEp2bTRDcEdGYVVhUzJUd0U5VWpOdkF3PT0K",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNRzlybkUxMTlpUWF4Z3VweVdkenJJUHNkb1p1TmV6NlcvaWNxRjh1NktPWkVjNWFBSGtLdURHZTlMdUNYNG9hVXFDU2gxWjZwQlpIMTE2Rkg4dW1ZSGdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDU0MzIwCWZpbGU6UmV0aW5hVGFnXzEuNS43OF94NjQtc2V0dXAuZXhlCnF0cmZXYXpsNEVkV0UySXQxN3NhSDltcmxCYjZRcnBwNTNWMXdSOUIwRmZsV0d0Myszbkl5TFJHd2lNaEZLTWZIL2JqWkZaT1NVOHpoVXFadXZVQkN3PT0K\n",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/windows-latest/RetinaTag-setup.exe"
     }
   }

@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.78"
+version = "1.5.79"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -25,7 +25,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 sha2 = "0.10"
 hex = "0.4"
 image = "0.25"
-# v1.5.58 — Embed XMP metadata directly into JPEG files (APP1 segment).
+# v1.5.58 â€” Embed XMP metadata directly into JPEG files (APP1 segment).
 # Pure-Rust segment manipulation: read SOI/APP markers, drop existing
 # XMP APP1, insert fresh one. Atomic temp-then-rename keeps the
 # original safe if the write is interrupted.
@@ -44,11 +44,11 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "directml"] }
 ndarray = "0.17"
 unicode-normalization = "0.1"
-# rayon is already a transitive dep via image/ndarray — exposing it directly
+# rayon is already a transitive dep via image/ndarray â€” exposing it directly
 # lets us parallelize CPU-bound hashing/blur work without the overhead of
 # managing raw threads.
 rayon = "1.10"
-# Fast non-crypto 128-bit hash for photo dedup. xxh3 is ~20× faster than
+# Fast non-crypto 128-bit hash for photo dedup. xxh3 is ~20Ã— faster than
 # SHA-256 on the scan hot path and plenty collision-resistant for the
 # file-identity use case (library-scale corpus). Still prefixed "xxh3:" in
 # the DB so pre-existing SHA-256 hashes from older scans keep working.
@@ -58,9 +58,9 @@ dirs = "5"
 tauri-plugin-drag = "2.1"
 tauri-plugin-notification = "2"
 
-# v1.5.63 — Vault Faz 2 hardening.
+# v1.5.63 â€” Vault Faz 2 hardening.
 # bip39: 24-word recovery mnemonic so a forgotten PIN doesn't mean total
-#        data loss. We do NOT email recovery codes — that's an anti-pattern;
+#        data loss. We do NOT email recovery codes â€” that's an anti-pattern;
 #        the user holds the words.
 # argon2 + aes-gcm: foundation for encrypted thumbnails. The crates are
 #        wired up now so the v1.5.64 thumbnail-encryption migration can
@@ -69,15 +69,22 @@ bip39 = "2"
 argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
+# v1.5.79 bisect — deps only, no code uses them yet. Tests whether adding
+# these crates to the binary alone causes the v1.5.76 WebView freeze.
+mdns-sd = "0.13"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+axum = "0.8"
+tower = "0.5"
+if-addrs = "0.13"
 tauri-plugin-single-instance = "2.4.2"
 
 # MTP (Media Transfer Protocol) support for iPhone / Android import.
 # Only pulled in on Windows because MTP on macOS/Linux uses entirely
 # different APIs (libmtp / libimobiledevice) and we don't currently ship
 # there anyway.
-# v1.5.64 — Faz 2.3 Windows Hello biometric unlock.
+# v1.5.64 â€” Faz 2.3 Windows Hello biometric unlock.
 #   Security_Credentials_UI: UserConsentVerifier (the official Windows
-#   Hello gate — fingerprint, face, PIN — surfaced through WinRT).
+#   Hello gate â€” fingerprint, face, PIN â€” surfaced through WinRT).
 #   Win32_Security_Cryptography: CryptProtectData/CryptUnprotectData
 #   (DPAPI). Wraps the KEK with a key bound to the current Windows
 #   user account, so the bio_blob is useless on another machine or
