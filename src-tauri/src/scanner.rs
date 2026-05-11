@@ -417,6 +417,36 @@ fn scan_folder_parallel(
                         if let Some(tp) = &p.thumb_path {
                             db::update_thumbnail_path(&txn, id, tp).ok();
                         }
+                        // v1.5.104 — pick up XMP sidecar tags on first
+                        // scan. Mac side (and any external tool like
+                        // Lightroom / DigiKam) writes a `.xmp` next to
+                        // the photo; reading it here means
+                        // cross-machine tag flow finally works without
+                        // a separate sync pipeline. v1.5.106: use a
+                        // direct INSERT — db::insert_tags would open a
+                        // nested transaction which SQLite silently
+                        // fails. Failures are still soft; a malformed
+                        // sidecar shouldn't abort the scan tx.
+                        if let Ok(Some(xmp)) = crate::xmp::read_xmp_sidecar(&p.path) {
+                            if !xmp.keywords.is_empty() {
+                                if let Ok(mut stmt) = txn.prepare_cached(
+                                    "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)"
+                                ) {
+                                    for tag in &xmp.keywords {
+                                        let _ = stmt.execute(rusqlite::params![id, tag, 1.0_f64, "xmp_sidecar"]);
+                                    }
+                                }
+                            }
+                            if let Some(desc) = xmp.description.as_deref() {
+                                let _ = db::update_photo_description(&txn, id, desc);
+                            }
+                            if let Some(r) = xmp.rating {
+                                let _ = db::set_rating(&txn, id, r);
+                            }
+                            if xmp.label.as_deref() == Some("Red") {
+                                let _ = db::set_favorite(&txn, id, true);
+                            }
+                        }
                         writer_new_count.fetch_add(1, Ordering::Relaxed);
                     }
                 }

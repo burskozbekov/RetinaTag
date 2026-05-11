@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.103"
+version = "1.5.106"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -57,6 +57,12 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 dirs = "5"
 tauri-plugin-drag = "2.1"
 tauri-plugin-notification = "2"
+
+# v1.5.104 — XMP sidecar reading. Mac side writes .xmp files alongside
+# photos on the shared volume; Windows scan never imported them so
+# cross-machine tags never appeared. quick-xml is the minimal,
+# pull-parser-based XML lib (no DOM allocation, ~1.5 MB compiled).
+quick-xml = "0.36"
 
 # v1.5.63 — Vault Faz 2 hardening.
 # bip39: 24-word recovery mnemonic so a forgotten PIN doesn't mean total

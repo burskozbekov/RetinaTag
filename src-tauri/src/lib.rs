@@ -408,6 +408,127 @@ pub fn run() {
                 });
             }
 
+            // v1.5.106 — startup XMP sidecar backfill. Triggered from
+            // Rust (not JS) so it doesn't depend on a WebView ready
+            // state, an unmounted listener, or a syntax issue further
+            // down dist/index.html eating the setTimeout. Sleeps 8s so
+            // the initial UI render + DB warm-up isn't competing for
+            // the lock, then sweeps the library once. Writes a
+            // single-line log to xmp_import.log next to retina.db so
+            // we can verify it ran from outside the WebView.
+            let db_for_xmp = app.state::<AppState>().db.clone();
+            let log_dir = app_data_dir.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(8));
+                let started = chrono::Utc::now();
+                let log_path = log_dir.join("xmp_import.log");
+                let mut log = String::new();
+                use std::fmt::Write as _;
+                let _ = writeln!(log, "[{}] xmp backfill: starting", started.to_rfc3339());
+
+                // Pull (id, path) for every photo.
+                let photos: Vec<(i64, String)> = match db_for_xmp.lock() {
+                    Ok(conn) => match conn.prepare("SELECT id, path FROM photos") {
+                        Ok(mut s) => s.query_map([], |r| {
+                            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                        })
+                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                        .unwrap_or_default(),
+                        Err(_) => Vec::new(),
+                    },
+                    Err(_) => Vec::new(),
+                };
+                let _ = writeln!(log, "  loaded {} photo rows", photos.len());
+
+                let mut scanned = 0usize;
+                let mut with_sidecar = 0usize;
+                let mut new_tags = 0usize;
+                let mut new_descriptions = 0usize;
+                let mut new_ratings = 0usize;
+                let mut new_favorites = 0usize;
+                const BATCH: usize = 500;
+                let mut pending: Vec<(i64, crate::xmp::XmpRead)> = Vec::with_capacity(BATCH);
+                let mut flush = |pending: &mut Vec<(i64, crate::xmp::XmpRead)>,
+                                 stats: (&mut usize, &mut usize, &mut usize, &mut usize)|
+                 -> Result<(), String> {
+                    if pending.is_empty() { return Ok(()); }
+                    let conn = db_for_xmp.lock().map_err(|_| "lock".to_string())?;
+                    let txn = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+                    // Direct INSERT OR IGNORE rather than db::insert_tags()
+                    // because the latter opens its own inner transaction
+                    // (SQLite doesn't support nested tx → silent fail).
+                    // We give up the case-insensitive dedup of insert_tags
+                    // for now — sidecars from one source rarely have case
+                    // collisions, and the UNIQUE(photo_id, tag) constraint
+                    // still prevents byte-exact dupes.
+                    let mut insert_tag = match txn.prepare_cached(
+                        "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)"
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => return Err(format!("prepare insert: {}", e)),
+                    };
+                    for (id, xmp) in pending.drain(..) {
+                        if !xmp.keywords.is_empty() {
+                            for tag in &xmp.keywords {
+                                if insert_tag
+                                    .execute(rusqlite::params![id, tag, 1.0_f64, "xmp_sidecar"])
+                                    .map(|n| n > 0)
+                                    .unwrap_or(false)
+                                {
+                                    *stats.0 += 1;
+                                }
+                            }
+                        }
+                        if let Some(d) = xmp.description.as_deref() {
+                            if !d.trim().is_empty() {
+                                if db::update_photo_description(&txn, id, d).is_ok() {
+                                    *stats.1 += 1;
+                                }
+                            }
+                        }
+                        if let Some(r) = xmp.rating {
+                            if (-1..=5).contains(&r) {
+                                if db::set_rating(&txn, id, r).is_ok() {
+                                    *stats.2 += 1;
+                                }
+                            }
+                        }
+                        if xmp.label.as_deref() == Some("Red") {
+                            if db::set_favorite(&txn, id, true).is_ok() {
+                                *stats.3 += 1;
+                            }
+                        }
+                    }
+                    drop(insert_tag);
+                    txn.commit().map_err(|e| e.to_string())?;
+                    Ok(())
+                };
+
+                for (id, path) in &photos {
+                    scanned += 1;
+                    if let Ok(Some(xmp)) = crate::xmp::read_xmp_sidecar(path) {
+                        if !xmp.keywords.is_empty() || xmp.description.is_some()
+                            || xmp.rating.is_some() || xmp.label.is_some() {
+                            with_sidecar += 1;
+                            pending.push((*id, xmp));
+                        }
+                    }
+                    if pending.len() >= BATCH {
+                        if let Err(e) = flush(&mut pending, (&mut new_tags, &mut new_descriptions, &mut new_ratings, &mut new_favorites)) {
+                            let _ = writeln!(log, "  flush err at scanned={}: {}", scanned, e);
+                        }
+                    }
+                }
+                if let Err(e) = flush(&mut pending, (&mut new_tags, &mut new_descriptions, &mut new_ratings, &mut new_favorites)) {
+                    let _ = writeln!(log, "  final flush err: {}", e);
+                }
+                let _ = writeln!(log,
+                    "  result: scanned={} with_sidecar={} new_tags={} new_desc={} new_rating={} new_fav={}",
+                    scanned, with_sidecar, new_tags, new_descriptions, new_ratings, new_favorites);
+                let _ = writeln!(log, "  duration: {:?}", chrono::Utc::now() - started);
+                let _ = std::fs::write(&log_path, log);
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -448,6 +569,8 @@ pub fn run() {
             commands::write_xmp_for_photo,
             commands::write_xmp_all,
             commands::delete_all_xmp_sidecars,
+            // v1.5.104 — read .xmp sidecars (Mac side writes, Windows reads)
+            commands::import_xmp_sidecars,
             // 2. Export
             commands::export_data,
             // 3. Drag & drop

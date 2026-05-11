@@ -364,3 +364,293 @@ fn xml(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
+
+// ─── XMP SIDECAR READING (v1.5.104) ──────────────────────────────────────
+//
+// Mac side writes .xmp sidecars next to each photo on the shared volume;
+// Windows scan has historically been a one-way producer (xmp.rs writes,
+// never reads) so cross-machine tags never made it back. This reader
+// fills that gap: parse the sidecar XML, pull keywords + description,
+// and let the caller merge them into the local DB.
+//
+// Format expected: the Lightroom/IPTC convention RetinaTag itself emits —
+// keywords under `dc:subject`, with `lr:hierarchicalSubject` and
+// `Iptc4xmpCore:Keywords` mirroring the same list. We dedupe across
+// those three so Bridge/DigiKam/Capture One sidecars (which may favour
+// one over the others) also parse cleanly.
+//
+// Sidecar path convention: `<stem>.xmp` (Lightroom style — drop the
+// original extension). Both `IMG_0001.jpg` and `5205.MP4` map to
+// `IMG_0001.xmp` and `5205.xmp` respectively. We also accept the
+// DigiKam `<full-name>.xmp` form (`IMG_0001.jpg.xmp`) as a fallback.
+
+#[derive(Debug, Default, Clone)]
+pub struct XmpRead {
+    pub keywords: Vec<String>,
+    pub description: Option<String>,
+    pub rating: Option<i32>,
+    pub label: Option<String>,
+}
+
+/// Locate the sidecar for a given photo path, accepting both common
+/// naming conventions. Returns the first existing one.
+pub fn sidecar_path_for(photo_path: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(photo_path);
+    let parent = p.parent()?;
+    let stem = p.file_stem()?.to_string_lossy();
+    let lightroom = parent.join(format!("{}.xmp", stem));
+    if lightroom.is_file() {
+        return Some(lightroom);
+    }
+    let digikam = parent.join(format!("{}.xmp", p.file_name()?.to_string_lossy()));
+    if digikam.is_file() {
+        return Some(digikam);
+    }
+    None
+}
+
+/// Read an XMP sidecar by photo path. Returns Ok(None) if no sidecar
+/// exists (the common case for un-tagged photos), Ok(Some(...)) with
+/// extracted data otherwise. Errors only on actual parse failures.
+pub fn read_xmp_sidecar(photo_path: &str) -> Result<Option<XmpRead>> {
+    let Some(path) = sidecar_path_for(photo_path) else {
+        return Ok(None);
+    };
+    let xml = std::fs::read_to_string(&path)
+        .with_context(|| format!("read XMP sidecar {}", path.display()))?;
+    parse_xmp_xml(&xml).map(Some)
+}
+
+/// Parse an XMP XML string (sidecar or embedded). Public so callers
+/// that hand us a string they already extracted from a JPEG APP1
+/// segment can reuse the same parser.
+pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    // State machine. We don't build a full DOM — just track which
+    // "list of items" container we're currently inside. The three
+    // keyword bags (dc:subject, lr:hierarchicalSubject,
+    // Iptc4xmpCore:Keywords) all use `<rdf:Bag><rdf:li>…</rdf:li></rdf:Bag>`,
+    // and description uses `<rdf:Alt><rdf:li xml:lang="x-default">…</rdf:li></rdf:Alt>`.
+    #[derive(PartialEq)]
+    enum Section { None, Keywords, Description }
+    let mut section = Section::None;
+    let mut depth_in_section = 0i32;
+    let mut current_li = String::new();
+    let mut in_li = false;
+
+    let mut out = XmpRead::default();
+    // Use a set to dedupe across the three keyword bags.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name_bytes = e.name();
+                let name = name_bytes.as_ref();
+                // Section entry — check by local name suffix so
+                // namespace prefix variants (xmlns:dc vs raw `dc:`)
+                // both work.
+                if section == Section::None {
+                    if ends_with(name, b"subject")
+                        || ends_with(name, b"hierarchicalSubject")
+                        || ends_with(name, b"Keywords") {
+                        section = Section::Keywords;
+                        depth_in_section = 1;
+                    } else if ends_with(name, b"description") {
+                        section = Section::Description;
+                        depth_in_section = 1;
+                    }
+                } else {
+                    depth_in_section += 1;
+                }
+                // Inside a section, only `rdf:li` is meaningful.
+                if section != Section::None && ends_with(name, b"li") {
+                    in_li = true;
+                    current_li.clear();
+                }
+                // Pull rating / label off the Description element's
+                // attributes — RetinaTag itself emits these as child
+                // elements, but Lightroom likes them as attributes.
+                if ends_with(name, b"Description") {
+                    for attr in e.attributes().flatten() {
+                        let key = attr.key.as_ref();
+                        if ends_with(key, b"Rating") {
+                            if let Ok(v) = attr.unescape_value() {
+                                if let Ok(n) = v.parse::<i32>() {
+                                    out.rating.get_or_insert(n);
+                                }
+                            }
+                        } else if ends_with(key, b"Label") {
+                            if let Ok(v) = attr.unescape_value() {
+                                out.label.get_or_insert(v.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                if section != Section::None && ends_with(name.as_ref(), b"li") {
+                    let val = current_li.trim().to_string();
+                    if !val.is_empty() {
+                        match section {
+                            Section::Keywords => {
+                                let key = val.to_lowercase();
+                                if seen.insert(key) {
+                                    out.keywords.push(val);
+                                }
+                            }
+                            Section::Description => {
+                                // Prefer x-default; otherwise take first non-empty.
+                                if out.description.is_none() {
+                                    out.description = Some(val);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    in_li = false;
+                    current_li.clear();
+                }
+                if section != Section::None {
+                    depth_in_section -= 1;
+                    if depth_in_section <= 0 {
+                        section = Section::None;
+                        depth_in_section = 0;
+                    }
+                }
+            }
+            Ok(Event::Text(t)) if in_li => {
+                let s = t.unescape().unwrap_or_default();
+                current_li.push_str(&s);
+            }
+            // Also pick up rating / label / RetinaTag-written element
+            // form: <xmp:Rating>4</xmp:Rating>, <xmp:Label>Red</xmp:Label>.
+            Ok(Event::Start(_)) => {}
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(anyhow::anyhow!("XMP parse: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Second pass for the element-form rating/label (the first pass
+    // only catches the attribute form). Cheap because the doc is small.
+    if out.rating.is_none() || out.label.is_none() {
+        let mut reader2 = Reader::from_str(xml);
+        reader2.config_mut().trim_text(true);
+        let mut current_tag: Option<Vec<u8>> = None;
+        let mut buf2 = Vec::new();
+        loop {
+            match reader2.read_event_into(&mut buf2) {
+                Ok(Event::Start(e)) => {
+                    let name = e.name().as_ref().to_vec();
+                    if ends_with(&name, b"Rating") || ends_with(&name, b"Label") {
+                        current_tag = Some(name);
+                    } else {
+                        current_tag = None;
+                    }
+                }
+                Ok(Event::Text(t)) => {
+                    if let Some(tag) = &current_tag {
+                        let s = t.unescape().unwrap_or_default().trim().to_string();
+                        if ends_with(tag, b"Rating") && out.rating.is_none() {
+                            if let Ok(n) = s.parse::<i32>() {
+                                out.rating = Some(n);
+                            }
+                        } else if ends_with(tag, b"Label") && out.label.is_none() {
+                            if !s.is_empty() {
+                                out.label = Some(s);
+                            }
+                        }
+                    }
+                }
+                Ok(Event::End(_)) => current_tag = None,
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+            buf2.clear();
+        }
+    }
+
+    Ok(out)
+}
+
+fn ends_with(name: &[u8], suffix: &[u8]) -> bool {
+    if name.len() < suffix.len() {
+        return false;
+    }
+    // Match either the bare local name or `prefix:localname`.
+    if &name[name.len() - suffix.len()..] != suffix {
+        return false;
+    }
+    if name.len() == suffix.len() {
+        return true;
+    }
+    // Char before the suffix must be ':' for a prefix:local match.
+    name[name.len() - suffix.len() - 1] == b':'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_real_user_sidecar() {
+        // Tries an actual file from the user's library. If it doesn't
+        // exist (e.g. on CI), skip gracefully.
+        let photo = r"D:\Fotograflar\2024-10-09\5205.MP4";
+        match read_xmp_sidecar(photo) {
+            Ok(Some(r)) => {
+                println!("Found sidecar: keywords={}, desc={:?}, rating={:?}, label={:?}",
+                    r.keywords.len(), r.description.as_deref().map(|s| &s[..s.len().min(60)]),
+                    r.rating, r.label);
+                assert!(!r.keywords.is_empty(), "Expected keywords in real sidecar");
+            }
+            Ok(None) => {
+                println!("No sidecar at {} (skipping)", photo);
+            }
+            Err(e) => panic!("Sidecar parse error: {}", e),
+        }
+    }
+
+    #[test]
+    fn parses_retinatag_written_sidecar() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="RetinaTag 1.0">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="5205.MP4"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/">
+      <dc:subject>
+        <rdf:Bag>
+          <rdf:li>guitar</rdf:li>
+          <rdf:li>family</rdf:li>
+          <rdf:li>kitchen</rdf:li>
+        </rdf:Bag>
+      </dc:subject>
+      <dc:description>
+        <rdf:Alt>
+          <rdf:li xml:lang="x-default">A man and a woman play guitar.</rdf:li>
+        </rdf:Alt>
+      </dc:description>
+      <xmp:Rating>4</xmp:Rating>
+      <xmp:Label>Red</xmp:Label>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let r = parse_xmp_xml(xml).unwrap();
+        assert_eq!(r.keywords, vec!["guitar", "family", "kitchen"]);
+        assert_eq!(r.description.as_deref(), Some("A man and a woman play guitar."));
+        assert_eq!(r.rating, Some(4));
+        assert_eq!(r.label.as_deref(), Some("Red"));
+    }
+}

@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use tauri::{Emitter, Manager};
@@ -11188,4 +11189,177 @@ pub async fn get_trending_tags(
     }
 
     Ok(out)
+}
+
+// ─── XMP backfill (v1.5.104) ────────────────────────────────────────────
+//
+// Backfill tags/description/rating/favorite from existing `.xmp`
+// sidecars for every photo already in the library. Use case: the user
+// has tagged photos on the Mac side over a shared volume; their
+// Windows library has the photo rows but no tags because pre-v1.5.104
+// scans never read sidecars. This command sweeps the whole library
+// once.
+//
+// Emits `xmp-import-progress` events with `{ total, done, imported,
+// updated_tags }` so the UI can show a progress bar. Skipped photos
+// (no sidecar / no new info) don't count toward `imported`.
+
+#[derive(serde::Serialize, Clone)]
+pub struct XmpImportProgress {
+    pub total: usize,
+    pub done: usize,
+    pub imported: usize,
+    pub updated_tags: usize,
+    pub finished: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct XmpImportResult {
+    pub scanned: usize,
+    pub with_sidecar: usize,
+    pub new_tags: usize,
+    pub new_descriptions: usize,
+    pub new_ratings: usize,
+    pub new_favorites: usize,
+}
+
+#[tauri::command]
+pub async fn import_xmp_sidecars(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<XmpImportResult, String> {
+    use tauri::Emitter;
+    let db = state.db.clone();
+    let ah = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Pull all photo paths up front so we can release the lock between
+        // sidecar reads (they're disk I/O, no DB needed).
+        let photos: Vec<(i64, String)> = {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            let mut s = conn
+                .prepare("SELECT id, path FROM photos")
+                .map_err(|e| e.to_string())?;
+            let rows = s
+                .query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let total = photos.len();
+        let mut result = XmpImportResult {
+            scanned: 0,
+            with_sidecar: 0,
+            new_tags: 0,
+            new_descriptions: 0,
+            new_ratings: 0,
+            new_favorites: 0,
+        };
+
+        // Batch DB writes — open a fresh transaction every 500 rows so a
+        // long sweep doesn't hold the lock continuously.
+        const BATCH: usize = 500;
+        let mut pending: Vec<(i64, crate::xmp::XmpRead)> = Vec::with_capacity(BATCH);
+
+        let flush = |db: &Arc<Mutex<rusqlite::Connection>>,
+                     pending: &mut Vec<(i64, crate::xmp::XmpRead)>,
+                     result: &mut XmpImportResult|
+         -> Result<(), String> {
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            let txn = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            // v1.5.106 — direct INSERT (db::insert_tags opens a nested
+            // tx which SQLite silently fails inside an outer txn).
+            let mut tag_stmt = txn
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| e.to_string())?;
+            for (id, xmp) in pending.drain(..) {
+                if !xmp.keywords.is_empty() {
+                    for tag in &xmp.keywords {
+                        if tag_stmt
+                            .execute(rusqlite::params![id, tag, 1.0_f64, "xmp_sidecar"])
+                            .map(|n| n > 0)
+                            .unwrap_or(false)
+                        {
+                            result.new_tags += 1;
+                        }
+                    }
+                }
+                if let Some(desc) = xmp.description.as_deref() {
+                    if !desc.trim().is_empty() {
+                        if db::update_photo_description(&txn, id, desc).is_ok() {
+                            result.new_descriptions += 1;
+                        }
+                    }
+                }
+                if let Some(r) = xmp.rating {
+                    if (-1..=5).contains(&r) {
+                        if db::set_rating(&txn, id, r).is_ok() {
+                            result.new_ratings += 1;
+                        }
+                    }
+                }
+                if xmp.label.as_deref() == Some("Red") {
+                    if db::set_favorite(&txn, id, true).is_ok() {
+                        result.new_favorites += 1;
+                    }
+                }
+            }
+            drop(tag_stmt);
+            txn.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        };
+
+        for (id, path) in photos.iter() {
+            result.scanned += 1;
+            if let Ok(Some(xmp)) = crate::xmp::read_xmp_sidecar(path) {
+                if !xmp.keywords.is_empty()
+                    || xmp.description.is_some()
+                    || xmp.rating.is_some()
+                    || xmp.label.is_some()
+                {
+                    result.with_sidecar += 1;
+                    pending.push((*id, xmp));
+                }
+            }
+            if pending.len() >= BATCH {
+                flush(&db, &mut pending, &mut result)?;
+            }
+            if result.scanned % 200 == 0 {
+                ah.emit(
+                    "xmp-import-progress",
+                    XmpImportProgress {
+                        total,
+                        done: result.scanned,
+                        imported: result.with_sidecar,
+                        updated_tags: result.new_tags,
+                        finished: false,
+                    },
+                )
+                .ok();
+            }
+        }
+        flush(&db, &mut pending, &mut result)?;
+
+        ah.emit(
+            "xmp-import-progress",
+            XmpImportProgress {
+                total,
+                done: result.scanned,
+                imported: result.with_sidecar,
+                updated_tags: result.new_tags,
+                finished: true,
+            },
+        )
+        .ok();
+
+        Ok::<_, String>(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

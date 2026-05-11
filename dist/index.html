@@ -2384,6 +2384,12 @@ select.tb-select:focus{border-color:var(--red-dark)}
       </label>
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
         <button class="btn btn-secondary btn-block" onclick="doXmpAll()">Write metadata to all tagged photos</button>
+        <!-- v1.5.104 — Reverse direction: pull tags from existing .xmp
+             sidecars into the local DB. Use case: Mac side has been
+             tagging the shared volume, Windows has the photo rows but
+             no tags. One click sweeps the whole library. -->
+        <button class="btn btn-secondary btn-block" onclick="doImportXmp()" style="margin-top:8px">⬇ Import tags from .xmp sidecars</button>
+        <div id="xmpImportStatus" class="form-hint" style="font-size:10.5px;color:var(--text3);margin-top:6px;display:none"></div>
         <!-- v1.5.59 — Three storage modes (radio). Default = sidecar (safest,
              non-destructive). For users who hate clutter and want tags to
              travel with files: choose "embed only" → no .xmp clutter, tags
@@ -2443,6 +2449,11 @@ select.tb-select:focus{border-color:var(--red-dark)}
 const{invoke}=window.__TAURI__.core;
 const{listen}=window.__TAURI__.event;
 const convertFileSrc = window.__TAURI__.core.convertFileSrc;
+
+// v1.5.106 — JS auto-trigger removed; XMP backfill now runs from
+// Rust at startup so it doesn't depend on the WebView. UI still has
+// the "Import tags from .xmp sidecars" button in Settings for manual
+// re-runs.
 
 
 
@@ -8675,6 +8686,39 @@ async function doXmpAll(){
     const count=await invoke('write_xmp_all');
     toast(`XMP sidecars written for ${count} photos`,'success');
   }catch(e){toast('XMP failed: '+e,'error')}
+}
+
+// v1.5.104 — Pull tags from existing .xmp sidecars into the DB.
+// Mac side (or any external tool — Lightroom, DigiKam, Bridge) writes
+// sidecars on the shared volume; this command reads them and merges the
+// keywords / description / rating / favorite back into the local
+// library. Progress events stream as it works.
+async function doImportXmp(){
+  const status = document.getElementById('xmpImportStatus');
+  if (status) { status.style.display = 'block'; status.textContent = 'Starting…'; }
+  toast('Importing tags from .xmp sidecars…', 'info');
+  const unlisten = await window.__TAURI__.event.listen('xmp-import-progress', (ev) => {
+    const p = ev.payload || {};
+    if (status) {
+      status.textContent = p.finished
+        ? `Done — ${p.imported} of ${p.total} had sidecars, ${p.updated_tags} tags added`
+        : `${p.done}/${p.total} scanned · ${p.imported} sidecars found · ${p.updated_tags} tags`;
+    }
+  });
+  try {
+    const r = await invoke('import_xmp_sidecars');
+    toast(
+      `Imported ${r.with_sidecar} sidecar(s): +${r.new_tags} tag rows, +${r.new_descriptions} descriptions, +${r.new_ratings} ratings, +${r.new_favorites} favorites`,
+      'success'
+    );
+    // Reload the gallery so newly-tagged photos surface in tag-filter views.
+    if (typeof loadPhotos === 'function') loadPhotos();
+    if (typeof refreshStats === 'function') refreshStats();
+  } catch (e) {
+    toast('XMP import failed: ' + e, 'error');
+  } finally {
+    try { unlisten(); } catch(_) {}
+  }
 }
 
 // v1.5.56 — Auto-write XMP toggle: read & write the setting via Tauri.

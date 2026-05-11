@@ -4065,6 +4065,15 @@ checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
 version = "0.37.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
@@ -4517,7 +4526,7 @@ dependencies = [
 
 [[package]]
 name = "retina-tag"
-version = "1.5.103"
+version = "1.5.106"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4536,6 +4545,7 @@ dependencies = [
  "notify",
  "opener",
  "ort",
+ "quick-xml 0.36.2",
  "rand 0.8.5",
  "rayon",
  "reqwest 0.12.28",
