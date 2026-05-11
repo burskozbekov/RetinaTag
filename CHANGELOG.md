@@ -2,6 +2,18 @@
 
 All notable changes to RetinaTag (Windows side). Newest at the top.
 
+## v1.5.89 — 2026-05-11
+**P0 Settings freeze fix** — `Settings`'e basıldığında program kilitleniyordu.
+v1.5.72'de `get_photos` / `get_stats` / `get_folders` için yapılmış olan
+`spawn_blocking` sarmalı `get_settings`, `get_provider_statuses`,
+`get_watch_folders`, `get_budget_status`, `sync_get_state`,
+`sync_set_device_name`, `sync_list_peers` komutlarına uygulanmamıştı —
+`std::sync::Mutex::lock` async runtime worker thread'i park ediyor, Tauri
+IPC dispatcher'ı bloke oluyor, Settings modal'ı açılmıyordu (kullanıcı
+gözünden "freeze"). LAN sync etkinleştirilince mDNS broadcaster ve HTTP
+server'ın DB lock'una ek talebi durumu kötüleştiriyordu. Hepsi
+`tauri::async_runtime::spawn_blocking` ile sarıldı.
+
 ## v1.5.88 — 2026-05-11
 Settings → About now has direct links to the project repo, the LAN sync
 wire-protocol doc, and the GitHub issue tracker.

@@ -1956,8 +1956,19 @@ pub async fn check_ffmpeg() -> Result<bool, String> {
 pub async fn get_settings(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, String)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_all_settings(&conn).map_err(|e| e.to_string())
+    // v1.5.89 — wrap in spawn_blocking so a contended std::sync::Mutex
+    // on state.db doesn't park the async runtime worker thread the
+    // Tauri IPC dispatcher is using. Without this, when Settings opens
+    // and `get_settings` lands on the same worker that's also handling
+    // sync/watcher/db work, the modal can stall for seconds — looks
+    // like a "Settings click freezes the program" regression.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_all_settings(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1992,16 +2003,22 @@ pub async fn set_estimated_location(
 pub async fn get_provider_statuses(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ProviderStatus>, String> {
-    let (settings_list, usage_stats) = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
+    // v1.5.89 — heavy DB read (settings + per-provider stats) off the
+    // async runtime worker so Settings open doesn't block the IPC
+    // dispatch thread.
+    let db = state.db.clone();
+    let (settings_list, usage_stats) = tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
         let settings = db::get_all_settings(&conn).unwrap_or_default();
         let mut usage = std::collections::HashMap::new();
         for provider in AiProvider::all() {
             let stats = db::get_provider_stats(&conn, provider.key_name()).unwrap_or((0, 0, 0.0));
             usage.insert(provider.key_name(), stats);
         }
-        (settings, usage)
-    };
+        Ok::<_, String>((settings, usage))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     let settings: std::collections::HashMap<String, String> =
         settings_list.into_iter().collect();
@@ -2795,8 +2812,15 @@ pub async fn remove_watch_folder(
 pub async fn get_watch_folders(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<WatchFolder>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_watch_folders(&conn).map_err(|e| e.to_string())
+    // v1.5.89 — same fix as get_settings: don't lock std::sync::Mutex
+    // on the async worker thread; offload to a blocking task.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_watch_folders(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -4445,19 +4469,25 @@ pub async fn get_cleanup_blurry(
 pub async fn get_budget_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<BudgetStatus, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let limit: f64 = db::get_setting(&conn, "monthly_budget_usd")
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.0);
-    let spent = db::get_monthly_spend(&conn).map_err(|e| e.to_string())?;
-    Ok(BudgetStatus {
-        monthly_limit_usd: limit,
-        spent_this_month: spent,
-        remaining: (limit - spent).max(0.0),
-        is_over: limit > 0.0 && spent >= limit,
+    // v1.5.89 — offload monthly-spend aggregation off the async worker.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let limit: f64 = db::get_setting(&conn, "monthly_budget_usd")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let spent = db::get_monthly_spend(&conn).map_err(|e| e.to_string())?;
+        Ok::<_, String>(BudgetStatus {
+            monthly_limit_usd: limit,
+            spent_this_month: spent,
+            remaining: (limit - spent).max(0.0),
+            is_over: limit > 0.0 && spent >= limit,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 12. Natural Language Search ─────────────────────────────────────────────
@@ -11219,11 +11249,10 @@ pub struct SyncState {
 pub async fn sync_get_state(
     state: tauri::State<'_, AppState>,
 ) -> Result<SyncState, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let (identity, _sk) = crate::sync::load_or_create_identity(&conn, &default_device_name())
-        .map_err(|e| e.to_string())?;
-    let enabled_flag = crate::sync::identity_enabled(&conn);
-    drop(conn);
+    // v1.5.89 — DB read off the async worker. sync_service lock is
+    // short (just reads two in-memory fields) and stays on the worker;
+    // the identity load + identity_enabled query that actually hits
+    // SQLite goes through spawn_blocking instead.
     let (port, pair_code) = {
         let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
         match svc.as_ref() {
@@ -11231,6 +11260,17 @@ pub async fn sync_get_state(
             None => (None, None),
         }
     };
+    let db = state.db.clone();
+    let device_name = default_device_name();
+    let (identity, enabled_flag) = tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let (id, _sk) = crate::sync::load_or_create_identity(&conn, &device_name)
+            .map_err(|e| e.to_string())?;
+        let enabled = crate::sync::identity_enabled(&conn);
+        Ok::<_, String>((id, enabled))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     // v1.5.82 — auto-detect non-loopback IPv4 addresses so the UI can
     // surface "192.168.1.42:43210" without the user hunting in ipconfig.
     // Only collected when sync is on; off-state returns an empty list
@@ -11264,13 +11304,18 @@ pub async fn sync_set_device_name(
     name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let trimmed = name.trim();
+    let trimmed = name.trim().to_string();
     if trimmed.is_empty() {
         return Err("device name cannot be empty".into());
     }
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    crate::sync::set_identity_name(&conn, trimmed).map_err(|e| e.to_string())?;
-    Ok(())
+    // v1.5.89 — DB write off the async worker.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        crate::sync::set_identity_name(&conn, &trimmed).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -11318,8 +11363,15 @@ pub async fn sync_disable(state: tauri::State<'_, AppState>) -> Result<(), Strin
 pub async fn sync_list_peers(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<crate::sync::PairedPeer>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    crate::sync::list_peers(&conn).map_err(|e| e.to_string())
+    // v1.5.89 — DB read off the async worker so polling this for the
+    // Network Sync UI doesn't compete with whatever else holds db.lock.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        crate::sync::list_peers(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
