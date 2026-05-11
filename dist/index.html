@@ -2256,6 +2256,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
               <div style="flex:1">
                 <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px">Pair code (refreshes every 5 min)</div>
                 <div id="syncMyCode" title="Click to copy" style="font-family:var(--mono,monospace);font-size:18px;letter-spacing:3px;color:var(--cream);padding:4px 8px;background:var(--card2);border-radius:6px;text-align:center;font-weight:700;cursor:pointer">—</div>
+                <div id="syncMyCodeExpire" style="font-size:10px;color:var(--text3);text-align:center;margin-top:3px;font-family:var(--mono,monospace);min-height:13px">&nbsp;</div>
               </div>
             </div>
             <button class="btn btn-xs btn-secondary" id="btnSyncMintCode">New code</button>
@@ -9325,6 +9326,45 @@ async function _syncRefreshPeers() {
   }
 }
 
+// v1.5.85 — Pair-code TTL countdown. Backend mints with a 5-minute
+// expiry (sync.rs PAIR_CODE_TTL); the UI used to silently let the
+// user copy a code that no longer worked. Now a "Expires in 4:23"
+// line ticks down once a second beneath the code, turns red when
+// expired, and clears when Settings closes.
+let _syncPairCodeExpireAt = null;
+let _syncPairCodeTimer = null;
+function _syncStopPairCodeCountdown() {
+  if (_syncPairCodeTimer) {
+    clearInterval(_syncPairCodeTimer);
+    _syncPairCodeTimer = null;
+  }
+  _syncPairCodeExpireAt = null;
+}
+function _syncStartPairCodeCountdown() {
+  _syncStopPairCodeCountdown();
+  _syncPairCodeExpireAt = Date.now() + 5 * 60 * 1000;
+  const tick = () => {
+    const el = document.getElementById('syncMyCodeExpire');
+    if (!el || _syncPairCodeExpireAt == null) {
+      _syncStopPairCodeCountdown();
+      return;
+    }
+    const left = _syncPairCodeExpireAt - Date.now();
+    if (left <= 0) {
+      el.textContent = 'Expired — click "New code"';
+      el.style.color = 'var(--red-light, #f87171)';
+      _syncStopPairCodeCountdown();
+      return;
+    }
+    const min = Math.floor(left / 60000);
+    const sec = Math.floor((left % 60000) / 1000);
+    el.textContent = 'Expires in ' + min + ':' + String(sec).padStart(2, '0');
+    el.style.color = 'var(--text3)';
+  };
+  tick();
+  _syncPairCodeTimer = setInterval(tick, 1000);
+}
+
 // v1.5.83 — Auto-refresh polling for the "Nearby on Wi-Fi" list. mDNS
 // peers appear/disappear as the user toggles sync on other devices;
 // users shouldn't have to mash the ↻ button to see them. Polls every
@@ -9443,6 +9483,9 @@ async function _syncRefreshNearby() {
       const code = await invoke('sync_mint_pair_code');
       const el = document.getElementById('syncMyCode');
       if (el) el.textContent = code;
+      // v1.5.85 — start the 5-minute TTL countdown so the user sees
+      // when this code stops being honoured by /pair.
+      _syncStartPairCodeCountdown();
     } catch (e) { toast('Could not mint code: ' + e, 'error'); }
   };
   const pairBtn = document.getElementById('btnSyncPair');
@@ -9763,13 +9806,18 @@ $('btnSettings').onclick=openSettings;
 // v1.5.83 — stop the Network Sync nearby-poll timer when Settings
 // closes so the interval doesn't survive past the modal and burn
 // CPU under the radar.
+// v1.5.85 — also stop the pair-code countdown timer for the same
+// reason; minted codes carry on the server side but the UI
+// shouldn't tick down off-screen.
 $('btnCloseSettings').onclick=()=>{
   $('settingsModal').classList.remove('open');
   try { _syncStopNearbyAutoRefresh(); } catch(_) {}
+  try { _syncStopPairCodeCountdown(); } catch(_) {}
 };
 $('btnSettingsCancel').onclick=()=>{
   $('settingsModal').classList.remove('open');
   try { _syncStopNearbyAutoRefresh(); } catch(_) {}
+  try { _syncStopPairCodeCountdown(); } catch(_) {}
 };
 $('btnRegenThumbs').onclick=async()=>{
   if(!confirm('This will delete all cached thumbnails and regenerate them with correct orientation. Continue?'))return;
