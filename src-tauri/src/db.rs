@@ -1441,21 +1441,32 @@ pub fn search_photos_by_person(conn: &Connection, query: &str) -> Result<Vec<Pho
     // v1.5.63 — Faz 1: vault filter. Private photos must not surface in
     // person search either, otherwise searching the user's own name would
     // include vaulted photos.
+    //
+    // v1.5.108 — Two-source person match. Mac side writes person names
+    // BOTH as keywords (dc:subject — picked up by xmp_sidecar reader as
+    // rows in the `tags` table) AND as MWG regions (which Windows now
+    // imports into `face_regions`). Until the MWG import lands the only
+    // breadcrumb of a Mac-named person on Windows is the tag row, so we
+    // UNION across both sources here. The tag match uses an exact (not
+    // substring) compare on the full name so a regular keyword tagged
+    // "ali" doesn't accidentally surface under person:"Ali Can Bombadil".
     let mut stmt = conn.prepare(
         "SELECT DISTINCT p.id, p.path, p.filename, p.status, p.provider_used,
                 (SELECT COUNT(*) FROM tags WHERE photo_id = p.id) AS tag_count,
                 COALESCE((SELECT GROUP_CONCAT(tag, '|||') FROM (SELECT tag FROM tags WHERE photo_id = p.id LIMIT 10)), '') AS tag_list,
                 p.media_type, p.date_taken, p.duration_secs, p.rating, p.favorite
          FROM photos p
-         JOIN face_regions fr ON fr.photo_id = p.id
-         JOIN persons pe ON pe.id = fr.person_id
-         WHERE pe.name LIKE ?1 COLLATE NOCASE AND p.private = 0
+         LEFT JOIN face_regions fr ON fr.photo_id = p.id
+         LEFT JOIN persons pe ON pe.id = fr.person_id
+         LEFT JOIN tags t_person ON t_person.photo_id = p.id AND t_person.tag = ?2 COLLATE NOCASE
+         WHERE (pe.name LIKE ?1 COLLATE NOCASE OR t_person.id IS NOT NULL)
+           AND p.private = 0
          ORDER BY p.tagged_at DESC
          LIMIT 500",
     )?;
 
     let photos = stmt
-        .query_map(params![pattern], |row| {
+        .query_map(params![pattern, query], |row| {
             let tag_list: String = row.get(6)?;
             let tags: Vec<String> = if tag_list.is_empty() {
                 vec![]
@@ -4148,6 +4159,39 @@ mod person_filter_tests {
             let hits = search_photos_by_person(&conn, variant).unwrap();
             assert_eq!(hits.len(), 1, "case variant {} should match", variant);
         }
+    }
+
+    #[test]
+    fn tag_with_full_person_name_surfaces_under_person_filter() {
+        // v1.5.108 — Mac side writes person names as `dc:subject`
+        // keywords; Windows imports those as rows in `tags`. Until the
+        // MWG region import lands on every photo (or in case Mac stops
+        // emitting regions for some reason), the only record that
+        // photo X is "Ali Can Bombadil" is a tag with the literal name.
+        // search_photos_by_person now UNIONs `persons` JOIN with an
+        // exact tag match so those photos surface too.
+        let conn = make_db();
+        // No face / no person row — only a tag carrying the name.
+        let id = insert_photo_with_tags(&conn, "/mac_tagged.jpg", &["smiling", "Ali Can Bombadil"]);
+        let hits = search_photos_by_person(&conn, "Ali Can Bombadil").unwrap();
+        assert_eq!(hits.len(), 1, "tag-only photo must surface");
+        assert_eq!(hits[0].id, id);
+    }
+
+    #[test]
+    fn partial_word_tag_does_not_surface_under_person_filter() {
+        // Guards the EXACT-tag match: a tag "ali" (or "can", or
+        // "bombadil" alone) must NOT surface under person:"Ali Can
+        // Bombadil". This is the safeguard against re-introducing
+        // the v1.5.107 token-collision bug via the tag side of the
+        // UNION. Only photos whose tag IS the full person name match.
+        let conn = make_db();
+        // 20 photos tagged with "can" but never with the full name.
+        for i in 0..20 {
+            insert_photo_with_tags(&conn, &format!("/can_{}.jpg", i), &["can", "ali"]);
+        }
+        let hits = search_photos_by_person(&conn, "Ali Can Bombadil").unwrap();
+        assert!(hits.is_empty(), "partial tokens must not match person filter");
     }
 
     #[test]

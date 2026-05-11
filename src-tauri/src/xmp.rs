@@ -390,6 +390,28 @@ pub struct XmpRead {
     pub description: Option<String>,
     pub rating: Option<i32>,
     pub label: Option<String>,
+    /// v1.5.108 — MWG (Metadata Working Group) face regions. Mac side
+    /// writes these alongside keywords whenever a face has been
+    /// assigned to a person. Importing them lets the People sidebar
+    /// surface Mac-named photos as proper face rows, not just tag
+    /// strings.
+    pub faces: Vec<XmpReadFace>,
+}
+
+#[derive(Debug, Clone)]
+pub struct XmpReadFace {
+    pub name: String,
+    /// Normalised center-X, 0.0–1.0 in the AppliedToDimensions space.
+    pub cx: f32,
+    pub cy: f32,
+    pub w: f32,
+    pub h: f32,
+    /// Image width/height the regions were computed against. Used to
+    /// turn normalised coords back into pixel boxes for face_regions.
+    /// Both fields default to 0 if the XMP omits AppliedToDimensions;
+    /// callers should fall back to the live photo size in that case.
+    pub applied_w: u32,
+    pub applied_h: u32,
 }
 
 /// Locate the sidecar for a given photo path, accepting both common
@@ -541,6 +563,119 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
         buf.clear();
     }
 
+    // v1.5.108 — second pass for MWG face regions. Easier to do as a
+    // separate scan than to weave region state into the section
+    // machine above. We pull every `<rdf:Description ... mwg-rs:Name=
+    // mwg-rs:Type=Face>` and its associated stArea coords +
+    // AppliedToDimensions. Format reference: Metadata Working Group
+    // "Guidelines for Handling Image Metadata" Regions schema.
+    let (mut applied_w, mut applied_h): (u32, u32) = (0, 0);
+    {
+        let mut r2 = Reader::from_str(xml);
+        r2.config_mut().trim_text(true);
+        let mut buf2 = Vec::new();
+        loop {
+            match r2.read_event_into(&mut buf2) {
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                    let name = e.name();
+                    if ends_with(name.as_ref(), b"AppliedToDimensions")
+                        || (ends_with(name.as_ref(), b"Description")
+                            && e.attributes().flatten().any(|a| ends_with(a.key.as_ref(), b"w")))
+                    {
+                        for attr in e.attributes().flatten() {
+                            let key = attr.key.as_ref();
+                            if ends_with(key, b"w") {
+                                if let Ok(v) = attr.unescape_value() {
+                                    if let Ok(n) = v.parse::<u32>() { applied_w = n; }
+                                }
+                            } else if ends_with(key, b"h") {
+                                if let Ok(v) = attr.unescape_value() {
+                                    if let Ok(n) = v.parse::<u32>() { applied_h = n; }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+            buf2.clear();
+        }
+    }
+    {
+        let mut r3 = Reader::from_str(xml);
+        r3.config_mut().trim_text(true);
+        let mut buf3 = Vec::new();
+        // Track open Description's mwg-rs:Name + Type as we walk, then
+        // when we hit its child rdf:Description with stArea:x/y/w/h,
+        // emit a face.
+        let mut pending_name: Option<String> = None;
+        let mut pending_is_face = false;
+        loop {
+            match r3.read_event_into(&mut buf3) {
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                    let local = e.name();
+                    if ends_with(local.as_ref(), b"Description") {
+                        // Check attrs for mwg-rs:Name / Type=Face — this
+                        // tags the current Description as a face region.
+                        let mut nm: Option<String> = None;
+                        let mut is_face = false;
+                        let mut cx = None;
+                        let mut cy = None;
+                        let mut w = None;
+                        let mut h = None;
+                        for attr in e.attributes().flatten() {
+                            let key = attr.key.as_ref();
+                            let val = attr.unescape_value().unwrap_or_default().to_string();
+                            if ends_with(key, b"Name") { nm = Some(val); }
+                            else if ends_with(key, b"Type") && val.eq_ignore_ascii_case("Face") { is_face = true; }
+                            else if ends_with(key, b"x") { cx = val.parse::<f32>().ok(); }
+                            else if ends_with(key, b"y") { cy = val.parse::<f32>().ok(); }
+                            else if ends_with(key, b"w") { w = val.parse::<f32>().ok(); }
+                            else if ends_with(key, b"h") { h = val.parse::<f32>().ok(); }
+                        }
+                        if let Some(name) = nm.clone() {
+                            if is_face {
+                                pending_name = Some(name);
+                                pending_is_face = true;
+                            }
+                        }
+                        // If this Description carries x/y/w/h AND we
+                        // recently saw a Face Name, emit the face. (Mac
+                        // writes the area as a child rdf:Description
+                        // inside the named one.)
+                        if pending_is_face {
+                            if let (Some(cx), Some(cy), Some(w), Some(h)) = (cx, cy, w, h) {
+                                if let Some(nm) = pending_name.take() {
+                                    out.faces.push(XmpReadFace {
+                                        name: nm,
+                                        cx, cy, w, h,
+                                        applied_w,
+                                        applied_h,
+                                    });
+                                }
+                                pending_is_face = false;
+                            }
+                        }
+                    }
+                }
+                Ok(Event::End(e)) => {
+                    if ends_with(e.name().as_ref(), b"Description") {
+                        // End of a region without coordinates yet — keep
+                        // pending_name for the next nested Description
+                        // (the Area one). When the OUTER named one
+                        // closes without us having pushed, we drop.
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+            buf3.clear();
+        }
+    }
+
     // Second pass for the element-form rating/label (the first pass
     // only catches the attribute form). Cheap because the doc is small.
     if out.rating.is_none() || out.label.is_none() {
@@ -620,6 +755,71 @@ mod tests {
             }
             Err(e) => panic!("Sidecar parse error: {}", e),
         }
+    }
+
+    #[test]
+    fn parses_mwg_face_regions() {
+        // Real fixture taken from a Mac-written sidecar
+        // (D:\Fotograflar\14-18.11.2014 Paris\IMG_0025.xmp): two faces,
+        // both with normalised area and AppliedToDimensions. Windows
+        // imports these into face_regions so the People sidebar surfaces
+        // Mac-named photos as proper faces (with bounding boxes), not
+        // just keyword tags.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="RetinaTag 1.0">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="IMG_0025.jpg"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
+      xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#"
+      xmlns:stDim="http://ns.adobe.com/xmp/sType/Dimensions#">
+      <mwg-rs:Regions>
+        <rdf:Description>
+          <mwg-rs:AppliedToDimensions>
+            <rdf:Description stDim:w="640" stDim:h="480" stDim:unit="pixel"/>
+          </mwg-rs:AppliedToDimensions>
+          <mwg-rs:RegionList>
+            <rdf:Bag>
+              <rdf:li>
+                <rdf:Description mwg-rs:Name="Buğra" mwg-rs:Type="Face">
+                  <mwg-rs:Area>
+                    <rdf:Description
+                      stArea:x="0.535156"
+                      stArea:y="0.288542"
+                      stArea:w="0.295312"
+                      stArea:h="0.539583"
+                      stArea:unit="normalized"/>
+                  </mwg-rs:Area>
+                </rdf:Description>
+              </rdf:li>
+              <rdf:li>
+                <rdf:Description mwg-rs:Name="Lara" mwg-rs:Type="Face">
+                  <mwg-rs:Area>
+                    <rdf:Description
+                      stArea:x="0.771094"
+                      stArea:y="0.375000"
+                      stArea:w="0.235938"
+                      stArea:h="0.441667"
+                      stArea:unit="normalized"/>
+                  </mwg-rs:Area>
+                </rdf:Description>
+              </rdf:li>
+            </rdf:Bag>
+          </mwg-rs:RegionList>
+        </rdf:Description>
+      </mwg-rs:Regions>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let r = parse_xmp_xml(xml).unwrap();
+        assert_eq!(r.faces.len(), 2, "expected 2 faces; got {:?}", r.faces);
+        let buğra = r.faces.iter().find(|f| f.name == "Buğra").expect("Buğra missing");
+        assert!((buğra.cx - 0.535156).abs() < 1e-4);
+        assert!((buğra.w - 0.295312).abs() < 1e-4);
+        assert_eq!(buğra.applied_w, 640);
+        assert_eq!(buğra.applied_h, 480);
+        let lara = r.faces.iter().find(|f| f.name == "Lara").expect("Lara missing");
+        assert!((lara.cy - 0.375).abs() < 1e-4);
     }
 
     #[test]

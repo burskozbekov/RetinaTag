@@ -448,25 +448,35 @@ pub fn run() {
                 let mut new_favorites = 0usize;
                 const BATCH: usize = 500;
                 let mut pending: Vec<(i64, crate::xmp::XmpRead)> = Vec::with_capacity(BATCH);
+                let mut new_faces = 0usize;
+                let mut new_persons = 0usize;
                 let mut flush = |pending: &mut Vec<(i64, crate::xmp::XmpRead)>,
-                                 stats: (&mut usize, &mut usize, &mut usize, &mut usize)|
+                                 stats: (&mut usize, &mut usize, &mut usize, &mut usize, &mut usize, &mut usize)|
                  -> Result<(), String> {
                     if pending.is_empty() { return Ok(()); }
                     let conn = db_for_xmp.lock().map_err(|_| "lock".to_string())?;
                     let txn = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-                    // Direct INSERT OR IGNORE rather than db::insert_tags()
-                    // because the latter opens its own inner transaction
-                    // (SQLite doesn't support nested tx → silent fail).
-                    // We give up the case-insensitive dedup of insert_tags
-                    // for now — sidecars from one source rarely have case
-                    // collisions, and the UNIQUE(photo_id, tag) constraint
-                    // still prevents byte-exact dupes.
-                    let mut insert_tag = match txn.prepare_cached(
-                        "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)"
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => return Err(format!("prepare insert: {}", e)),
-                    };
+                    let mut insert_tag = txn
+                        .prepare_cached(
+                            "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)"
+                        )
+                        .map_err(|e| format!("prepare insert: {}", e))?;
+                    // v1.5.108 — MWG face region import. Two extra prepared
+                    // statements: one to look up "does this photo+person+
+                    // imported-face already exist" (idempotency on re-launch),
+                    // one to insert the new face_region with the
+                    // denormalised pixel box.
+                    let mut find_face = txn
+                        .prepare_cached(
+                            "SELECT 1 FROM face_regions WHERE photo_id = ?1 AND person_id = ?2 AND embedding IS NULL LIMIT 1"
+                        )
+                        .map_err(|e| format!("prepare find_face: {}", e))?;
+                    let mut insert_face = txn
+                        .prepare_cached(
+                            "INSERT INTO face_regions (photo_id, x1, y1, x2, y2, score, embedding, person_id, created_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?6, ?7)"
+                        )
+                        .map_err(|e| format!("prepare insert_face: {}", e))?;
                     for (id, xmp) in pending.drain(..) {
                         if !xmp.keywords.is_empty() {
                             for tag in &xmp.keywords {
@@ -498,8 +508,63 @@ pub fn run() {
                                 *stats.3 += 1;
                             }
                         }
+                        // v1.5.108 — import MWG regions as face_regions
+                        // rows. Stored with embedding=NULL + score=0 so
+                        // we can tell "imported from XMP" apart from
+                        // "AI-detected" later (e.g. for cluster fill
+                        // or rescan triggers).
+                        for face in &xmp.faces {
+                            let trimmed = face.name.trim();
+                            if trimmed.is_empty() { continue; }
+                            // find or create the person
+                            let person_id: i64 = match db::find_person_by_name(&txn, trimmed) {
+                                Ok(Some(pid)) => pid,
+                                _ => match db::create_person(&txn, trimmed) {
+                                    Ok(pid) => { *stats.5 += 1; pid }
+                                    Err(_) => continue,
+                                },
+                            };
+                            // already imported? skip
+                            let exists: Option<i32> = find_face
+                                .query_row(rusqlite::params![id, person_id], |r| r.get(0))
+                                .ok();
+                            if exists.is_some() { continue; }
+                            // Pick the source dimensions. Prefer the
+                            // AppliedToDimensions stored in the XMP; if
+                            // missing fall back to the photos.width/
+                            // photos.height we already have in the DB.
+                            let (img_w, img_h) = if face.applied_w > 0 && face.applied_h > 0 {
+                                (face.applied_w as f32, face.applied_h as f32)
+                            } else {
+                                // Look up live dimensions from photos row.
+                                let dims: Option<(i32, i32)> = txn
+                                    .query_row(
+                                        "SELECT width, height FROM photos WHERE id = ?1",
+                                        rusqlite::params![id],
+                                        |r| Ok((r.get::<_, i32>(0)?, r.get::<_, i32>(1)?)),
+                                    )
+                                    .ok();
+                                match dims {
+                                    Some((w, h)) if w > 0 && h > 0 => (w as f32, h as f32),
+                                    _ => continue, // no way to denormalise
+                                }
+                            };
+                            let x1 = ((face.cx - face.w / 2.0) * img_w).max(0.0) as i32;
+                            let y1 = ((face.cy - face.h / 2.0) * img_h).max(0.0) as i32;
+                            let x2 = ((face.cx + face.w / 2.0) * img_w).min(img_w) as i32;
+                            let y2 = ((face.cy + face.h / 2.0) * img_h).min(img_h) as i32;
+                            let now = chrono::Utc::now().to_rfc3339();
+                            if insert_face
+                                .execute(rusqlite::params![id, x1, y1, x2, y2, person_id, now])
+                                .is_ok()
+                            {
+                                *stats.4 += 1;
+                            }
+                        }
                     }
                     drop(insert_tag);
+                    drop(find_face);
+                    drop(insert_face);
                     txn.commit().map_err(|e| e.to_string())?;
                     Ok(())
                 };
@@ -514,17 +579,17 @@ pub fn run() {
                         }
                     }
                     if pending.len() >= BATCH {
-                        if let Err(e) = flush(&mut pending, (&mut new_tags, &mut new_descriptions, &mut new_ratings, &mut new_favorites)) {
+                        if let Err(e) = flush(&mut pending, (&mut new_tags, &mut new_descriptions, &mut new_ratings, &mut new_favorites, &mut new_faces, &mut new_persons)) {
                             let _ = writeln!(log, "  flush err at scanned={}: {}", scanned, e);
                         }
                     }
                 }
-                if let Err(e) = flush(&mut pending, (&mut new_tags, &mut new_descriptions, &mut new_ratings, &mut new_favorites)) {
+                if let Err(e) = flush(&mut pending, (&mut new_tags, &mut new_descriptions, &mut new_ratings, &mut new_favorites, &mut new_faces, &mut new_persons)) {
                     let _ = writeln!(log, "  final flush err: {}", e);
                 }
                 let _ = writeln!(log,
-                    "  result: scanned={} with_sidecar={} new_tags={} new_desc={} new_rating={} new_fav={}",
-                    scanned, with_sidecar, new_tags, new_descriptions, new_ratings, new_favorites);
+                    "  result: scanned={} with_sidecar={} new_tags={} new_desc={} new_rating={} new_fav={} new_faces={} new_persons={}",
+                    scanned, with_sidecar, new_tags, new_descriptions, new_ratings, new_favorites, new_faces, new_persons);
                 let _ = writeln!(log, "  duration: {:?}", chrono::Utc::now() - started);
                 let _ = std::fs::write(&log_path, log);
             });
