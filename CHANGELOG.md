@@ -2,6 +2,33 @@
 
 All notable changes to RetinaTag (Windows side). Newest at the top.
 
+## v1.5.97 — 2026-05-11
+**P0 freeze fix — kanıtlandı.** Bütün önceki teoriler (LAN sync infra,
+DB-lock contention, spawn_blocking boşlukları) YANLIŞTI. v1.5.94/96'da
+shipped olan canlı diagnostic overlay ile WebView2 içinden `openSettings`
+çağrıldığında modal'ın gerçekten `class="modal-overlay open"`
++`display:flex` alıyor ama `computed opacity:0`'da kaldığı kanıtlandı.
+
+Root cause: **WebView2 148.x compositor regression** —
+`backdrop-filter:blur(6px)` aynı element üzerinde transitioned
+`opacity` ile birlikte olunca compositor opacity'i 1'e geçirmiyor.
+Modal "açılıyor" (class flipliyor, `pointer-events:all` aktif) ama
+görünmez kalıyor. Kullanıcı Settings / Tag Manager / Import / People /
+herhangi bir folder'a tıkladığında — modal görünmeden tüm tıklamaları
+yutuyor → "full kilit" raporu.
+
+Fix tek satır CSS:
+- `.modal-overlay`'den `backdrop-filter:blur(6px)` kaldırıldı
+  (background zaten `rgba(8,4,4,.85)` ile karartıyor)
+- `will-change:opacity` eklendi → compositor transition'ı fast-path'te
+  tutuyor
+
+v1.5.96 diagnostic'i `opacity=1 display=flex *** CSS FIX WORKED ***`
+yazdı; v1.5.97 temiz binary (diagnostic kaldırıldı).
+
+LAN sync revert'i (v1.5.92) yerinde kalıyor — onlar yanlış teşhise
+göre yapılmıştı; gerçek freeze WebView2 CSS bug'ıydı, bağlantısız.
+
 ## v1.5.91 — 2026-05-11
 **Diagnostic invoke timing wrapper.** v1.5.89+v1.5.90'da DB komutları
 spawn_blocking ile sarıldı ama kullanıcı hâlâ "full kilitleniyor"

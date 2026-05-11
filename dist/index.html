@@ -376,7 +376,16 @@ select.tb-select:focus{border-color:var(--red-dark)}
 
 /* ── Modal ──────────────────────────────────────────────────────────── */
 .modal-overlay{position:fixed;inset:0;background:rgba(8,4,4,.85);display:flex;align-items:center;
-  justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:opacity .22s;backdrop-filter:blur(6px)}
+  justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:opacity .22s;will-change:opacity}
+/* v1.5.95 — WebView2 148.x regression: `backdrop-filter:blur(6px)` on
+   the same element as a transitioned opacity wedged the compositor so
+   `.open` never escaped opacity:0. Modals "opened" (class flipped,
+   pointer-events:all) but stayed invisible — user sees nothing happen
+   on Settings / Tag Manager / Import clicks and reports "kilit"
+   because an invisible overlay is now eating all their clicks.
+   Removed the backdrop blur (background already dims the page) and
+   added will-change:opacity to keep transitions on the compositor's
+   fast path. */
 .modal-overlay.open{opacity:1;pointer-events:all}
 .modal-box{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-lg);
   width:580px;max-width:92vw;max-height:86vh;overflow-y:auto;overflow-x:hidden;transform:translateY(24px) scale(.97);
@@ -2425,6 +2434,8 @@ select.tb-select:focus{border-color:var(--red-dark)}
 const{invoke}=window.__TAURI__.core;
 const{listen}=window.__TAURI__.event;
 const convertFileSrc = window.__TAURI__.core.convertFileSrc;
+
+
 
 // ── Thumbnail helper ─────────────────────────────────────────────────────────
 // Preferred path for loading thumbnails: ask the backend for the file path,
