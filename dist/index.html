@@ -9276,7 +9276,14 @@ async function _syncRefreshUI() {
     if (codeEl) codeEl.textContent = state.pair_code || '— click "New code"';
   }
   await _syncRefreshPeers();
-  if (state.enabled) await _syncRefreshNearby();
+  if (state.enabled) {
+    await _syncRefreshNearby();
+    // v1.5.83 — start auto-refresh of the nearby list so newly-
+    // enabled peers appear within ~5s without manual button mashing.
+    _syncStartNearbyAutoRefresh();
+  } else {
+    _syncStopNearbyAutoRefresh();
+  }
 }
 
 async function _syncRefreshPeers() {
@@ -9316,6 +9323,37 @@ async function _syncRefreshPeers() {
   } catch (e) {
     host.textContent = 'Could not load peers: ' + e;
   }
+}
+
+// v1.5.83 — Auto-refresh polling for the "Nearby on Wi-Fi" list. mDNS
+// peers appear/disappear as the user toggles sync on other devices;
+// users shouldn't have to mash the ↻ button to see them. Polls every
+// 5s while the Settings modal is open AND the Network Sync nav-item
+// is active. Stopped on settings close (or on disable) so it doesn't
+// burn CPU when the user isn't looking. Bounded by isModalOpen
+// checks so a stale interval that survives a re-render exits cleanly.
+let _syncNearbyTimer = null;
+function _syncStopNearbyAutoRefresh() {
+  if (_syncNearbyTimer) {
+    clearInterval(_syncNearbyTimer);
+    _syncNearbyTimer = null;
+  }
+}
+function _syncStartNearbyAutoRefresh() {
+  _syncStopNearbyAutoRefresh();
+  _syncNearbyTimer = setInterval(() => {
+    // Bail if Settings was closed or the network pane isn't on screen.
+    const modal = document.getElementById('settingsModal');
+    const networkSection = document.getElementById('syncNearbySection');
+    const visible =
+      modal && modal.classList.contains('open') &&
+      networkSection && networkSection.style.display !== 'none';
+    if (!visible) {
+      _syncStopNearbyAutoRefresh();
+      return;
+    }
+    _syncRefreshNearby().catch(()=>{});
+  }, 5000);
 }
 
 async function _syncRefreshNearby() {
@@ -9701,8 +9739,17 @@ async function removeWatch(id){
 }
 
 $('btnSettings').onclick=openSettings;
-$('btnCloseSettings').onclick=()=>$('settingsModal').classList.remove('open');
-$('btnSettingsCancel').onclick=()=>$('settingsModal').classList.remove('open');
+// v1.5.83 — stop the Network Sync nearby-poll timer when Settings
+// closes so the interval doesn't survive past the modal and burn
+// CPU under the radar.
+$('btnCloseSettings').onclick=()=>{
+  $('settingsModal').classList.remove('open');
+  try { _syncStopNearbyAutoRefresh(); } catch(_) {}
+};
+$('btnSettingsCancel').onclick=()=>{
+  $('settingsModal').classList.remove('open');
+  try { _syncStopNearbyAutoRefresh(); } catch(_) {}
+};
 $('btnRegenThumbs').onclick=async()=>{
   if(!confirm('This will delete all cached thumbnails and regenerate them with correct orientation. Continue?'))return;
   try{
