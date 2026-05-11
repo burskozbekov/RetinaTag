@@ -11191,6 +11191,34 @@ pub async fn get_trending_tags(
     Ok(out)
 }
 
+// ─── Person filter (v1.5.107) ────────────────────────────────────────────
+//
+// Sidebar person clicks used to set `curSearch = person_name.toLowerCase()`
+// and route through search_photos free-text. That tokenised the name into
+// individual words (`"ali can bombadil"` → `["ali", "can", "bombadil"]`)
+// and AND-intersected them across all photo tags, so "Ali Can Bombadil"
+// was matching every photo that happened to contain the English word "can"
+// in any tag or description (Coca-Cola cans, Jack Daniel's cans, "can do"
+// in AI captions). One-word names didn't have this problem.
+//
+// This command takes the person name as a single LIKE pattern against the
+// `persons.name` column joined through `face_regions` — exactly what we
+// want: photos with a face assigned to that person, nothing else.
+
+#[tauri::command]
+pub async fn find_photos_by_person(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PhotoSummary>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::search_photos_by_person(&conn, &name).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ─── XMP backfill (v1.5.104) ────────────────────────────────────────────
 //
 // Backfill tags/description/rating/favorite from existing `.xmp`

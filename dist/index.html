@@ -3025,7 +3025,16 @@ async function loadPhotos(){
   try{localStorage.setItem('rt_status_v1', curStatus||'');}catch(_){}
   try{
     let resp;
-    if(curSearch){
+    // v1.5.107 — person filter bypasses search_photos to avoid multi-word
+    // names ("Ali Can Bombadil") getting tokenised into "ali" + "can" +
+    // "bombadil" and false-matching every photo tagged with the common
+    // English word "can". find_photos_by_person hits the persons /
+    // face_regions join directly.
+    if(_currentPersonFilter){
+      resp = await invoke('find_photos_by_person', { name: _currentPersonFilter.name });
+      photos = Array.isArray(resp) ? resp : (resp.photos || []);
+      totalPhotos = photos.length;
+    }else if(curSearch){
       resp=await invoke('search_photos',{query:curSearch});
       if(Array.isArray(resp)){photos=resp;totalPhotos=resp.length}
       else{photos=resp.photos;totalPhotos=resp.total}

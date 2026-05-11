@@ -571,6 +571,8 @@ pub fn run() {
             commands::delete_all_xmp_sidecars,
             // v1.5.104 — read .xmp sidecars (Mac side writes, Windows reads)
             commands::import_xmp_sidecars,
+            // v1.5.107 — dedicated person filter (no free-text tokenisation)
+            commands::find_photos_by_person,
             // 2. Export
             commands::export_data,
             // 3. Drag & drop
