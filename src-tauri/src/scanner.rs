@@ -429,8 +429,15 @@ fn scan_folder_parallel(
                         // sidecar shouldn't abort the scan tx.
                         if let Ok(Some(xmp)) = crate::xmp::read_xmp_sidecar(&p.path) {
                             if !xmp.keywords.is_empty() {
+                                // v1.5.111 — case-insensitive dup guard
+                                // (see lib.rs comment for rationale).
                                 if let Ok(mut stmt) = txn.prepare_cached(
-                                    "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)"
+                                    "INSERT INTO tags (photo_id, tag, confidence, source)
+                                     SELECT ?1, ?2, ?3, ?4
+                                     WHERE NOT EXISTS (
+                                         SELECT 1 FROM tags
+                                         WHERE photo_id = ?1 AND tag = ?2 COLLATE NOCASE
+                                     )"
                                 ) {
                                     for tag in &xmp.keywords {
                                         let _ = stmt.execute(rusqlite::params![id, tag, 1.0_f64, "xmp_sidecar"]);

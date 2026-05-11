@@ -11301,9 +11301,16 @@ pub async fn import_xmp_sidecars(
             let txn = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             // v1.5.106 — direct INSERT (db::insert_tags opens a nested
             // tx which SQLite silently fails inside an outer txn).
+            // v1.5.111 — case-insensitive dup guard so "Lara"/"lara"
+            // don't both land on the same photo.
             let mut tag_stmt = txn
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO tags (photo_id, tag, confidence, source)
+                     SELECT ?1, ?2, ?3, ?4
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM tags
+                         WHERE photo_id = ?1 AND tag = ?2 COLLATE NOCASE
+                     )",
                 )
                 .map_err(|e| e.to_string())?;
             // v1.5.110 — flip pending→tagged so the sidebar "Tagged"

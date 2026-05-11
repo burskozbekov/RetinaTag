@@ -426,6 +426,31 @@ pub fn run() {
                 use std::fmt::Write as _;
                 let _ = writeln!(log, "[{}] xmp backfill: starting", started.to_rfc3339());
 
+                // v1.5.111 — first, normalise the existing tag set.
+                // Mac and Windows have historically each tagged in
+                // their preferred case (face-naming caps the person
+                // name; AI taggers lowercase nouns), so the library
+                // ends up with `Lara` / `lara` / `Bugra` / `bugra`
+                // pairs scattered across photos. Tag Manager and
+                // any free-text search treat these as separate
+                // entries. Collapse to one canonical spelling per
+                // tag before the XMP backfill runs (so new imports
+                // can also case-match against the merged form).
+                if let Ok(conn) = db_for_xmp.lock() {
+                    match db::normalize_tag_case(&conn) {
+                        Ok((groups, renamed, deleted)) => {
+                            let _ = writeln!(
+                                log,
+                                "  normalize_tag_case: merged {} groups (renamed {} rows, deleted {} conflicts)",
+                                groups, renamed, deleted
+                            );
+                        }
+                        Err(e) => {
+                            let _ = writeln!(log, "  normalize_tag_case error: {}", e);
+                        }
+                    }
+                }
+
                 // Pull (id, path) for every photo.
                 let photos: Vec<(i64, String)> = match db_for_xmp.lock() {
                     Ok(conn) => match conn.prepare("SELECT id, path FROM photos") {
@@ -456,9 +481,20 @@ pub fn run() {
                     if pending.is_empty() { return Ok(()); }
                     let conn = db_for_xmp.lock().map_err(|_| "lock".to_string())?;
                     let txn = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+                    // v1.5.111 — case-insensitive de-dup: refuse the
+                    // INSERT if a case-variant of this tag already
+                    // exists on the photo (e.g. photo already has
+                    // "Lara" from face-naming; Mac sidecar tries to
+                    // insert "lara" — we skip). UNIQUE(photo_id, tag)
+                    // alone only catches byte-exact dupes.
                     let mut insert_tag = txn
                         .prepare_cached(
-                            "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)"
+                            "INSERT INTO tags (photo_id, tag, confidence, source)
+                             SELECT ?1, ?2, ?3, ?4
+                             WHERE NOT EXISTS (
+                                 SELECT 1 FROM tags
+                                 WHERE photo_id = ?1 AND tag = ?2 COLLATE NOCASE
+                             )"
                         )
                         .map_err(|e| format!("prepare insert: {}", e))?;
                     // v1.5.110 — flip status pending -> tagged when we

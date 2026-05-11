@@ -4060,6 +4060,88 @@ pub fn relink_photo_path(conn: &Connection, photo_id: i64, new_path: &str) -> Re
     Ok(())
 }
 
+/// v1.5.111 — collapse case-variant tag rows into one canonical form.
+///
+/// Without this, "Lara" (added by face-naming on Windows) and "lara"
+/// (added by AI tagger on Windows or by Mac dc:subject) lived as TWO
+/// distinct rows in the `tags` table. Tag Manager and any
+/// `SELECT DISTINCT tag` query would show both, and a search for one
+/// missed photos carrying the other. UNIQUE(photo_id, tag) is
+/// byte-exact, so within a single photo we already couldn't have both —
+/// but library-wide, the variants pile up across photos.
+///
+/// Strategy:
+///   1) For each LOWER(tag) group, pick the canonical spelling. We
+///      prefer the variant most often paired with `source='face'`
+///      (person names that someone typed deliberately), then the
+///      variant with most rows.
+///   2) UPDATE every other variant to the canonical, swallowing the
+///      occasional UNIQUE(photo_id, tag) conflict by deleting the
+///      losing row first (the photo already has the canonical form
+///      in that case — losing the dupe is the correct outcome).
+///
+/// Returns (groups_merged, rows_renamed, rows_deleted_due_to_conflict).
+/// Idempotent: running again after merge is a no-op.
+pub fn normalize_tag_case(conn: &Connection) -> Result<(usize, usize, usize)> {
+    let groups: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT LOWER(tag),
+                    (SELECT tag FROM tags t2
+                     WHERE LOWER(t2.tag) = LOWER(t.tag)
+                     GROUP BY t2.tag
+                     ORDER BY SUM(CASE WHEN t2.source='face' THEN 1 ELSE 0 END) DESC,
+                              COUNT(*) DESC,
+                              t2.tag ASC
+                     LIMIT 1) AS canonical
+             FROM tags t
+             GROUP BY LOWER(tag)
+             HAVING COUNT(DISTINCT tag) > 1",
+        )?;
+        let v: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        v
+    };
+    let groups_merged = groups.len();
+    let mut rows_renamed = 0usize;
+    let mut rows_deleted = 0usize;
+    for (_lower, canonical) in &groups {
+        // Find every variant for this group except the canonical and
+        // rename it. UNIQUE(photo_id, tag) will refuse the UPDATE if
+        // the photo already has the canonical row — in that case we
+        // delete the about-to-be-renamed loser instead.
+        let variants: Vec<String> = {
+            let mut s = conn.prepare(
+                "SELECT DISTINCT tag FROM tags
+                 WHERE LOWER(tag) = LOWER(?1) AND tag != ?1",
+            )?;
+            let rows: Vec<String> = s
+                .query_map(params![canonical], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+        for variant in variants {
+            // Delete rows that would collide on UPDATE.
+            let deleted = conn.execute(
+                "DELETE FROM tags
+                 WHERE tag = ?1
+                   AND photo_id IN (SELECT photo_id FROM tags WHERE tag = ?2)",
+                params![variant, canonical],
+            )?;
+            rows_deleted += deleted;
+            // Rename the remaining rows.
+            let renamed = conn.execute(
+                "UPDATE tags SET tag = ?1 WHERE tag = ?2",
+                params![canonical, variant],
+            )?;
+            rows_renamed += renamed;
+        }
+    }
+    Ok((groups_merged, rows_renamed, rows_deleted))
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Regression tests for the structured-filter vs free-text-search split.
 // v1.5.107: a sidebar click on "Ali Can Bombadil" (one face) was
@@ -4192,6 +4274,76 @@ mod person_filter_tests {
         }
         let hits = search_photos_by_person(&conn, "Ali Can Bombadil").unwrap();
         assert!(hits.is_empty(), "partial tokens must not match person filter");
+    }
+
+    #[test]
+    fn normalize_tag_case_picks_face_source_canonical() {
+        // v1.5.111: "Lara" added by face-naming on one photo, "lara"
+        // added by AI tagger on another. After normalize_tag_case
+        // the library has ONE spelling everywhere — preferring the
+        // face-source variant because that's the deliberately-typed
+        // human form.
+        let conn = make_db();
+        let p1 = insert_photo_with_tags(&conn, "/face_named.jpg", &[]);
+        let p2 = insert_photo_with_tags(&conn, "/ai_tagged.jpg", &[]);
+        let p3 = insert_photo_with_tags(&conn, "/ai_tagged_2.jpg", &[]);
+        // Face-source "Lara" on p1
+        conn.execute(
+            "INSERT INTO tags (photo_id, tag, confidence, source) VALUES (?1, 'Lara', 1.0, 'face')",
+            params![p1],
+        ).unwrap();
+        // AI-source "lara" on p2 and p3
+        for pid in &[p2, p3] {
+            conn.execute(
+                "INSERT INTO tags (photo_id, tag, confidence, source) VALUES (?1, 'lara', 0.9, 'local')",
+                params![pid],
+            ).unwrap();
+        }
+        // Sanity: 2 byte-exact distinct tags before normalize.
+        let before: i64 = conn.query_row("SELECT COUNT(DISTINCT tag) FROM tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(before, 2, "expected 'Lara' and 'lara' both present");
+
+        let (groups, renamed, deleted) = normalize_tag_case(&conn).unwrap();
+        assert_eq!(groups, 1, "exactly one case-variant group");
+        assert_eq!(renamed, 2, "two 'lara' rows renamed to 'Lara'");
+        assert_eq!(deleted, 0, "no UNIQUE conflicts — each photo had only one variant");
+
+        let after: i64 = conn.query_row("SELECT COUNT(DISTINCT tag) FROM tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(after, 1, "single canonical 'Lara' remains");
+        let canonical: String = conn.query_row("SELECT tag FROM tags LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(canonical, "Lara");
+
+        // Idempotent re-run: no work to do.
+        let again = normalize_tag_case(&conn).unwrap();
+        assert_eq!(again, (0, 0, 0));
+    }
+
+    #[test]
+    fn normalize_tag_case_resolves_unique_conflicts() {
+        // Edge case: same photo has BOTH "Suit" (e.g. from face
+        // namer using camelcase) AND "suit" (from AI). UNIQUE
+        // constraint prevented a direct rename; normalize_tag_case
+        // must delete the losing row and keep the canonical.
+        let conn = make_db();
+        let pid = insert_photo_with_tags(&conn, "/suit.jpg", &[]);
+        conn.execute(
+            "INSERT INTO tags (photo_id, tag, confidence, source) VALUES (?1, 'Suit', 1.0, 'face')",
+            params![pid],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tags (photo_id, tag, confidence, source) VALUES (?1, 'suit', 0.8, 'local')",
+            params![pid],
+        ).unwrap();
+        let before: i64 = conn.query_row("SELECT COUNT(*) FROM tags WHERE photo_id=?1", params![pid], |r| r.get(0)).unwrap();
+        assert_eq!(before, 2);
+
+        let (_, _, deleted) = normalize_tag_case(&conn).unwrap();
+        assert_eq!(deleted, 1, "the 'suit' row must be deleted to merge into 'Suit'");
+
+        let after: Vec<String> = conn.prepare("SELECT tag FROM tags WHERE photo_id=?1").unwrap()
+            .query_map(params![pid], |r| r.get(0)).unwrap()
+            .filter_map(|r| r.ok()).collect();
+        assert_eq!(after, vec!["Suit".to_string()]);
     }
 
     #[test]
