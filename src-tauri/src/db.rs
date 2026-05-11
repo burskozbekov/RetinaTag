@@ -4048,3 +4048,127 @@ pub fn relink_photo_path(conn: &Connection, photo_id: i64, new_path: &str) -> Re
     )?;
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Regression tests for the structured-filter vs free-text-search split.
+// v1.5.107: a sidebar click on "Ali Can Bombadil" (one face) was
+// returning ~100 photos because the JS layer routed person filtering
+// through free-text search_photos, which tokenises ["ali","can","bombadil"]
+// and AND-intersects across tags. The fix routes person filtering through
+// the dedicated db::search_photos_by_person (this file). These tests
+// guard the contract that "person filter returns ONLY photos with that
+// person's face, never matches by text" — so a future refactor that
+// accidentally re-routes person clicks through FTS will fail the test
+// before it ships.
+// ─────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod person_filter_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn make_db() -> Connection {
+        init_db(":memory:").expect("schema init")
+    }
+
+    fn insert_photo_with_tags(conn: &Connection, path: &str, tags: &[&str]) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO photos (path, filename, folder, hash, size, width, height,
+                                 created_at, status, media_type)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, 0, ?5, 'tagged', 'image')",
+            params![path, path, "/test", path, now],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        for t in tags {
+            conn.execute(
+                "INSERT INTO tags (photo_id, tag, confidence, source)
+                 VALUES (?1, ?2, 1.0, 'test')",
+                params![id, t],
+            )
+            .unwrap();
+        }
+        id
+    }
+
+    #[test]
+    fn multi_word_name_does_not_match_by_token_collision() {
+        // Reproduces the v1.5.107 bug: person name "Ali Can Bombadil"
+        // contains the English word "can". Many real photos in the
+        // user's library are tagged "can" (Coca-Cola can, Jack Daniel's
+        // can, AI captions like "you can see…"). If person filtering
+        // tokenised the name and AND-intersected, all photos sharing
+        // the three tokens would falsely surface. The fixed code path
+        // (search_photos_by_person + face_regions JOIN) must return
+        // ONLY the photo that has the named person's face — no matter
+        // how many other photos happen to be tagged with "can" or "ali".
+        let conn = make_db();
+        let real_id = insert_photo_with_tags(&conn, "/real_face.jpg", &["man", "smiling"]);
+        let person_id = create_person(&conn, "Ali Can Bombadil").unwrap();
+        let face_id = insert_face_region(&conn, real_id, 0, 0, 100, 100, 0.99, &[0u8; 32]).unwrap();
+        conn.execute(
+            "UPDATE face_regions SET person_id = ?1 WHERE id = ?2",
+            params![person_id, face_id],
+        )
+        .unwrap();
+
+        // 50 noise photos tagged with the three name tokens but no face.
+        for i in 0..50 {
+            insert_photo_with_tags(
+                &conn,
+                &format!("/coke_can_{}.jpg", i),
+                &["coca-cola", "can", "ali", "bombadil"],
+            );
+        }
+
+        let hits = search_photos_by_person(&conn, "Ali Can Bombadil").unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "person filter must use face_regions JOIN, NOT free-text token AND. \
+             Got {} hits when only 1 real face is assigned to this person.",
+            hits.len()
+        );
+        assert_eq!(hits[0].id, real_id);
+    }
+
+    #[test]
+    fn person_name_is_case_insensitive() {
+        let conn = make_db();
+        let id = insert_photo_with_tags(&conn, "/p.jpg", &[]);
+        let person_id = create_person(&conn, "Ali Can Bombadil").unwrap();
+        let face_id = insert_face_region(&conn, id, 0, 0, 10, 10, 0.9, &[0u8; 32]).unwrap();
+        conn.execute(
+            "UPDATE face_regions SET person_id = ?1 WHERE id = ?2",
+            params![person_id, face_id],
+        )
+        .unwrap();
+
+        for variant in ["Ali Can Bombadil", "ali can bombadil", "ALI CAN BOMBADIL"] {
+            let hits = search_photos_by_person(&conn, variant).unwrap();
+            assert_eq!(hits.len(), 1, "case variant {} should match", variant);
+        }
+    }
+
+    #[test]
+    fn vaulted_photos_never_surface_via_person_filter() {
+        // v1.5.63 — private (vaulted) photos must not leak through any
+        // filter, including person filter. Re-asserting here so a future
+        // refactor of search_photos_by_person can't drop the
+        // `p.private = 0` clause without a test catching it.
+        let conn = make_db();
+        let id = insert_photo_with_tags(&conn, "/secret.jpg", &[]);
+        conn.execute("UPDATE photos SET private = 1 WHERE id = ?1", params![id])
+            .unwrap();
+        let person_id = create_person(&conn, "Vaulted Subject").unwrap();
+        let face_id = insert_face_region(&conn, id, 0, 0, 10, 10, 0.9, &[0u8; 32]).unwrap();
+        conn.execute(
+            "UPDATE face_regions SET person_id = ?1 WHERE id = ?2",
+            params![person_id, face_id],
+        )
+        .unwrap();
+
+        let hits = search_photos_by_person(&conn, "Vaulted Subject").unwrap();
+        assert!(hits.is_empty(), "vaulted photo must NOT leak via person filter");
+    }
+}

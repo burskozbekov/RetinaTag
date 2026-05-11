@@ -2510,6 +2510,30 @@ function activeFolderScope() {
 
 // ── State ────────────────────────────────────────────────────────────────────
 let photos=[],totalPhotos=0,selectedId=null,selectedPath='';
+// v1.5.107 — STATE TYPING RULE (read before touching these):
+//
+// `curSearch` is ONLY for user-typed free-text that should go through
+// search_photos (FTS, synonym expansion, translation). DO NOT assign
+// structured filter values into curSearch — names, IDs, folder paths,
+// tag strings, etc. — because search_photos tokenises multi-word
+// strings and AND-intersects per token. "Ali Can Bombadil" became
+// `["ali", "can", "bombadil"]` and matched every photo that
+// coincidentally contained the English word "can" in any tag or AI
+// description (~101 false positives for one face).
+//
+// Each structured filter gets its own state variable below.
+// `loadPhotos()` knows how to route each one to the right backend
+// command. If you add a new structured filter (e.g. by-camera,
+// by-album, by-rating-range), add it as a new variable here and a
+// new branch in loadPhotos — never reuse curSearch.
+//
+//   curFolder       → get_photos(folder=...)
+//   curStatus       → get_photos(statusFilter=...)
+//   curRating       → client-side filter post-fetch
+//   curMonth        → client-side filter post-fetch
+//   curMediaType    → client-side filter post-fetch
+//   _currentPersonFilter → find_photos_by_person(name=...)
+//   curSearch       → search_photos(query=...) — user-typed only
 let curFolder='',curSearch='',curStatus='',curView='gallery',curRating='';
 let curMonth='',curMediaType='';
 let selectedIds=new Set(),lastClickedIdx=-1;
@@ -5729,13 +5753,18 @@ $('btnStopFaceScan').onclick = async () => {
 // ── Person filter pill (sidebar click) ──────────────────────────────────────
 let _currentPersonFilter=null;
 function setPersonFilter(p){
+  // v1.5.107 — DO NOT touch curSearch here. curSearch is for
+  // user-typed free-text only; assigning a structured-entity name
+  // ("Ali Can Bombadil") into it ships the name through FTS where
+  // multi-word names get tokenised and false-match common English
+  // words ("can"). loadPhotos detects _currentPersonFilter and uses
+  // the dedicated find_photos_by_person command instead.
   _currentPersonFilter=p;
   $('searchPersonName').textContent=p.name;
   $('searchPersonPill').classList.add('active');
   document.querySelector('.search-box').classList.add('person-active');
   $('searchInput').value='';
   $('searchHint').textContent='';
-  curSearch=p.name.toLowerCase();
   loadPhotos();
 }
 function clearPersonFilter(){
@@ -5743,7 +5772,6 @@ function clearPersonFilter(){
   _currentPersonFilter=null;
   $('searchPersonPill').classList.remove('active');
   document.querySelector('.search-box').classList.remove('person-active');
-  curSearch='';
   loadPhotos();
 }
 $('searchPersonClear').onclick=(e)=>{e.stopPropagation();clearPersonFilter();};
