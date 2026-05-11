@@ -2503,7 +2503,35 @@ select.tb-select:focus{border-color:var(--red-dark)}
 </div>
 
 <script>
-const{invoke}=window.__TAURI__.core;
+// v1.5.91 — global invoke timing + error trap. Wraps every backend call
+// so a slow command surfaces as a console.warn + visible toast (when
+// available), and any rejected invoke leaves a console.error breadcrumb
+// instead of silently freezing the UI. Helps localize "click → freeze"
+// regressions without the user having to dig through DevTools timing.
+window.__rt_invokeStats = { calls: 0, lastSlow: null };
+const _rtRawInvoke = window.__TAURI__.core.invoke;
+const invoke = async function(cmd, args) {
+  const t0 = performance.now();
+  window.__rt_invokeStats.calls++;
+  try {
+    const result = await _rtRawInvoke(cmd, args);
+    const ms = performance.now() - t0;
+    if (ms > 600) {
+      console.warn(`[rt-invoke slow] ${cmd} ${ms.toFixed(0)}ms`, args);
+      window.__rt_invokeStats.lastSlow = { cmd, ms, t: Date.now() };
+      try {
+        if (typeof toast === 'function') {
+          toast(`Slow: ${cmd} took ${(ms/1000).toFixed(1)}s`, 'error');
+        }
+      } catch (_) {}
+    }
+    return result;
+  } catch (e) {
+    const ms = performance.now() - t0;
+    console.error(`[rt-invoke fail] ${cmd} after ${ms.toFixed(0)}ms`, e, args);
+    throw e;
+  }
+};
 const{listen}=window.__TAURI__.event;
 const convertFileSrc = window.__TAURI__.core.convertFileSrc;
 

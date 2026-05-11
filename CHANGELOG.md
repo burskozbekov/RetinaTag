@@ -2,6 +2,15 @@
 
 All notable changes to RetinaTag (Windows side). Newest at the top.
 
+## v1.5.91 — 2026-05-11
+**Diagnostic invoke timing wrapper.** v1.5.89+v1.5.90'da DB komutları
+spawn_blocking ile sarıldı ama kullanıcı hâlâ "full kilitleniyor"
+diyor. Hangi komutun yavaş olduğunu bulmak için global invoke wrap'i
+eklendi: 600 ms'den uzun süren her IPC çağrısı `console.warn` +
+kullanıcıya görünür toast ile bildiriliyor (`Slow: get_photos took
+3.2s`). Hata atan invoke `console.error` ile log'lanıyor. Böylece
+freeze pattern'i atomik komuta indirgenebiliyor.
+
 ## v1.5.90 — 2026-05-11
 **Settings sonrası sidebar freeze fix** — v1.5.89 sadece Settings'i açtı
 ama sidebar tıklamaları (People listesindeki bir isim, Tag Manager,
