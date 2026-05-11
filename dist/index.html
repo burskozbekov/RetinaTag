@@ -3375,11 +3375,16 @@ gridWrap.addEventListener('scroll',()=>{
     }
   });
 });
-// v1.5.112 — anchor-aware resize. If column count changed (resize that
-// matters), re-position scroll so the previously-top photo stays at
-// the top of the viewport. Same-cols resizes (e.g. detail panel
-// open/close on a wide window where cols don't change) fall back to
-// the old preserve-pixels path because that's already correct.
+// v1.5.113 — anchor-aware resize, prefer SELECTED photo. Priority:
+//   1) selectedId — the user clicked this, it must stay where the
+//      eye expects it. We record its vertical offset within the
+//      viewport before resize and restore that exact offset after.
+//   2) _topAnchorId — fallback when nothing's selected: keep the
+//      top-left photo at the top.
+//   3) preserve-pixels — last resort when neither anchor is known
+//      (e.g. fresh load before any scroll).
+// Same-cols resizes (panel open/close on a wide window) skip the
+// anchor math because pixel-preserve is already correct then.
 let _gridResizeRaf=null;
 new ResizeObserver(()=>{
   if(_gridResizeRaf)return;
@@ -3391,14 +3396,31 @@ new ResizeObserver(()=>{
       renderGrid(true);
       return;
     }
-    // Cols changed — anchor on the photo that was at the top-left.
-    const anchorIdx=_topAnchorId!=null
-      ? photos.findIndex(p=>p.id===_topAnchorId)
-      : -1;
+    // Pick anchor — selected photo first, top-visible second.
+    let anchorIdx=-1;
+    let anchorOffsetInViewport=0;
+    if(selectedId!=null){
+      const sIdx=photos.findIndex(p=>p.id===selectedId);
+      if(sIdx>=0&&oldCols){
+        anchorIdx=sIdx;
+        const sRow=Math.floor(sIdx/oldCols);
+        const sY=sRow*CELL_H;
+        // Where the selected photo sat relative to the viewport top
+        // BEFORE resize. Negative = above viewport, positive = below.
+        anchorOffsetInViewport=sY-gridWrap.scrollTop;
+      }
+    }
+    if(anchorIdx<0&&_topAnchorId!=null){
+      anchorIdx=photos.findIndex(p=>p.id===_topAnchorId);
+      // For the top-visible fallback we anchor it at viewport top (0).
+      anchorOffsetInViewport=0;
+    }
     renderGrid(true);  // recomputes grid height for new cols
     if(anchorIdx>=0){
       const newRow=Math.floor(anchorIdx/newCols);
-      gridWrap.scrollTop=newRow*CELL_H;
+      const newY=newRow*CELL_H;
+      const newScrollTop=Math.max(0,newY-anchorOffsetInViewport);
+      gridWrap.scrollTop=newScrollTop;
       updateCards(newCols);
     }
   });
