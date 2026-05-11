@@ -1,6 +1,6 @@
 {
-  "version": "1.5.81",
-  "notes": "RetinaTag 1.5.81 - LAN sync restored. Fixed v1.5.76 UI-freeze regression via 5-round bisect (root cause: build cache corruption, not the code). Full LAN sync Phase-1 (mDNS discovery, Ed25519 identity, axum HTTP, 6-digit pair flow) with WebView staying responsive. Settings > Network Sync (Beta) is functional.",
+  "version": "1.5.82",
+  "notes": "RetinaTag 1.5.82 - LAN sync local IP auto-detect. Settings - Network Sync now shows the actual LAN IP (e.g. 192.168.1.42:43210) instead of placeholder so users do not have to dig through ipconfig. Builds on the v1.5.81 freeze-fix.",
   "pub_date": "2026-05-11T03:30:00Z",
   "platforms": {
     "darwin-aarch64": {
@@ -8,7 +8,7 @@
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/mac-latest/RetinaTag.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNR3h4b0FVeVpWZ20vUTZ4K3IwY0F5b3NSV1ZYanpqN1ZtMGVrREVmN1JYWCtOZU1hWDhoVXI0Nk1pcExYRVJUQWhtR1BJZWZScjM3anRsdTcrcXdTWkFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDU2MDM0CWZpbGU6UmV0aW5hVGFnXzEuNS44MV94NjQtc2V0dXAuZXhlCmNHNnh0TWxIZ1BsRERJWUtrcCtyVUNIUmhNUkViNTU0b0dWVjZZU1dUL0psa1RCdXNNVXpJbkxmYjN5SlJRWkJpRjZxbWRMak9GZWJEd214MllLWUJnPT0K",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNRzVHUHdLcTh6bEl6WTR0Rm0wcDZtWTJwTnBvUDl2MnMvK2hTWG1CenFmWmZudm0yeWxzZlEyNm9Bb2d3ZDQ5S3lqMzQ5MDhSZmdnMEFSRGZGMDNhT0FvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDU4NjA0CWZpbGU6UmV0aW5hVGFnXzEuNS44Ml94NjQtc2V0dXAuZXhlCkNwMjZXZ0R3bmE1VHZ6SFRoVXBvanczek5lTy8xdlpLK2pMTmlGV21ZYmpYZVFnbDlwVy9TSEFMKzMzQll4RytyMU1RYWVaWVcvUUpwRFRmTDZyaERRPT0K\n",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/windows-latest/RetinaTag-setup.exe"
     }
   }

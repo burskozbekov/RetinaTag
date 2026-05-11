@@ -11205,6 +11205,10 @@ pub struct SyncState {
     pub public_key_b64: String,
     pub port: Option<u16>,
     pub pair_code: Option<String>,
+    /// v1.5.82 — non-loopback local IPv4 addresses. UI surfaces these
+    /// so the user can type "192.168.1.42:43210" into the other device
+    /// without manually finding their own IP. Empty when sync is off.
+    pub local_ips: Vec<String>,
 }
 
 /// Snapshot of the local sync service. The UI polls this to show
@@ -11227,6 +11231,23 @@ pub async fn sync_get_state(
             None => (None, None),
         }
     };
+    // v1.5.82 — auto-detect non-loopback IPv4 addresses so the UI can
+    // surface "192.168.1.42:43210" without the user hunting in ipconfig.
+    // Only collected when sync is on; off-state returns an empty list
+    // so we don't waste an interface enumeration syscall on every UI poll.
+    let local_ips: Vec<String> = if port.is_some() {
+        if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|i| !i.is_loopback())
+            .filter_map(|i| match i.ip() {
+                std::net::IpAddr::V4(v4) => Some(v4.to_string()),
+                _ => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(SyncState {
         enabled: enabled_flag && port.is_some(),
         device_id: identity.device_id,
@@ -11234,6 +11255,7 @@ pub async fn sync_get_state(
         public_key_b64: identity.public_key_b64,
         port,
         pair_code,
+        local_ips,
     })
 }
 

@@ -9259,10 +9259,18 @@ async function _syncRefreshUI() {
     // port — the user knows their own IP.
     const addrEl = document.getElementById('syncMyAddr');
     if (addrEl) {
-      // Port is reliable from backend. IP we display as "<your local IP>"
-      // because the WebView's window.location is tauri://localhost so we
-      // can't introspect it from JS.
-      addrEl.textContent = '<your local IP>:' + state.port;
+      // v1.5.82 — backend now ships non-loopback IPv4 addresses, so
+      // surface them directly instead of making the user dig through
+      // ipconfig. Falls back to the placeholder if interface
+      // enumeration found nothing (isolated dev box with no LAN).
+      const ips = (state.local_ips || []).filter(s => s && s !== '127.0.0.1');
+      if (ips.length === 0) {
+        addrEl.textContent = '<your local IP>:' + state.port;
+      } else if (ips.length === 1) {
+        addrEl.textContent = ips[0] + ':' + state.port;
+      } else {
+        addrEl.textContent = ips.map(ip => ip + ':' + state.port).join('  ·  ');
+      }
     }
     const codeEl = document.getElementById('syncMyCode');
     if (codeEl) codeEl.textContent = state.pair_code || '— click "New code"';
