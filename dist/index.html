@@ -3347,10 +3347,25 @@ function drainThumbs(){
   }
 }
 let scrollRaf=null;
+// v1.5.112 — track the photo ID at the top-left of the viewport so a
+// window resize can re-anchor on the same image. Without this, the
+// ResizeObserver below only preserved scrollTop in pixels — but the
+// grid's total height changes when cols change (wider window → fewer
+// rows → shorter scroll height), so the same pixel offset lands on a
+// completely different photo (often past the end → snaps to top).
+// Updated on every scroll tick and after each grid render.
+let _topAnchorId=null;
+function _captureTopAnchor(){
+  const cols=lastCols||getCols();
+  if(!photos.length||!cols)return;
+  const topRow=Math.floor(gridWrap.scrollTop/CELL_H);
+  const idx=Math.min(photos.length-1,topRow*cols);
+  if(photos[idx])_topAnchorId=photos[idx].id;
+}
 gridWrap.addEventListener('scroll',()=>{
   if(scrollRaf)return;
   scrollRaf=requestAnimationFrame(()=>{
-    scrollRaf=null;updateCards();
+    scrollRaf=null;updateCards();_captureTopAnchor();
     // Show the return-to-top button once the user has scrolled more than a
     // viewport-and-a-half down. Using .visible (not display:block) lets the
     // hover transition animate cleanly.
@@ -3360,7 +3375,34 @@ gridWrap.addEventListener('scroll',()=>{
     }
   });
 });
-new ResizeObserver(()=>renderGrid(true)).observe(gridWrap);
+// v1.5.112 — anchor-aware resize. If column count changed (resize that
+// matters), re-position scroll so the previously-top photo stays at
+// the top of the viewport. Same-cols resizes (e.g. detail panel
+// open/close on a wide window where cols don't change) fall back to
+// the old preserve-pixels path because that's already correct.
+let _gridResizeRaf=null;
+new ResizeObserver(()=>{
+  if(_gridResizeRaf)return;
+  _gridResizeRaf=requestAnimationFrame(()=>{
+    _gridResizeRaf=null;
+    const oldCols=lastCols;
+    const newCols=getCols();
+    if(newCols===oldCols||!photos.length){
+      renderGrid(true);
+      return;
+    }
+    // Cols changed — anchor on the photo that was at the top-left.
+    const anchorIdx=_topAnchorId!=null
+      ? photos.findIndex(p=>p.id===_topAnchorId)
+      : -1;
+    renderGrid(true);  // recomputes grid height for new cols
+    if(anchorIdx>=0){
+      const newRow=Math.floor(anchorIdx/newCols);
+      gridWrap.scrollTop=newRow*CELL_H;
+      updateCards(newCols);
+    }
+  });
+}).observe(gridWrap);
 
 // ── Gallery drag-select (rubber-band) ────────────────────────────────────────
 // Mouse-down on the grid background (not on a card) starts a selection
