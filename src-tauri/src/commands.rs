@@ -1956,19 +1956,8 @@ pub async fn check_ffmpeg() -> Result<bool, String> {
 pub async fn get_settings(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, String)>, String> {
-    // v1.5.89 — wrap in spawn_blocking so a contended std::sync::Mutex
-    // on state.db doesn't park the async runtime worker thread the
-    // Tauri IPC dispatcher is using. Without this, when Settings opens
-    // and `get_settings` lands on the same worker that's also handling
-    // sync/watcher/db work, the modal can stall for seconds — looks
-    // like a "Settings click freezes the program" regression.
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|_| "db lock".to_string())?;
-        db::get_all_settings(&conn).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::get_all_settings(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2003,22 +1992,16 @@ pub async fn set_estimated_location(
 pub async fn get_provider_statuses(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ProviderStatus>, String> {
-    // v1.5.89 — heavy DB read (settings + per-provider stats) off the
-    // async runtime worker so Settings open doesn't block the IPC
-    // dispatch thread.
-    let db = state.db.clone();
-    let (settings_list, usage_stats) = tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+    let (settings_list, usage_stats) = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
         let settings = db::get_all_settings(&conn).unwrap_or_default();
         let mut usage = std::collections::HashMap::new();
         for provider in AiProvider::all() {
             let stats = db::get_provider_stats(&conn, provider.key_name()).unwrap_or((0, 0, 0.0));
             usage.insert(provider.key_name(), stats);
         }
-        Ok::<_, String>((settings, usage))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+        (settings, usage)
+    };
 
     let settings: std::collections::HashMap<String, String> =
         settings_list.into_iter().collect();
@@ -2089,14 +2072,8 @@ pub async fn get_all_tags(
     prefix: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, i64)>, String> {
-    // v1.5.90 — off the async worker.
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|_| "db lock".to_string())?;
-        db::get_all_tags(&conn, prefix.as_deref()).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::get_all_tags(&conn, prefix.as_deref()).map_err(|e| e.to_string())
 }
 
 /// Tags that most often appear alongside `tag`. Used by the detail panel to
@@ -2818,15 +2795,8 @@ pub async fn remove_watch_folder(
 pub async fn get_watch_folders(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<WatchFolder>, String> {
-    // v1.5.89 — same fix as get_settings: don't lock std::sync::Mutex
-    // on the async worker thread; offload to a blocking task.
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|_| "db lock".to_string())?;
-        db::get_watch_folders(&conn).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::get_watch_folders(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -4475,25 +4445,19 @@ pub async fn get_cleanup_blurry(
 pub async fn get_budget_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<BudgetStatus, String> {
-    // v1.5.89 — offload monthly-spend aggregation off the async worker.
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|_| "db lock".to_string())?;
-        let limit: f64 = db::get_setting(&conn, "monthly_budget_usd")
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        let spent = db::get_monthly_spend(&conn).map_err(|e| e.to_string())?;
-        Ok::<_, String>(BudgetStatus {
-            monthly_limit_usd: limit,
-            spent_this_month: spent,
-            remaining: (limit - spent).max(0.0),
-            is_over: limit > 0.0 && spent >= limit,
-        })
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    let limit: f64 = db::get_setting(&conn, "monthly_budget_usd")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    let spent = db::get_monthly_spend(&conn).map_err(|e| e.to_string())?;
+    Ok(BudgetStatus {
+        monthly_limit_usd: limit,
+        spent_this_month: spent,
+        remaining: (limit - spent).max(0.0),
+        is_over: limit > 0.0 && spent >= limit,
     })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 // ── 12. Natural Language Search ─────────────────────────────────────────────
@@ -6294,37 +6258,28 @@ pub async fn suggest_face_matches(
 pub async fn get_persons(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Person>, String> {
-    // v1.5.90 — full body in spawn_blocking. Reads the persons table AND
-    // base64-encodes a face thumbnail from disk per row; both the SQL and
-    // the per-row `std::fs::read` can be slow with dozens of named people,
-    // and running them on the async worker was a confirmed source of
-    // sidebar-click freezes alongside the v1.5.89 fixes.
-    let db = state.db.clone();
-    let thumbs_dir = state.thumbnails_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let rows = {
-            let conn = db.lock().map_err(|_| "db lock".to_string())?;
-            db::get_persons(&conn).map_err(|e| e.to_string())?
-        };
-        let faces_dir = thumbs_dir.join("faces");
-        Ok::<_, String>(rows
-            .into_iter()
-            .map(|r| {
-                let thumbnail = r.thumbnail
-                    .as_deref()
-                    .and_then(|t| std::fs::read(faces_dir.join(t)).ok())
-                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
-                Person {
-                    id: r.id,
-                    name: r.name,
-                    thumbnail,
-                    face_count: r.face_count,
-                }
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let (rows, thumbs_dir) = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let rows = db::get_persons(&conn).map_err(|e| e.to_string())?;
+        (rows, state.thumbnails_dir.clone())
+    };
+    let faces_dir = thumbs_dir.join("faces");
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            // Use thumbnail file name stored in DB, or fall back to any face of this person
+            let thumbnail = r.thumbnail
+                .as_deref()
+                .and_then(|t| std::fs::read(faces_dir.join(t)).ok())
+                .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+            Person {
+                id: r.id,
+                name: r.name,
+                thumbnail,
+                face_count: r.face_count,
+            }
+        })
+        .collect())
 }
 
 /// Assign (or unassign) a detected face to a person.
@@ -11233,257 +11188,4 @@ pub async fn get_trending_tags(
     }
 
     Ok(out)
-}
-
-// ── LAN Sync (Phase-1 commands) ─────────────────────────────────────────
-//
-// These bridge the JS-side "Network Sync (Beta)" settings page to
-// the `sync` module. Every command is a no-op unless the user has
-// explicitly enabled sync, so reaching for these has zero impact on
-// users who never turn it on.
-
-#[derive(serde::Serialize)]
-pub struct SyncState {
-    pub enabled: bool,
-    pub device_id: String,
-    pub device_name: String,
-    pub public_key_b64: String,
-    pub port: Option<u16>,
-    pub pair_code: Option<String>,
-    /// v1.5.82 — non-loopback local IPv4 addresses. UI surfaces these
-    /// so the user can type "192.168.1.42:43210" into the other device
-    /// without manually finding their own IP. Empty when sync is off.
-    pub local_ips: Vec<String>,
-}
-
-/// Snapshot of the local sync service. The UI polls this to show
-/// enabled/disabled, the device name, the current pair code if one is
-/// outstanding, and the port the HTTP server is listening on (handy
-/// for the user typing into the OTHER device).
-#[tauri::command]
-pub async fn sync_get_state(
-    state: tauri::State<'_, AppState>,
-) -> Result<SyncState, String> {
-    // v1.5.89 — DB read off the async worker. sync_service lock is
-    // short (just reads two in-memory fields) and stays on the worker;
-    // the identity load + identity_enabled query that actually hits
-    // SQLite goes through spawn_blocking instead.
-    let (port, pair_code) = {
-        let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
-        match svc.as_ref() {
-            Some(s) => (Some(s.port), s.current_pair_code()),
-            None => (None, None),
-        }
-    };
-    let db = state.db.clone();
-    let device_name = default_device_name();
-    let (identity, enabled_flag) = tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|_| "db lock".to_string())?;
-        let (id, _sk) = crate::sync::load_or_create_identity(&conn, &device_name)
-            .map_err(|e| e.to_string())?;
-        let enabled = crate::sync::identity_enabled(&conn);
-        Ok::<_, String>((id, enabled))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    // v1.5.82 — auto-detect non-loopback IPv4 addresses so the UI can
-    // surface "192.168.1.42:43210" without the user hunting in ipconfig.
-    // Only collected when sync is on; off-state returns an empty list
-    // so we don't waste an interface enumeration syscall on every UI poll.
-    let local_ips: Vec<String> = if port.is_some() {
-        if_addrs::get_if_addrs()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|i| !i.is_loopback())
-            .filter_map(|i| match i.ip() {
-                std::net::IpAddr::V4(v4) => Some(v4.to_string()),
-                _ => None,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    Ok(SyncState {
-        enabled: enabled_flag && port.is_some(),
-        device_id: identity.device_id,
-        device_name: identity.device_name,
-        public_key_b64: identity.public_key_b64,
-        port,
-        pair_code,
-        local_ips,
-    })
-}
-
-#[tauri::command]
-pub async fn sync_set_device_name(
-    name: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let trimmed = name.trim().to_string();
-    if trimmed.is_empty() {
-        return Err("device name cannot be empty".into());
-    }
-    // v1.5.89 — DB write off the async worker.
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|_| "db lock".to_string())?;
-        crate::sync::set_identity_name(&conn, &trimmed).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn sync_enable(state: tauri::State<'_, AppState>) -> Result<SyncState, String> {
-    // MutexGuards must not be held across awaits — the future would
-    // otherwise not be Send, which tauri::generate_handler requires.
-    // Compute booleans first, drop the guard, then await.
-    let already_running = {
-        let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
-        svc.is_some()
-    };
-    if already_running {
-        return sync_get_state(state).await;
-    }
-    let (identity, signing) = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let (id, sk) = crate::sync::load_or_create_identity(&conn, &default_device_name())
-            .map_err(|e| e.to_string())?;
-        crate::sync::set_identity_enabled(&conn, true).map_err(|e| e.to_string())?;
-        (id, sk)
-    };
-    let db_arc = state.db.clone();
-    let svc = crate::sync::SyncService::start(db_arc, identity, signing)
-        .map_err(|e| e.to_string())?;
-    {
-        let mut slot = state.sync_service.lock().map_err(|_| "sync lock")?;
-        *slot = Some(svc);
-    }
-    sync_get_state(state).await
-}
-
-#[tauri::command]
-pub async fn sync_disable(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    // Drop the service (its Drop impl tears down mDNS + axum).
-    {
-        let mut slot = state.sync_service.lock().map_err(|_| "sync lock")?;
-        slot.take();
-    }
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    crate::sync::set_identity_enabled(&conn, false).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn sync_list_peers(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<crate::sync::PairedPeer>, String> {
-    // v1.5.89 — DB read off the async worker so polling this for the
-    // Network Sync UI doesn't compete with whatever else holds db.lock.
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|_| "db lock".to_string())?;
-        crate::sync::list_peers(&conn).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn sync_list_nearby(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<crate::sync::NearbyPeer>, String> {
-    let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
-    match svc.as_ref() {
-        Some(s) => Ok(s.nearby_peers()),
-        None => Ok(Vec::new()),
-    }
-}
-
-#[tauri::command]
-pub async fn sync_mint_pair_code(
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let svc = state.sync_service.lock().map_err(|_| "sync lock")?;
-    match svc.as_ref() {
-        Some(s) => Ok(s.mint_pair_code()),
-        None => Err("Sync is not enabled".into()),
-    }
-}
-
-#[tauri::command]
-pub async fn sync_pair_with(
-    addr: String,
-    code: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<crate::sync::PairedPeer, String> {
-    // 1. Ping the peer first. Catches "wrong address" / "not a
-    //    RetinaTag device" before we send a pair code anywhere. The
-    //    response itself isn't used — /pair returns the canonical
-    //    identity record after the code check, which is what we
-    //    persist below.
-    crate::sync::ping_peer(&addr).await.map_err(|e| e.to_string())?;
-    // 2. Our identity for the outbound request.
-    let me = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let (id, _sk) = crate::sync::load_or_create_identity(&conn, &default_device_name())
-            .map_err(|e| e.to_string())?;
-        id
-    };
-    // 3. Send the code. On success, persist the peer locally.
-    let resp = crate::sync::pair_with_peer(&addr, &code, &me)
-        .await
-        .map_err(|e| e.to_string())?;
-    let pk = base64_url_decode(&resp.identity.public_key_b64)?;
-    {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        crate::sync::insert_peer(
-            &conn,
-            &resp.identity.device_id,
-            &resp.identity.device_name,
-            &pk,
-            Some(&addr),
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(crate::sync::PairedPeer {
-        device_id: resp.identity.device_id,
-        device_name: resp.identity.device_name,
-        public_key_b64: resp.identity.public_key_b64,
-        last_addr: Some(addr),
-        last_seen: Some(resp.paired_at),
-        paired_at: resp.paired_at,
-    })
-}
-
-#[tauri::command]
-pub async fn sync_remove_peer(
-    device_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    crate::sync::remove_peer(&conn, &device_id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn sync_ping_peer(addr: String) -> Result<crate::sync::PingPayload, String> {
-    crate::sync::ping_peer(&addr).await.map_err(|e| e.to_string())
-}
-
-fn default_device_name() -> String {
-    // Pull the OS hostname for a sensible default. The user can rename
-    // anytime via sync_set_device_name.
-    if let Ok(hn) = std::env::var("COMPUTERNAME") {
-        return hn;
-    }
-    if let Ok(hn) = std::env::var("HOSTNAME") {
-        return hn;
-    }
-    "RetinaTag".to_string()
-}
-
-fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine;
-    URL_SAFE_NO_PAD.decode(s).map_err(|e| e.to_string())
 }

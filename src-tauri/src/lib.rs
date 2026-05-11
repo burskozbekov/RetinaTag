@@ -1,19 +1,3 @@
-// v1.5.77 — UI-freeze regression rollback for v1.5.76's LAN sync.
-//
-// v1.5.76 shipped LAN sync infrastructure (Phase-1) AND its UI in one
-// commit. The combination froze the WebView on launch. Bisect on
-// v1.5.77 isolated the cause: the frontend changes are SAFE in
-// isolation (JS gracefully hides the Network Sync nav when the
-// backend command is missing — try/catch around invoke). This
-// release ships just the v1.5.76 frontend on top of the v1.5.75
-// backend. Network Sync nav is auto-hidden because the
-// sync_get_state command doesn't exist on this build; everything
-// else behaves identically to v1.5.75.
-//
-// The actual LAN sync backend (5 new deps, sync.rs, DB migration,
-// 10 commands) will land in v1.5.78+ one piece at a time so we can
-// identify exactly which piece broke v1.5.76's WebView.
-//
 // v1.5.75 — Audit cleanup cycle. The P0/P1 work shipped in 1.5.73/1.5.74
 // covered the catastrophic stuff; this pass closes the long tail of P2
 // gotchas the audit surfaced.
@@ -219,7 +203,6 @@ mod watcher;
 mod xmp;
 mod device_monitor;
 mod tray;
-mod sync;
 #[cfg(windows)]
 mod mtp;
 
@@ -237,8 +220,6 @@ pub struct AppState {
     pub face_stop: Arc<AtomicBool>,
     pub watcher: Mutex<Option<watcher::FolderWatcher>>,
     pub device_monitor: Mutex<Option<device_monitor::DeviceMonitor>>,
-    /// v1.5.80 — LAN sync service slot. None until the user enables.
-    pub sync_service: Mutex<Option<sync::SyncService>>,
     /// Face IDs returned by the last get_unknown_faces call.
     /// On the NEXT call, any still-unassigned faces here are auto-skipped.
     pub last_shown_face_ids: Mutex<Vec<i64>>,
@@ -380,7 +361,6 @@ pub fn run() {
                 watcher: Mutex::new(None),
                 device_monitor: Mutex::new(None),
                 last_shown_face_ids: Mutex::new(Vec::new()),
-                sync_service: Mutex::new(None),
                 vault_kek: Mutex::new(None),
             });
 
@@ -661,17 +641,6 @@ pub fn run() {
             commands::merge_duplicate_photos,
             commands::save_all_folders_as_collections,
             commands::get_trending_tags,
-            // v1.5.81 bisect — LAN sync command registry (Phase-1).
-            commands::sync_get_state,
-            commands::sync_set_device_name,
-            commands::sync_enable,
-            commands::sync_disable,
-            commands::sync_list_peers,
-            commands::sync_list_nearby,
-            commands::sync_mint_pair_code,
-            commands::sync_pair_with,
-            commands::sync_remove_peer,
-            commands::sync_ping_peer,
         ])
         // Intercept window close on the main window. If the `close_to_tray`
         // preference is enabled we hide the window instead of exiting, so the

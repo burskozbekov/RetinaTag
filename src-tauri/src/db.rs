@@ -507,41 +507,6 @@ pub fn init_db(path: &str) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_scan_history_started ON scan_history(started_at DESC);"
     ).ok();
 
-    // v1.5.76 — LAN sync identity + peer registry.
-    //
-    // sync_identity:
-    //   Singleton row holding this install's Ed25519 keypair and a
-    //   human-readable device name. The secret key never leaves the
-    //   machine; the public key is announced via mDNS and shown to the
-    //   user in the pair-code flow so the other end can verify.
-    //   `enabled = 0` keeps mDNS broadcasting off — the feature is
-    //   opt-in.
-    //
-    // sync_peers:
-    //   Devices the user has explicitly paired with. We store the
-    //   peer's pubkey + last-seen IP/port + display name. Inbound
-    //   signed envelopes are verified against the pubkey here; an
-    //   un-paired sender is rejected at the transport layer.
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sync_identity (
-            id            INTEGER PRIMARY KEY CHECK (id = 1),
-            device_id     TEXT NOT NULL,
-            device_name   TEXT NOT NULL,
-            secret_key    BLOB NOT NULL,
-            public_key    BLOB NOT NULL,
-            enabled       INTEGER NOT NULL DEFAULT 0,
-            created_at    INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS sync_peers (
-            device_id     TEXT PRIMARY KEY,
-            device_name   TEXT NOT NULL,
-            public_key    BLOB NOT NULL,
-            last_addr     TEXT,
-            last_seen     INTEGER,
-            paired_at     INTEGER NOT NULL
-        );"
-    ).ok();
-
     Ok(conn)
 }
 
