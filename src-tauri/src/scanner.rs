@@ -436,6 +436,17 @@ fn scan_folder_parallel(
                                         let _ = stmt.execute(rusqlite::params![id, tag, 1.0_f64, "xmp_sidecar"]);
                                     }
                                 }
+                                // v1.5.110 — fresh scan that picked up
+                                // sidecar tags transitions the row
+                                // straight to 'tagged' so the
+                                // "Tagged" stat is correct from the
+                                // first scan, not after the next
+                                // backfill.
+                                let now = chrono::Utc::now().to_rfc3339();
+                                let _ = txn.execute(
+                                    "UPDATE photos SET status='tagged', tagged_at=?2 WHERE id=?1 AND status='pending'",
+                                    rusqlite::params![id, now],
+                                );
                             }
                             if let Some(desc) = xmp.description.as_deref() {
                                 let _ = db::update_photo_description(&txn, id, desc);

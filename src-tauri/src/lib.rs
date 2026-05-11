@@ -461,6 +461,18 @@ pub fn run() {
                             "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)"
                         )
                         .map_err(|e| format!("prepare insert: {}", e))?;
+                    // v1.5.110 — flip status pending -> tagged when we
+                    // import keywords from a sidecar. Without this the
+                    // "Tagged" stat in the sidebar undercounts Mac-only
+                    // photos: tags exist in the tags table but
+                    // photos.status stays 'pending' so the count is
+                    // wrong. Skip 'error' rows so we don't paper over
+                    // real ingestion failures.
+                    let mut mark_tagged = txn
+                        .prepare_cached(
+                            "UPDATE photos SET status='tagged', tagged_at=?2 WHERE id=?1 AND status='pending'"
+                        )
+                        .map_err(|e| format!("prepare mark_tagged: {}", e))?;
                     // v1.5.108 — MWG face region import. Two extra prepared
                     // statements: one to look up "does this photo+person+
                     // imported-face already exist" (idempotency on re-launch),
@@ -477,6 +489,7 @@ pub fn run() {
                              VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?6, ?7)"
                         )
                         .map_err(|e| format!("prepare insert_face: {}", e))?;
+                    let now = chrono::Utc::now().to_rfc3339();
                     for (id, xmp) in pending.drain(..) {
                         if !xmp.keywords.is_empty() {
                             for tag in &xmp.keywords {
@@ -488,6 +501,12 @@ pub fn run() {
                                     *stats.0 += 1;
                                 }
                             }
+                            // v1.5.110 — bump pending->tagged so the
+                            // "Tagged" sidebar counter reflects Mac
+                            // photos. UPDATE is conditional on
+                            // status='pending' so we don't disturb
+                            // 'tagged'/'error' rows.
+                            let _ = mark_tagged.execute(rusqlite::params![id, &now]);
                         }
                         if let Some(d) = xmp.description.as_deref() {
                             if !d.trim().is_empty() {
@@ -563,6 +582,7 @@ pub fn run() {
                         }
                     }
                     drop(insert_tag);
+                    drop(mark_tagged);
                     drop(find_face);
                     drop(insert_face);
                     txn.commit().map_err(|e| e.to_string())?;

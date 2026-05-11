@@ -11306,6 +11306,14 @@ pub async fn import_xmp_sidecars(
                     "INSERT OR IGNORE INTO tags (photo_id, tag, confidence, source) VALUES (?1, ?2, ?3, ?4)",
                 )
                 .map_err(|e| e.to_string())?;
+            // v1.5.110 — flip pending→tagged so the sidebar "Tagged"
+            // count includes Mac-only photos.
+            let mut mark_tagged_stmt = txn
+                .prepare_cached(
+                    "UPDATE photos SET status='tagged', tagged_at=?2 WHERE id=?1 AND status='pending'",
+                )
+                .map_err(|e| e.to_string())?;
+            let now = chrono::Utc::now().to_rfc3339();
             for (id, xmp) in pending.drain(..) {
                 if !xmp.keywords.is_empty() {
                     for tag in &xmp.keywords {
@@ -11317,6 +11325,7 @@ pub async fn import_xmp_sidecars(
                             result.new_tags += 1;
                         }
                     }
+                    let _ = mark_tagged_stmt.execute(rusqlite::params![id, &now]);
                 }
                 if let Some(desc) = xmp.description.as_deref() {
                     if !desc.trim().is_empty() {
@@ -11339,6 +11348,7 @@ pub async fn import_xmp_sidecars(
                 }
             }
             drop(tag_stmt);
+            drop(mark_tagged_stmt);
             txn.commit().map_err(|e| e.to_string())?;
             Ok(())
         };
