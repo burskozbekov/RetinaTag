@@ -375,18 +375,27 @@ select.tb-select:focus{border-color:var(--red-dark)}
 .person-pick-item:hover{background:var(--card)}.person-pick-item.active{background:var(--red-bg);color:var(--red-light)}
 
 /* ── Modal ──────────────────────────────────────────────────────────── */
-.modal-overlay{position:fixed;inset:0;background:rgba(8,4,4,.85);display:flex;align-items:center;
-  justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:opacity .22s;will-change:opacity}
-/* v1.5.95 — WebView2 148.x regression: `backdrop-filter:blur(6px)` on
-   the same element as a transitioned opacity wedged the compositor so
-   `.open` never escaped opacity:0. Modals "opened" (class flipped,
-   pointer-events:all) but stayed invisible — user sees nothing happen
-   on Settings / Tag Manager / Import clicks and reports "kilit"
-   because an invisible overlay is now eating all their clicks.
-   Removed the backdrop blur (background already dims the page) and
-   added will-change:opacity to keep transitions on the compositor's
-   fast path. */
-.modal-overlay.open{opacity:1;pointer-events:all}
+/* v1.5.103 — Chromium 148 / WebView2 148.x has TWO compositor bugs that
+   stack on .modal-overlay:
+   (1) Opacity transition: CSS opacity reaches 1 but the GPU layer
+       texture stays at 0 — `getComputedStyle` says "1" yet the modal
+       never appears on screen.
+   (2) `display:none → display:flex` toggle: the element gets
+       `display:flex` in computed style but stays at rect 0×0 even with
+       explicit `width:100vw;height:100vh;top:0;left:0;right:0;bottom:0`.
+   Either way `pointer-events:all` is active on the (invisible) overlay
+   so every click after "opening" Settings/Tag Manager/Import gets eaten
+   → user reports "full kilit".
+   Fix that actually works in Chromium 148: keep the modal in flow with
+   `display:flex` always, and toggle `visibility:hidden ↔ visible`.
+   Visibility doesn't run through the compositor's broken transition
+   path or the display-toggle layout path. Verified in v1.5.102: modal
+   rect 1440×900, opacity 1, visibility visible, and visually rendered
+   on screen (Settings panel actually appeared). */
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;width:100vw;height:100vh;
+  background:rgba(8,4,4,.85);display:flex;align-items:center;justify-content:center;
+  z-index:100;opacity:1;visibility:hidden;pointer-events:none}
+.modal-overlay.open{visibility:visible;pointer-events:all}
 .modal-box{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-lg);
   width:580px;max-width:92vw;max-height:86vh;overflow-y:auto;overflow-x:hidden;transform:translateY(24px) scale(.97);
   transition:transform .25s ease;box-shadow:0 32px 80px rgba(0,0,0,.7),0 0 40px rgba(184,58,18,.08);
@@ -2434,6 +2443,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
 const{invoke}=window.__TAURI__.core;
 const{listen}=window.__TAURI__.event;
 const convertFileSrc = window.__TAURI__.core.convertFileSrc;
+
 
 
 

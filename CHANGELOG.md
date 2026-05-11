@@ -2,6 +2,31 @@
 
 All notable changes to RetinaTag (Windows side). Newest at the top.
 
+## v1.5.103 — 2026-05-11
+**REAL P0 modal fix.** v1.5.97 ("backdrop-filter regression" theory) was
+wrong — diagnostic in v1.5.99 confirmed modal had `opacity:1
+display:flex` in CSS BUT was still invisible on screen. Chromium 148 /
+WebView2 148.x has **two stacking compositor bugs**:
+
+1. **Opacity transition**: CSS reaches `opacity:1` but the GPU layer
+   texture stays at `0` for the entire animation. `getComputedStyle`
+   reports the correct value; the screen disagrees.
+2. **`display:none → display:flex` toggle**: even with explicit
+   `width:100vw;height:100vh;top:0;left:0;right:0;bottom:0`, the
+   element gets `display:flex` in computed style but `getBoundingClientRect`
+   returns `0×0`. The layout never propagates from the display change.
+
+Both end the same way: `.modal-overlay` "opens" with `pointer-events:all`
+active, but is invisible. Every click after Settings / Tag Manager /
+Import / Vault / Cluster / Welcome modal opens gets eaten by the
+invisible overlay → user reports "full kilit".
+
+Fix that actually paints: drop opacity transitions AND display toggle.
+Keep the modal in flow with `display:flex` permanently, gate visibility
+with `visibility:hidden ↔ visible`. Verified in v1.5.102 — `rect
+x=0 y=0 w=1440 h=900`, visibility=visible, and the Settings panel
+visually appeared on screen for the first time since v1.5.76.
+
 ## v1.5.97 — 2026-05-11
 **P0 freeze fix — kanıtlandı.** Bütün önceki teoriler (LAN sync infra,
 DB-lock contention, spawn_blocking boşlukları) YANLIŞTI. v1.5.94/96'da
