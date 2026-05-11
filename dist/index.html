@@ -9303,14 +9303,48 @@ async function _syncRefreshPeers() {
       const addr = p.last_addr || '—';
       const safeName = _esc(p.device_name || p.device_id);
       const safeId = _esc(p.device_id);
-      return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+      // v1.5.87 — per-peer Test button so the user can confirm a
+      // paired device is actually reachable on the LAN right now.
+      // Requires last_addr to be set (i.e. we've talked to them at
+      // least once); otherwise the button is disabled with a hint.
+      const safeAddr = _esc(addr);
+      const testBtnHtml = p.last_addr
+        ? `<button class="btn btn-xs btn-secondary" data-test-addr="${safeAddr}" data-test-name="${safeName}" title="Ping peer to verify reachability">Test</button>`
+        : `<button class="btn btn-xs btn-secondary" disabled title="No address known yet — wait until the peer talks to us">Test</button>`;
+      return `<div style="display:flex;align-items:center;gap:6px;padding:8px 0;border-bottom:1px solid var(--border)">
         <div style="flex:1">
           <div style="color:var(--cream);font-weight:600;font-size:13px">${safeName}</div>
-          <div style="font-size:10.5px;color:var(--text3);font-family:var(--mono,monospace)">${safeId} · last seen ${_esc(last)} · ${_esc(addr)}</div>
+          <div style="font-size:10.5px;color:var(--text3);font-family:var(--mono,monospace)">${safeId} · last seen ${_esc(last)} · ${safeAddr}</div>
+          <div class="peer-test-result" style="font-size:10.5px;font-family:var(--mono,monospace);margin-top:2px;min-height:13px"></div>
         </div>
+        ${testBtnHtml}
         <button class="btn btn-xs btn-danger" data-rm="${safeId}">Remove</button>
       </div>`;
     }).join('');
+    host.querySelectorAll('button[data-test-addr]').forEach(b => {
+      b.onclick = async () => {
+        const row = b.closest('div[style*="display:flex"]') || b.parentElement;
+        const result = row && row.querySelector('.peer-test-result');
+        if (result) {
+          result.textContent = 'Pinging…';
+          result.style.color = 'var(--text3)';
+        }
+        b.disabled = true;
+        try {
+          const info = await invoke('sync_ping_peer', { addr: b.dataset.testAddr });
+          if (result) {
+            result.textContent = '✓ Reachable — ' + (info.device_name || info.device_id);
+            result.style.color = 'var(--green, #4ade80)';
+          }
+        } catch (e) {
+          if (result) {
+            result.textContent = '✗ Unreachable: ' + e;
+            result.style.color = 'var(--red-light, #f87171)';
+          }
+        }
+        b.disabled = false;
+      };
+    });
     host.querySelectorAll('button[data-rm]').forEach(b => {
       b.onclick = async () => {
         if (!confirm(`Forget ${b.dataset.rm}? Future sync from that device will be rejected until you pair again.`)) return;
