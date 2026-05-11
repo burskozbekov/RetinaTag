@@ -9453,6 +9453,27 @@ async function _syncRefreshNearby() {
 
   const t = document.getElementById('syncEnabledToggle');
   if (t) t.onchange = async () => {
+    // v1.5.86 — confirm before disabling if peers are paired. Disable
+    // stops the mDNS announce + closes the HTTP listener, so paired
+    // peers can't reach this device until the user re-enables. Don't
+    // ambush the user — surface the consequence first.
+    if (!t.checked) {
+      try {
+        const peers = await invoke('sync_list_peers');
+        if (peers && peers.length > 0) {
+          const n = peers.length;
+          const ok = confirm(
+            'Disabling will stop announcing this device to ' + n + ' paired ' +
+            (n === 1 ? 'device' : 'devices') +
+            '. They stay paired but cannot reach you until you re-enable. Continue?'
+          );
+          if (!ok) {
+            t.checked = true; // revert
+            return;
+          }
+        }
+      } catch (_) { /* no peers known — proceed */ }
+    }
     try {
       if (t.checked) {
         await invoke('sync_enable');

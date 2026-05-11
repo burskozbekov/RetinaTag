@@ -1,14 +1,14 @@
 {
-  "version": "1.5.85",
-  "notes": "RetinaTag 1.5.85 - Pair code now shows a live TTL countdown (Expires in 4:23) beneath the code so users see exactly when it stops being honoured. Goes red on expiry. Cleared on Settings close so it does not tick down off-screen.",
-  "pub_date": "2026-05-11T04:25:00Z",
+  "version": "1.5.86",
+  "notes": "RetinaTag 1.5.86 - Network Sync disable confirmation. If paired peers exist, disabling now prompts: Disabling will stop announcing this device to N paired devices. They stay paired but cannot reach you until you re-enable. Continue?",
+  "pub_date": "2026-05-11T04:35:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSaDlkbXZzRlZISS80TUxoaU50U0ZzZnBZYjBQaGpJZURNMkNkSElxdlc3T1poVWdoM05FTkJ3TzNIRzFjUnNMbG5JdHNCWmgwSzc5UmpJVngrUlVVVTdOSmcrZ1hhWlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzE0ODIyCWZpbGU6UmV0aW5hVGFnLmFwcC50YXIuZ3oKNWswVnYxZnlBc3dlaWdMSmh1TFFac3ZsMFJleCszMjFaMVBGbzJwUzZJdVMvNnZLc3BXVXNHazEvODdzYUtUOG01bXpheHpSMStnK3JENnV2MTZuQmc9PQo=",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/mac-latest/RetinaTag.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNR3huK1IyYnJzTTV1d1czVXJXYStkeGRCZ3Nvd3FKZlN5MzZneE5RMmVnWlAzT3V1UmtQYzMyck4zOElJcVFwMzZGWXdrVU1BT0xDL0s0aGdaQkF1VVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDYzMjA5CWZpbGU6UmV0aW5hVGFnXzEuNS44NV94NjQtc2V0dXAuZXhlCmE5Y3JMNjI2REVYNk9vcSs4Q1ArempPcXJROUYreHlzdzRZc1FOQjNRYzB6RUp1K0tabWhpeDBjUlF0aHpjbTlIWldiSmI4N082QXRFOWZjbFUybUJ3PT0K\n",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNRzdrWnZlR2dHRkx3ejM0cGxnZEVaV0JocXJPb2dPSlB5dk1wYTN5ZXNpUzdKU0wvWkR0M0RQQ3BwUURHN1hxQ2tDcE9rUU1DbTRGZHpjTkJqZmpSOWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDYzNjQyCWZpbGU6UmV0aW5hVGFnXzEuNS44Nl94NjQtc2V0dXAuZXhlCkVqNTUrbEtQb3duR1QyeHVobWxlNnEvSTYwM0pXZ01YQWpoMDM4OXR0S0NWZkhPNFg5MnlTWGUyL0xTTzFLK0hQNHQ5ZjEzUkxTclZoUDMxUCtxRUNRPT0K\n",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/windows-latest/RetinaTag-setup.exe"
     }
   }
