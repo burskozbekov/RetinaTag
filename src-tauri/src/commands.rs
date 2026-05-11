@@ -2089,8 +2089,14 @@ pub async fn get_all_tags(
     prefix: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, i64)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_all_tags(&conn, prefix.as_deref()).map_err(|e| e.to_string())
+    // v1.5.90 — off the async worker.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_all_tags(&conn, prefix.as_deref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Tags that most often appear alongside `tag`. Used by the detail panel to
@@ -6288,28 +6294,37 @@ pub async fn suggest_face_matches(
 pub async fn get_persons(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Person>, String> {
-    let (rows, thumbs_dir) = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let rows = db::get_persons(&conn).map_err(|e| e.to_string())?;
-        (rows, state.thumbnails_dir.clone())
-    };
-    let faces_dir = thumbs_dir.join("faces");
-    Ok(rows
-        .into_iter()
-        .map(|r| {
-            // Use thumbnail file name stored in DB, or fall back to any face of this person
-            let thumbnail = r.thumbnail
-                .as_deref()
-                .and_then(|t| std::fs::read(faces_dir.join(t)).ok())
-                .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
-            Person {
-                id: r.id,
-                name: r.name,
-                thumbnail,
-                face_count: r.face_count,
-            }
-        })
-        .collect())
+    // v1.5.90 — full body in spawn_blocking. Reads the persons table AND
+    // base64-encodes a face thumbnail from disk per row; both the SQL and
+    // the per-row `std::fs::read` can be slow with dozens of named people,
+    // and running them on the async worker was a confirmed source of
+    // sidebar-click freezes alongside the v1.5.89 fixes.
+    let db = state.db.clone();
+    let thumbs_dir = state.thumbnails_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let rows = {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            db::get_persons(&conn).map_err(|e| e.to_string())?
+        };
+        let faces_dir = thumbs_dir.join("faces");
+        Ok::<_, String>(rows
+            .into_iter()
+            .map(|r| {
+                let thumbnail = r.thumbnail
+                    .as_deref()
+                    .and_then(|t| std::fs::read(faces_dir.join(t)).ok())
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+                Person {
+                    id: r.id,
+                    name: r.name,
+                    thumbnail,
+                    face_count: r.face_count,
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Assign (or unassign) a detected face to a person.

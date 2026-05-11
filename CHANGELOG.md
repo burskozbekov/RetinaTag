@@ -2,6 +2,14 @@
 
 All notable changes to RetinaTag (Windows side). Newest at the top.
 
+## v1.5.90 — 2026-05-11
+**Settings sonrası sidebar freeze fix** — v1.5.89 sadece Settings'i açtı
+ama sidebar tıklamaları (People listesindeki bir isim, Tag Manager,
+Import from Device) hâlâ kilitleniyordu. `get_persons` + `get_all_tags`
+de spawn_blocking ile sarıldı. Ayrıca production build'de WebView2
+DevTools (sağ-tık → Inspect veya F12) artık aktif — kalan herhangi bir
+yavaş çağrı kullanıcı tarafında doğrudan görülebiliyor.
+
 ## v1.5.89 — 2026-05-11
 **P0 Settings freeze fix** — `Settings`'e basıldığında program kilitleniyordu.
 v1.5.72'de `get_photos` / `get_stats` / `get_folders` için yapılmış olan
