@@ -2251,11 +2251,11 @@ select.tb-select:focus{border-color:var(--red-dark)}
             <div style="display:flex;gap:10px;margin-bottom:10px">
               <div style="flex:1">
                 <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px">This device's address</div>
-                <div id="syncMyAddr" style="font-family:var(--mono,monospace);font-size:13px;color:var(--cream);padding:6px 8px;background:var(--card2);border-radius:6px">—</div>
+                <div id="syncMyAddr" title="Click to copy" style="font-family:var(--mono,monospace);font-size:13px;color:var(--cream);padding:6px 8px;background:var(--card2);border-radius:6px;cursor:pointer">—</div>
               </div>
               <div style="flex:1">
                 <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px">Pair code (refreshes every 5 min)</div>
-                <div id="syncMyCode" style="font-family:var(--mono,monospace);font-size:18px;letter-spacing:3px;color:var(--cream);padding:4px 8px;background:var(--card2);border-radius:6px;text-align:center;font-weight:700">—</div>
+                <div id="syncMyCode" title="Click to copy" style="font-family:var(--mono,monospace);font-size:18px;letter-spacing:3px;color:var(--cream);padding:4px 8px;background:var(--card2);border-radius:6px;text-align:center;font-weight:700;cursor:pointer">—</div>
               </div>
             </div>
             <button class="btn btn-xs btn-secondary" id="btnSyncMintCode">New code</button>
@@ -9390,6 +9390,27 @@ async function _syncRefreshNearby() {
 }
 
 (function _wireSyncUI(){
+  // v1.5.84 — click-to-copy on the pair-code and address fields.
+  // The pair flow is two-handed (read one device, type into the
+  // other); a single click to copy beats hunting around for select
+  // + ctrl+c on a 6-digit number.
+  const copyOnClick = (id, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('click', async () => {
+      const text = (el.textContent || '').trim();
+      if (!text || text === '—' || text.startsWith('—') || text === 'click "New code"') return;
+      try {
+        await navigator.clipboard.writeText(text);
+        toast(`${label} copied: ${text}`, 'success');
+      } catch (e) {
+        toast(`Could not copy: ${e}`, 'error');
+      }
+    });
+  };
+  copyOnClick('syncMyAddr', 'Address');
+  copyOnClick('syncMyCode', 'Pair code');
+
   const t = document.getElementById('syncEnabledToggle');
   if (t) t.onchange = async () => {
     try {

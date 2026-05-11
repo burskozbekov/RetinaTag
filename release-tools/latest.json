@@ -1,14 +1,14 @@
 {
-  "version": "1.5.83",
-  "notes": "RetinaTag 1.5.83 - Network Sync nearby list now auto-refreshes every 5s while the Settings modal is open. No more mashing the refresh button to see peers come and go on the LAN.",
-  "pub_date": "2026-05-11T03:50:00Z",
+  "version": "1.5.84",
+  "notes": "RetinaTag 1.5.84 - Click-to-copy for Network Sync pair code and address. Saves the user from manually selecting 6 digits + Ctrl+C when reading them across to the other device.",
+  "pub_date": "2026-05-11T04:00:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSaDlkbXZzRlZISS80TUxoaU50U0ZzZnBZYjBQaGpJZURNMkNkSElxdlc3T1poVWdoM05FTkJ3TzNIRzFjUnNMbG5JdHNCWmgwSzc5UmpJVngrUlVVVTdOSmcrZ1hhWlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzE0ODIyCWZpbGU6UmV0aW5hVGFnLmFwcC50YXIuZ3oKNWswVnYxZnlBc3dlaWdMSmh1TFFac3ZsMFJleCszMjFaMVBGbzJwUzZJdVMvNnZLc3BXVXNHazEvODdzYUtUOG01bXpheHpSMStnK3JENnV2MTZuQmc9PQo=",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/mac-latest/RetinaTag.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNRzJqZm5LWjNZMjhyc2lUZS9wZVp4TTlibjJoSWU1elM2bWc3SEhadnFDNTg2SGFSNGozWi9Qd2ZvSy82Wlh6Z1ozRzJWdmI4OXJIenlDWWw5UStaS0FJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDYwNjg4CWZpbGU6UmV0aW5hVGFnXzEuNS44M194NjQtc2V0dXAuZXhlCmRoaUN5QlcyckcyVS9reHVDUU9MUkRYcEtIcjk2VTRqR3FhelBpVlJuTGJpWUhBMEtJYzJuNUthVlBtYlV3cDdCNWkwanFyQnAvWlpCUGI2bzczNkNnPT0K\n",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbEt1VXlmV0hNR3drNmtScTUzQXYxcGtWTElISVllUnBmNHZtR1dEK09YY1JVWlpSWlgvbTJSSTJpRUZiUURJeUZBc1RxbFMvVGpoR3I5aFNXQ1BEblBTQWVWY1NRSHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NDYxMTY0CWZpbGU6UmV0aW5hVGFnXzEuNS44NF94NjQtc2V0dXAuZXhlCnJTQkhoRlBFZWErWkNUUVZuTTh4NHA1blFSSHdUKzlCMWJxN2RqcCthdU9KRDFjTXE5VkgwYjdBdUt5Y2t3d1o1UjRjUmJJR3hzTmpJOWFSOHp2OERnPT0K\n",
       "url": "https://github.com/burskozbekov/RetinaTag/releases/download/windows-latest/RetinaTag-setup.exe"
     }
   }
