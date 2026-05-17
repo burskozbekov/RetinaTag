@@ -1658,8 +1658,16 @@ pub fn get_stats(conn: &Connection) -> Result<AppStats> {
 }
 
 pub fn get_folders(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    // v1.5.127 — Apply private=0 so the sidebar doesn't show vault-only
+    // folders or inflate counts for mixed-content folders. A folder that
+    // exists *only* because of vaulted photos is filtered out entirely:
+    // WHERE strips its rows before GROUP BY, so it simply has no group.
     let mut stmt = conn.prepare(
-        "SELECT folder, COUNT(*) AS cnt FROM photos GROUP BY folder ORDER BY folder",
+        "SELECT folder, COUNT(*) AS cnt
+         FROM photos
+         WHERE private = 0
+         GROUP BY folder
+         ORDER BY folder",
     )?;
     let folders = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -1673,11 +1681,16 @@ pub fn get_folders(conn: &Connection) -> Result<Vec<(String, i64)>> {
 /// see at a glance which folders still need tagging. A single grouped query
 /// avoids N round-trips when the library has many folders.
 pub fn get_folders_with_status(conn: &Connection) -> Result<Vec<(String, i64, i64)>> {
+    // v1.5.127 — Same private=0 filter as get_folders. Without it, the
+    // sidebar showed every folder including vault-only ones, with the
+    // tagged-progress bar reflecting vault status — leaking both
+    // existence and tagging state.
     let mut stmt = conn.prepare(
         "SELECT folder,
                 COUNT(*)                                            AS total,
                 SUM(CASE WHEN status = 'tagged' THEN 1 ELSE 0 END)  AS tagged
          FROM photos
+         WHERE private = 0
          GROUP BY folder
          ORDER BY folder",
     )?;
