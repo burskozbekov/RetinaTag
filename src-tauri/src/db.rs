@@ -1450,6 +1450,12 @@ pub fn search_photos_by_person(conn: &Connection, query: &str) -> Result<Vec<Pho
     // UNION across both sources here. The tag match uses an exact (not
     // substring) compare on the full name so a regular keyword tagged
     // "ali" doesn't accidentally surface under person:"Ali Can Bombadil".
+    //
+    // v1.5.120 — Raised LIMIT 500 → 5000. Buğra has 717 faces and Lara
+    // has 866 in the current library — both were silently truncated.
+    // Virtual scroll on the frontend handles a few thousand cards
+    // without measurable lag, so the cap exists purely as a sanity
+    // guard for runaway joins rather than a UX throttle.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT p.id, p.path, p.filename, p.status, p.provider_used,
                 (SELECT COUNT(*) FROM tags WHERE photo_id = p.id) AS tag_count,
@@ -1462,7 +1468,7 @@ pub fn search_photos_by_person(conn: &Connection, query: &str) -> Result<Vec<Pho
          WHERE (pe.name LIKE ?1 COLLATE NOCASE OR t_person.id IS NOT NULL)
            AND p.private = 0
          ORDER BY p.tagged_at DESC
-         LIMIT 500",
+         LIMIT 5000",
     )?;
 
     let photos = stmt
