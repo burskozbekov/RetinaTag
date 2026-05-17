@@ -3792,6 +3792,27 @@ pub fn get_library_analytics(conn: &Connection) -> Result<crate::models::Library
     let total_photos: i64 = conn.query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
     let total_size_bytes: i64 = conn.query_row("SELECT COALESCE(SUM(size),0) FROM photos", [], |r| r.get(0))?;
 
+    // v1.5.123 — Real distinct counts so the dashboard's "Unique Tags"
+    // and "Locations" cards don't lie about library size. The top_tags
+    // / top_locations vectors above are LIMIT 30 / LIMIT 20 because
+    // the dashboard renders them as a chart and cloud; the headline
+    // count needs its own COUNT(DISTINCT) query. Same private=0
+    // filter so the vault doesn't leak metadata.
+    let total_unique_tags: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT t.tag)
+         FROM tags t JOIN photos p ON p.id = t.photo_id
+         WHERE p.private = 0",
+        [], |r| r.get(0),
+    ).unwrap_or(0);
+    let total_unique_locations: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT estimated_location)
+         FROM photos
+         WHERE estimated_location IS NOT NULL
+           AND estimated_location != ''
+           AND private = 0",
+        [], |r| r.get(0),
+    ).unwrap_or(0);
+
     Ok(crate::models::LibraryAnalytics {
         photos_by_month,
         top_tags,
@@ -3802,6 +3823,8 @@ pub fn get_library_analytics(conn: &Connection) -> Result<crate::models::Library
         storage_by_folder,
         total_photos,
         total_size_bytes,
+        total_unique_tags,
+        total_unique_locations,
     })
 }
 

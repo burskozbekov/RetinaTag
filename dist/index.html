@@ -8533,8 +8533,17 @@ async function loadDashboard(){
       html+=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">`;
       html+=_analyticsCard('Total Photos',analytics.total_photos.toLocaleString(),'var(--red)','dashGotoAll()');
       html+=_analyticsCard('Storage',_formatBytes(analytics.total_size_bytes),'var(--blue)','dashGotoAll()');
-      html+=_analyticsCard('Unique Tags',analytics.top_tags.length+'','var(--green)',"document.getElementById('btnTagMgmt').click()");
-      html+=_analyticsCard('Locations',analytics.top_locations.length+'','var(--amber)',"switchToView('map')");
+      // v1.5.123 — Use `total_unique_tags` / `total_unique_locations`
+      // (true COUNT(DISTINCT) figures) instead of the array lengths,
+      // which were just SQL LIMITs (30 / 20). Falls back to array
+      // length if the backend is old enough to not include the new
+      // fields, so a partial upgrade still shows *something*.
+      const _uniqTags = (typeof analytics.total_unique_tags === 'number')
+        ? analytics.total_unique_tags : analytics.top_tags.length;
+      const _uniqLocs = (typeof analytics.total_unique_locations === 'number')
+        ? analytics.total_unique_locations : analytics.top_locations.length;
+      html+=_analyticsCard('Unique Tags',_uniqTags.toLocaleString(),'var(--green)',"document.getElementById('btnTagMgmt').click()");
+      html+=_analyticsCard('Locations',_uniqLocs.toLocaleString(),'var(--amber)',"switchToView('map')");
       html+=`</div>`;
     }
 

@@ -558,6 +558,14 @@ pub struct LibraryAnalytics {
     pub storage_by_folder: Vec<(String, i64)>,
     pub total_photos: i64,
     pub total_size_bytes: i64,
+    // v1.5.123 — true distinct counts. The dashboard used to display
+    // `top_tags.length` ("30") and `top_locations.length` ("20") as
+    // "Unique Tags" and "Locations" headline numbers, which silently
+    // showed the SQL LIMITs instead of the real library size.
+    #[serde(default)]
+    pub total_unique_tags: i64,
+    #[serde(default)]
+    pub total_unique_locations: i64,
 }
 
 // ── Health Check ───────────────────────────────────────────────────────────
