@@ -1604,27 +1604,39 @@ pub fn search_photos_by_description(conn: &Connection, query: &str) -> Result<Ve
 }
 
 pub fn get_stats(conn: &Connection) -> Result<AppStats> {
-    let total: i64 = conn.query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
+    // v1.5.126 — Apply private=0 to every count so the top-toolbar stats
+    // (Total / Tagged / Pending / Tags / Folders) don't leak the vault
+    // size while it's locked. Same class fix as v1.5.125 (dashboard
+    // analytics), but for the constantly-visible header.
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM photos WHERE private = 0",
+        [], |r| r.get(0),
+    )?;
     let tagged: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM photos WHERE status = 'tagged'",
-        [],
-        |r| r.get(0),
+        "SELECT COUNT(*) FROM photos WHERE status = 'tagged' AND private = 0",
+        [], |r| r.get(0),
     )?;
     let pending: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM photos WHERE status = 'pending'",
-        [],
-        |r| r.get(0),
+        "SELECT COUNT(*) FROM photos WHERE status = 'pending' AND private = 0",
+        [], |r| r.get(0),
     )?;
     let error: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM photos WHERE status = 'error'",
-        [],
-        |r| r.get(0),
+        "SELECT COUNT(*) FROM photos WHERE status = 'error' AND private = 0",
+        [], |r| r.get(0),
     )?;
-    let total_tags: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))?;
-    let unique_tags: i64 =
-        conn.query_row("SELECT COUNT(DISTINCT tag) FROM tags", [], |r| r.get(0))?;
-    let folders: i64 =
-        conn.query_row("SELECT COUNT(DISTINCT folder) FROM photos", [], |r| r.get(0))?;
+    // Tags table has no `private` column — JOIN photos to filter.
+    let total_tags: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tags t JOIN photos p ON p.id = t.photo_id WHERE p.private = 0",
+        [], |r| r.get(0),
+    )?;
+    let unique_tags: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT t.tag) FROM tags t JOIN photos p ON p.id = t.photo_id WHERE p.private = 0",
+        [], |r| r.get(0),
+    )?;
+    let folders: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT folder) FROM photos WHERE private = 0",
+        [], |r| r.get(0),
+    )?;
     let total_cost: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(cost_usd), 0) FROM provider_usage",
