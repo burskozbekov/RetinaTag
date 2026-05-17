@@ -12562,6 +12562,13 @@ async function openLightbox(photoId) {
       if (!videoEl._volPersistAttached) {
         videoEl._volPersistAttached = true;
         videoEl.addEventListener('volumechange', () => {
+          // v1.5.117 — Skip persistence while a fallback-mute is in
+          // flight. Without this gate, the autoplay-blocked path's
+          // `videoEl.muted = true` fires volumechange and clobbers the
+          // user's stored unmuted preference, so every cold start
+          // gradually drifts back to "muted = true" even though the
+          // user never asked for that.
+          if (videoEl._volPersistSuspended) return;
           try {
             localStorage.setItem('lbVolume', String(videoEl.volume));
             localStorage.setItem('lbMuted', String(videoEl.muted));
@@ -12570,11 +12577,18 @@ async function openLightbox(photoId) {
       }
       videoEl.play().catch(() => {
         // Autoplay blocked — usually because we restored an unmuted
-        // state with no fresh user gesture. Mute and retry; the user
-        // can unmute via the native controls and volumechange persists
-        // the new state for next time.
+        // state with no fresh user gesture. Mute and retry; suspend
+        // persistence so this fallback doesn't overwrite the user's
+        // saved preference. As soon as the user unmutes manually,
+        // the suspension flag is gone and the change persists.
+        videoEl._volPersistSuspended = true;
         videoEl.muted = true;
         videoEl.play().catch(() => { /* still blocked — user can press play */ });
+        // The volumechange task may be queued asynchronously by the
+        // engine; 50 ms is generous enough that any pending dispatch
+        // sees the suspension flag, and short enough that a real
+        // user interaction immediately after will still persist.
+        setTimeout(() => { videoEl._volPersistSuspended = false; }, 50);
       });
       spinner.style.display = 'none';
       playBtn.style.display = 'block';
