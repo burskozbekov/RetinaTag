@@ -2011,9 +2011,17 @@ pub fn delete_tag_globally(conn: &Connection, tag: &str) -> Result<usize> {
 
 pub fn get_tag_details(conn: &Connection) -> Result<Vec<crate::models::TagInfo>> {
     let mut stmt = conn.prepare(
+        // v1.5.122 — Raised LIMIT 500 → 5000. The Tag Management modal
+        // uses this to populate the rename/merge/delete UI. With the
+        // old cap, a long-tail tag (low usage count) wasn't even in
+        // the list — the user couldn't reach it via the modal at all,
+        // and the modal's in-page filter would return zero matches
+        // even when the tag clearly existed in the DB. 5000 matches
+        // the rest of the search-side caps and is way past any
+        // realistic distinct-tag count for a personal library.
         "SELECT tag, COUNT(*) as cnt,
                 GROUP_CONCAT(DISTINCT source) as providers
-         FROM tags GROUP BY tag ORDER BY cnt DESC LIMIT 500"
+         FROM tags GROUP BY tag ORDER BY cnt DESC LIMIT 5000"
     )?;
     let rows = stmt.query_map([], |r| {
         let providers_str: String = r.get::<_, String>(2).unwrap_or_default();
