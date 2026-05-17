@@ -5837,17 +5837,28 @@ $('btnStopFaceScan').onclick = async () => {
 // ── Person filter pill (sidebar click) ──────────────────────────────────────
 let _currentPersonFilter=null;
 function setPersonFilter(p){
-  // v1.5.107 — DO NOT touch curSearch here. curSearch is for
-  // user-typed free-text only; assigning a structured-entity name
+  // v1.5.107 — DO NOT *assign a name* to curSearch here. curSearch is
+  // for user-typed free-text only; pushing a structured-entity name
   // ("Ali Can Bombadil") into it ships the name through FTS where
   // multi-word names get tokenised and false-match common English
   // words ("can"). loadPhotos detects _currentPersonFilter and uses
   // the dedicated find_photos_by_person command instead.
+  // v1.5.119 — But we DO need to *flush* curSearch when switching to
+  // a person filter, otherwise a previously-typed query lingers in
+  // state. The input is cleared visually but `curSearch` keeps the
+  // old text, so clearing the person filter later (X on the pill,
+  // or focus on the input) reloads the OLD search results with no
+  // visible cue — empty search box, but library not actually shown.
+  // Clearing is fine; the v1.5.107 rule was about not stuffing names
+  // *into* it, not about preserving stale state.
   _currentPersonFilter=p;
   $('searchPersonName').textContent=p.name;
   $('searchPersonPill').classList.add('active');
   document.querySelector('.search-box').classList.add('person-active');
   $('searchInput').value='';
+  curSearch='';
+  const xBtn=$('searchClearX'); if(xBtn) xBtn.style.display='none';
+  const helpBtn=$('searchHelpBtn'); if(helpBtn) helpBtn.style.display='block';
   $('searchHint').textContent='';
   loadPhotos();
 }
