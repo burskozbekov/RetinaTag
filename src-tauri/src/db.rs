@@ -3793,8 +3793,21 @@ pub fn get_library_analytics(conn: &Connection) -> Result<crate::models::Library
         .filter_map(|r| r.ok()).collect();
 
     // Totals
-    let total_photos: i64 = conn.query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
-    let total_size_bytes: i64 = conn.query_row("SELECT COALESCE(SUM(size),0) FROM photos", [], |r| r.get(0))?;
+    // v1.5.125 — Apply the same private=0 filter as every other aggregate
+    // in this function. Without it the headline "Total Photos" card
+    // silently revealed the vault size to a locked-state viewer: the
+    // user/attacker could see 1100 photos in the headline while top_tags,
+    // photos_by_month etc. only counted the 1000 unlocked ones. The
+    // function's own leading comment promises "every aggregate excludes
+    // private photos" — these two queries were the holdouts.
+    let total_photos: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM photos WHERE private = 0",
+        [], |r| r.get(0),
+    )?;
+    let total_size_bytes: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(size),0) FROM photos WHERE private = 0",
+        [], |r| r.get(0),
+    )?;
 
     // v1.5.123 — Real distinct counts so the dashboard's "Unique Tags"
     // and "Locations" cards don't lie about library size. The top_tags
