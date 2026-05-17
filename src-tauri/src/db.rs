@@ -1294,6 +1294,9 @@ pub fn search_photos_by_tag_exact(conn: &Connection, query: &str) -> Result<Vec<
     // tag searches, otherwise typing the wrong tag in the search bar
     // would expose hidden photos thumb-by-thumb.
     let mut stmt = conn.prepare(
+        // v1.5.121 — Raised LIMIT 500 → 5000. Common tags (e.g. a person
+        // tag like "lara" with 866 hits) used to be truncated by ~40%
+        // before the frontend ever saw them.
         "SELECT DISTINCT p.id, p.path, p.filename, p.status, p.provider_used,
                 (SELECT COUNT(*) FROM tags WHERE photo_id = p.id) AS tag_count,
                 p.media_type, p.date_taken, p.duration_secs, p.rating, p.favorite
@@ -1301,7 +1304,7 @@ pub fn search_photos_by_tag_exact(conn: &Connection, query: &str) -> Result<Vec<
          JOIN tags t ON t.photo_id = p.id
          WHERE lower(t.tag) = ?1 AND p.private = 0
          ORDER BY p.filename
-         LIMIT 500",
+         LIMIT 5000",
     )?;
     let rows = stmt
         .query_map(params![q], |r| {
@@ -1327,11 +1330,14 @@ pub fn search_photos_by_tag_exact(conn: &Connection, query: &str) -> Result<Vec<
 
 pub fn search_photos_fts(conn: &Connection, query: &str) -> Result<Vec<PhotoSummary>> {
     let mut stmt = conn.prepare(
+        // v1.5.121 — See note on search_photos_by_tag_exact: 500 was
+        // narrow enough that common-tag searches lost a third of the
+        // matches in libraries with thousands of tagged photos.
         "SELECT DISTINCT t.photo_id
          FROM tags_fts f
          JOIN tags t ON t.id = f.rowid
          WHERE tags_fts MATCH ?1
-         LIMIT 500",
+         LIMIT 5000",
     )?;
 
     let ids: Vec<i64> = stmt
@@ -1523,7 +1529,10 @@ pub fn search_photos_by_path(conn: &Connection, query: &str) -> Result<Vec<Photo
         .join(" OR ");
 
     let ids: Vec<i64> = conn
-        .prepare("SELECT rowid FROM photos_fts WHERE photos_fts MATCH ?1 LIMIT 500")
+        // v1.5.121 — Raised LIMIT 500 → 5000 (search_photos_by_path).
+        // Searching for a folder name like "2024" used to cap at 500
+        // photos even though the folder might contain 2000+.
+        .prepare("SELECT rowid FROM photos_fts WHERE photos_fts MATCH ?1 LIMIT 5000")
         .and_then(|mut stmt| {
             stmt.query_map(params![fts_query], |r| r.get(0))
                 .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -1535,7 +1544,7 @@ pub fn search_photos_by_path(conn: &Connection, query: &str) -> Result<Vec<Photo
                 "SELECT id FROM photos
                  WHERE filename LIKE ?1 COLLATE NOCASE
                     OR folder   LIKE ?1 COLLATE NOCASE
-                 LIMIT 500",
+                 LIMIT 5000",
             )
             .and_then(|mut stmt| {
                 stmt.query_map(params![pattern], |r| r.get(0))
@@ -1566,8 +1575,9 @@ pub fn search_photos_by_description(conn: &Connection, query: &str) -> Result<Ve
         .collect::<Vec<_>>()
         .join(" OR ");
 
+    // v1.5.121 — Raised LIMIT 500 → 5000 (search_photos_by_description).
     let ids: Vec<i64> = conn.prepare(
-        "SELECT rowid FROM desc_fts WHERE desc_fts MATCH ?1 LIMIT 500"
+        "SELECT rowid FROM desc_fts WHERE desc_fts MATCH ?1 LIMIT 5000"
     )
     .and_then(|mut stmt| {
         stmt.query_map(params![fts_query], |r| r.get(0))
@@ -1577,7 +1587,7 @@ pub fn search_photos_by_description(conn: &Connection, query: &str) -> Result<Ve
         // FTS failed — fallback to LIKE
         let pattern = format!("%{}%", query);
         conn.prepare(
-            "SELECT id FROM photos WHERE description LIKE ?1 COLLATE NOCASE LIMIT 500"
+            "SELECT id FROM photos WHERE description LIKE ?1 COLLATE NOCASE LIMIT 5000"
         )
         .and_then(|mut stmt| {
             stmt.query_map(params![pattern], |r| r.get(0))
