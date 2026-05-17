@@ -1871,12 +1871,16 @@ pub fn query_smart_collection(conn: &Connection, rules: &[crate::models::Collect
     // Otherwise a "tag like 'family'" rule would expose hidden photos.
     conditions.push("p.private = 0".to_string());
     let where_clause = conditions.join(" AND ");
+    // v1.5.124 — Bumped smart-collection LIMIT 1000 → 5000 to match the
+    // rest of the search/filter caps. A "tag like 'family'" rule on a
+    // few thousand family photos silently lost everything past the
+    // 1000th match.
     let sql = format!(
         "SELECT p.id, p.path, p.filename, p.status, p.provider_used,
                 (SELECT COUNT(*) FROM tags WHERE photo_id = p.id) AS tag_count,
                 COALESCE((SELECT GROUP_CONCAT(tag, '|||') FROM (SELECT tag FROM tags WHERE photo_id = p.id LIMIT 10)), '') AS tag_list,
                 p.media_type, p.date_taken, p.duration_secs, p.rating, p.favorite
-         FROM photos p WHERE {} ORDER BY p.created_at DESC LIMIT 1000", where_clause
+         FROM photos p WHERE {} ORDER BY p.created_at DESC LIMIT 5000", where_clause
     );
 
     let mut stmt = conn.prepare(&sql)?;
