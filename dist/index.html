@@ -12533,10 +12533,35 @@ async function openLightbox(photoId) {
       videoEl.style.display = 'block';
       videoEl.src = assetUrl;
       videoEl.currentTime = 0;
-      // Autoplay with sound off — browser policy allows muted autoplay, and
-      // we don't want to blast audio on nav. User can un-mute via controls.
-      videoEl.muted = true;
-      videoEl.play().catch(() => { /* autoplay blocked — user can press play */ });
+      // v1.5.114 — Persist volume/muted across plays via localStorage. The
+      // old behaviour force-muted every video, which was correct for
+      // browser autoplay policy on a cold page load but wrong once the
+      // user had already clicked into the lightbox: their last-set
+      // volume should win. Default = full volume, unmuted; we fall back
+      // to muted only if autoplay is actively blocked.
+      try {
+        const savedVol = parseFloat(localStorage.getItem('lbVolume'));
+        const savedMuted = localStorage.getItem('lbMuted') === 'true';
+        videoEl.volume = (isFinite(savedVol) && savedVol >= 0 && savedVol <= 1) ? savedVol : 1.0;
+        videoEl.muted = savedMuted;
+      } catch(_) { videoEl.volume = 1.0; videoEl.muted = false; }
+      if (!videoEl._volPersistAttached) {
+        videoEl._volPersistAttached = true;
+        videoEl.addEventListener('volumechange', () => {
+          try {
+            localStorage.setItem('lbVolume', String(videoEl.volume));
+            localStorage.setItem('lbMuted', String(videoEl.muted));
+          } catch(_){}
+        });
+      }
+      videoEl.play().catch(() => {
+        // Autoplay blocked — usually because we restored an unmuted
+        // state with no fresh user gesture. Mute and retry; the user
+        // can unmute via the native controls and volumechange persists
+        // the new state for next time.
+        videoEl.muted = true;
+        videoEl.play().catch(() => { /* still blocked — user can press play */ });
+      });
       spinner.style.display = 'none';
       playBtn.style.display = 'block';
       playBtn.onclick = () => { if (photo) invoke('open_file', {path: photo.path}); };
