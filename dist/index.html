@@ -16553,7 +16553,22 @@ function setSlideshowInterval(seconds){
   localStorage.setItem('slideshow_interval_s',String(s));
   if(_slideshowActive){
     clearInterval(_slideshowTimer);
-    _slideshowTimer=setInterval(()=>{if(!_slideshowActive)return;lbNav(1);},_slideshowInterval());
+    // v1.5.116 — Same video-aware gate as toggleSlideshow. Re-arming
+    // the timer with a different interval must not lose the
+    // don't-cut-videos behaviour.
+    _slideshowTimer=setInterval(()=>{
+      if(!_slideshowActive)return;
+      const cur = (typeof photos!=='undefined' && _lbCurrentId!=null)
+        ? photos.find(p=>p.id===_lbCurrentId)
+        : null;
+      if (cur && cur.media_type === 'video') {
+        const vid = document.getElementById('lbVideo');
+        if (vid && !vid.paused && !vid.ended && vid.currentSrc) {
+          return;
+        }
+      }
+      lbNav(1);
+    },_slideshowInterval());
   }
   toast(`Slideshow: ${s}s`,'success');
 }
@@ -16568,7 +16583,27 @@ function toggleSlideshow(){
     }
     _slideshowActive=true;
     const btn=$('lbSlideshow');if(btn)btn.innerHTML='\u23F8';
-    _slideshowTimer=setInterval(()=>{if(!_slideshowActive)return;lbNav(1);},_slideshowInterval());
+    // v1.5.116 \u2014 Don't cut videos off mid-playback. Each tick checks if
+    // the current item is a still-playing video; if so we skip this
+    // advance and let the next tick try again. Net behaviour:
+    //  - images advance at exactly the user's interval (unchanged)
+    //  - videos play through to ~the end before slideshow moves on
+    // setInterval keeps the bookkeeping simple \u2014 we just gate the
+    // lbNav call. Once the video ends or is paused, the next tick
+    // (within `interval` seconds) advances normally.
+    _slideshowTimer=setInterval(()=>{
+      if(!_slideshowActive)return;
+      const cur = (typeof photos!=='undefined' && _lbCurrentId!=null)
+        ? photos.find(p=>p.id===_lbCurrentId)
+        : null;
+      if (cur && cur.media_type === 'video') {
+        const vid = document.getElementById('lbVideo');
+        if (vid && !vid.paused && !vid.ended && vid.currentSrc) {
+          return; // video still playing \u2014 wait for next tick
+        }
+      }
+      lbNav(1);
+    },_slideshowInterval());
   }
 }
 
