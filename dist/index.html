@@ -9925,7 +9925,21 @@ document.addEventListener('keydown',e=>{
     // doesn't conflict with anything else in the lightbox handler.
     if(e.key==='ArrowRight'){lbNav(e.shiftKey?10:1);e.preventDefault()}
     if(e.key==='ArrowLeft'){lbNav(e.shiftKey?-10:-1);e.preventDefault()}
-    if(e.key===' '){toggleSlideshow();e.preventDefault()}
+    if(e.key===' '){
+      // v1.5.115 — When a video is loaded, Space toggles play/pause
+      // (the universal HTML5-video shortcut) instead of slideshow.
+      // Slideshow over a video would silently cut it off mid-playback
+      // anyway, so this is also the safer default. Falls through to
+      // toggleSlideshow() only for image/RAW photos.
+      const _vid = document.getElementById('lbVideo');
+      if (_vid && _vid.style.display !== 'none' && _vid.currentSrc) {
+        if (_vid.paused) { _vid.play().catch(()=>{}); } else { _vid.pause(); }
+        e.preventDefault();
+        return;
+      }
+      toggleSlideshow();
+      e.preventDefault();
+    }
     // v1.4.84 — [ / ] inside lightbox adjust slideshow interval by ±1s.
     // These keys drive grid density outside the lightbox but the lightbox
     // handler returns before that code runs, so they're free here. If the
