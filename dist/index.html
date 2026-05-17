@@ -3140,7 +3140,23 @@ function renderGrid(preserveScroll=false){
     const hasRating=!!(curRating&&String(curRating).trim());
     const hasMedia=!!(typeof curMediaType!=='undefined'&&curMediaType);
     const hasStatus=!!(curStatus&&String(curStatus).trim());
-    if(hasSearch){
+    // v1.5.118 — Person-filter empty state. Without this branch the user
+    // would see the generic "No photos yet — Click Add Folder" message
+    // after clicking a person who happens to have zero matching rows
+    // (most commonly because another filter, e.g. rejected-photos,
+    // intersects to zero). The pill in the search bar already makes
+    // the active person obvious, but the empty grid still needs a
+    // contextual escape hatch.
+    const hasPerson=!!(typeof _currentPersonFilter!=='undefined'&&_currentPersonFilter&&_currentPersonFilter.name);
+    if(hasPerson){
+      const nm = String(_currentPersonFilter.name).replace(/</g,'&lt;').slice(0,80);
+      title=`No photos found for ${nm}`;
+      const otherFilters=[hasRating?'rating':null,hasFolder?'folder':null,hasMedia?'media type':null,hasStatus?'status':null].filter(Boolean);
+      sub = otherFilters.length
+        ? `Other active filters (${otherFilters.join(' · ')}) may be narrowing this down. Clear the person filter or those filters to widen results.`
+        : `The person tag exists but no photos are tagged with it yet, or imports are still in progress.`;
+      clearBtn='<button class="btn btn-secondary btn-sm" id="emptyClearPerson" style="margin-top:14px">✕ Clear person filter</button>';
+    }else if(hasSearch){
       title=`No results for "${String(curSearch).replace(/</g,'&lt;').slice(0,60)}"`;
       // v1.5.49 — Add a "did you mean" / syntax help section so the
       // user knows how to recover instead of just an empty page.
@@ -3202,6 +3218,10 @@ function renderGrid(preserveScroll=false){
     wire('emptyClearFolder',()=>{if(typeof selectFolder==='function')selectFolder('');else{curFolder='';loadPhotos();}});
     wire('emptyClearMedia',()=>{curMediaType='';loadPhotos();});
     wire('emptyClearStatus',()=>{curStatus='';loadPhotos();});
+    // v1.5.118 — Hook the person-filter clear button into the existing
+    // clearPersonFilter() entry point so the search bar pill, the
+    // .person-active class, and the photo reload all stay in sync.
+    wire('emptyClearPerson',()=>{if(typeof clearPersonFilter==='function')clearPersonFilter();});
     return;
   }
   const cols=getCols();gridScroll.style.height=(Math.ceil(photos.length/cols)*CELL_H)+'px';updateCards(cols);
