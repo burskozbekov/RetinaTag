@@ -11680,9 +11680,27 @@ function showDeletePersonMenu(e, p) {
     const newName = prompt('New name for "' + p.name + '":', p.name);
     if (!newName || newName.trim() === '' || newName === p.name) return;
     try {
-      await invoke('rename_person', { personId: p.id, newName: newName.trim() });
-      toast('Renamed to "' + newName.trim() + '"', 'success');
+      const trimmed = newName.trim();
+      await invoke('rename_person', { personId: p.id, newName: trimmed });
+      toast('Renamed to "' + trimmed + '"', 'success');
       refreshPersonsSidebar();
+      // v1.5.133 — Sync the rest of the app: gallery may show this
+      // person's photos (re-render the cards so their tooltip face
+      // labels reflect the new name), and if the user currently has
+      // THIS person as the active filter, update the pill text + the
+      // _currentPersonFilter state so a clearPersonFilter / re-click
+      // still works against the correct backend name.
+      if (typeof _currentPersonFilter !== 'undefined' && _currentPersonFilter
+          && _currentPersonFilter.id === p.id) {
+        _currentPersonFilter.name = trimmed;
+        const pillEl = $('searchPersonName');
+        if (pillEl) pillEl.textContent = trimmed;
+      }
+      if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+      if (typeof refreshStats === 'function') refreshStats();
+      if (typeof selectedId !== 'undefined' && selectedId && typeof selectPhoto === 'function') {
+        try { selectPhoto(selectedId, selectedPath); } catch(_){}
+      }
     } catch (e) { toast('Rename failed: ' + e, 'error'); }
   };
   menu.querySelector('#_timelinePersonBtn').onclick = async () => {
@@ -11699,6 +11717,19 @@ function showDeletePersonMenu(e, p) {
     await invoke('delete_person', { personId: p.id }).catch(() => {});
     refreshPersonsSidebar();
     if (selectedId) loadFacesForPhoto(selectedId);
+    // v1.5.133 — If the active person filter targets the person we
+    // just deleted, clear it (the underlying name is gone, so any
+    // further "Clear" click would still query a deleted entity).
+    // Also nudge the gallery + stats so the new "no person filter"
+    // state shows immediately.
+    if (typeof _currentPersonFilter !== 'undefined' && _currentPersonFilter
+        && _currentPersonFilter.id === p.id
+        && typeof clearPersonFilter === 'function') {
+      clearPersonFilter();
+    } else {
+      if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+    }
+    if (typeof refreshStats === 'function') refreshStats();
   };
   const close = ev => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', close); } };
   setTimeout(() => document.addEventListener('click', close), 0);
@@ -11747,6 +11778,19 @@ async function showMergePersonMenu(source) {
         toast(`Merged: ${moved} faces moved to "${other.name}"`, 'success');
         refreshPersonsSidebar();
         if (selectedId) loadFacesForPhoto(selectedId);
+        // v1.5.133 — Merge deletes the `source` person row. If the
+        // active filter was for the source, redirect it to the
+        // target (the user's intent was probably "show me this
+        // person's photos, regardless of which canonical row they
+        // live under now").
+        if (typeof _currentPersonFilter !== 'undefined' && _currentPersonFilter
+            && _currentPersonFilter.id === source.id) {
+          _currentPersonFilter = { id: other.id, name: other.name };
+          const pillEl = $('searchPersonName');
+          if (pillEl) pillEl.textContent = other.name;
+        }
+        if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+        if (typeof refreshStats === 'function') refreshStats();
       } catch (e) { toast('Merge failed: ' + e, 'error'); }
     };
     list.appendChild(row);
