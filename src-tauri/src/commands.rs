@@ -8584,16 +8584,28 @@ pub async fn save_cropped_image(
     let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("jpg").to_string();
     let sfx = suffix.unwrap_or_else(|| "-crop".to_string());
 
-    // Pick a non-colliding filename: photo-crop.jpg, photo-crop-2.jpg, …
-    let mut out = parent.join(format!("{}{}.{}", stem, sfx, ext));
-    let mut n = 2usize;
-    while out.exists() {
-        out = parent.join(format!("{}{}-{}.{}", stem, sfx, n, ext));
-        n += 1;
-        if n > 500 { return Err("could not find free filename".into()); }
-    }
-
-    std::fs::write(&out, &bytes).map_err(|e| format!("write crop: {}", e))?;
+    // v1.5.148 — Source photo can live on an SMB share (D:\Fotograflar
+    // for the canonical user). Both the .exists() filename probe and
+    // the write itself stat() the network drive — direct on a tokio
+    // worker, those would starve the IPC mutex the same way the
+    // v1.5.143 audit found in get_file_date. Move the whole file-IO
+    // tail into spawn_blocking. Sibling filename selection happens on
+    // the same dedicated thread so we don't pay 500 round-trips just
+    // to pick a free name.
+    let out_path: PathBuf = tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+        let mut out = parent.join(format!("{}{}.{}", stem, sfx, ext));
+        let mut n = 2usize;
+        while out.exists() {
+            out = parent.join(format!("{}{}-{}.{}", stem, sfx, n, ext));
+            n += 1;
+            if n > 500 { return Err("could not find free filename".into()); }
+        }
+        std::fs::write(&out, &bytes).map_err(|e| format!("write crop: {}", e))?;
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))??;
+    let out = out_path;
 
     // Intentionally do NOT insert a DB row here. The folder watcher picks up
     // the new file on its next tick and runs the full scan pipeline on it
