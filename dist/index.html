@@ -4399,11 +4399,49 @@ async function deleteCurrentPhoto(){
     const id=selectedId;
     await invoke('delete_photos',{photoIds:[id],deleteFile:true});
     toast('Photo moved to Recycle Bin','success');
-    // Remove card from any visible grid, then close detail panel
+
+    // v1.5.129 — Keep the in-memory `photos` array and the lightbox
+    // state in sync with the backend. Before this fix:
+    //   * `photos` still held the deleted row, so arrow-key nav and
+    //     `_scrollFirstSelectedIntoView` saw a phantom photo.
+    //   * The lightbox stayed mounted on the (now non-existent) image,
+    //     because deleteCurrentPhoto didn't touch the lightbox at all
+    //     even when the keypress that triggered it came from inside
+    //     the lightbox handler.
+    // Now we splice the array, then if the lightbox is open we either
+    // advance to the next photo at the same index (Lightroom/Photos.app
+    // behaviour), step back one if we were at the end, or close the
+    // lightbox if the library is now empty.
+    const lb = $('lightbox');
+    const lbOpen = !!(lb && lb.style.display === 'flex');
+    const idx = (typeof photos !== 'undefined') ? photos.findIndex(p => p.id === id) : -1;
+    if (idx >= 0) photos.splice(idx, 1);
+
+    // Remove cards from any visible grid, then close detail panel
     document.querySelectorAll(`[data-id="${id}"]`).forEach(el=>el.remove());
     $('detailPanel').classList.remove('open');
     selectedId=null;selectedPath='';
     refreshStats();
+
+    if (lbOpen) {
+      if (!photos || photos.length === 0) {
+        if (typeof closeLightbox === 'function') closeLightbox();
+      } else {
+        const nextIdx = Math.min(Math.max(0, idx), photos.length - 1);
+        const target = photos[nextIdx];
+        if (target) {
+          selectPhoto(target.id, target.path);
+          await openLightbox(target.id);
+        } else if (typeof closeLightbox === 'function') {
+          closeLightbox();
+        }
+      }
+    }
+
+    // The grid's virtual-scroll height is based on photos.length, so a
+    // single splice leaves the scroll area an exact CELL_H taller than
+    // it should be. Re-render preserving scroll position.
+    if (typeof renderGrid === 'function') renderGrid(true);
   }catch(e){toast('Delete failed: '+e,'error');}
 }
 
