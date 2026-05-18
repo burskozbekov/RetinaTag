@@ -3049,12 +3049,18 @@ pub async fn mtp_import(
     dest_dir: String,
     object_ids: Option<Vec<String>>,
     remember_dest: bool,
+    // v1.5.151 — Mac-parity filters. "image" | "video" | None=all.
+    filter_kind: Option<String>,
+    // ISO-8601 date string (YYYY-MM-DD or full). Objects with no
+    // date_created OR a date_created strictly less than this are
+    // skipped before download. Saves bandwidth on big phones.
+    date_from_iso: Option<String>,
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     #[cfg(not(windows))]
     {
-        let _ = (device_id, dest_dir, object_ids, remember_dest, state, app_handle);
+        let _ = (device_id, dest_dir, object_ids, remember_dest, filter_kind, date_from_iso, state, app_handle);
         return Err("MTP is only supported on Windows in this build".to_string());
     }
     #[cfg(windows)]
@@ -3072,9 +3078,9 @@ pub async fn mtp_import(
         let ah = app_handle.clone();
         let device_id_clone = device_id.clone();
 
-        let result = tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize), String> {
+        let result = tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize, usize, usize), String> {
             // Decide which objects to import.
-            let objects: Vec<crate::mtp::MtpObject> = match object_ids {
+            let mut objects: Vec<crate::mtp::MtpObject> = match object_ids {
                 Some(ids) => {
                     // User passed a filtered subset — we still need the
                     // full property info (name/size/date) to place files,
@@ -3088,16 +3094,41 @@ pub async fn mtp_import(
                 None => crate::mtp::list_media(&device_id_clone)?.photos,
             };
 
+            // v1.5.151 — Apply pre-download filters from the import-options
+            // panel. Reduces bandwidth + time on big phones; otherwise we'd
+            // download the file just to skip it after EXIF inspection.
+            if let Some(kind) = filter_kind.as_deref() {
+                match kind {
+                    "image" => objects.retain(|o| !o.is_video),
+                    "video" => objects.retain(|o|  o.is_video),
+                    _ => {} // "all" or unknown — no filter
+                }
+            }
+            if let Some(min_date) = date_from_iso.as_deref().filter(|s| !s.is_empty()) {
+                // Lex-compare on ISO date prefixes — both sides are in the
+                // same YYYY-MM-DD shape so the string comparison is correct.
+                objects.retain(|o| match o.date_created.as_deref() {
+                    Some(d) if d.len() >= 10 => &d[..10] >= &min_date[..min_date.len().min(10)],
+                    _ => false, // no date → exclude when user asked for a window
+                });
+            }
+
             let total = objects.len();
             if total == 0 {
                 ah.emit(
                     "mtp-import-complete",
                     serde_json::json!({
-                        "device": device_id_clone, "copied": 0, "skipped": 0, "total": 0
+                        "device": device_id_clone,
+                        "copied": 0,
+                        "skipped": 0,
+                        "skip_dest": 0,
+                        "skip_dup": 0,
+                        "skip_fail": 0,
+                        "total": 0,
                     }),
                 )
                 .ok();
-                return Ok((0, 0, 0));
+                return Ok((0, 0, 0, 0, 0));
             }
 
             // Open device ONCE for the whole batch so we don't pay the
@@ -3105,7 +3136,12 @@ pub async fn mtp_import(
             let device = crate::mtp::open_device_for_bulk(&device_id_clone)?;
 
             let mut copied = 0usize;
-            let mut skipped = 0usize;
+            // v1.5.151 — Per Mac parity, split the single `skipped` counter
+            // into three reason buckets so the UI can show "X already in
+            // library · Y already in destination · Z failed".
+            let mut skip_dest = 0usize;
+            let mut skip_dup  = 0usize;
+            let mut skip_fail = 0usize;
             let mut imported_ids: Vec<(String, String, i64)> = Vec::new(); // (object_id, dest_path, photo_id)
 
             for (i, obj) in objects.iter().enumerate() {
@@ -3118,7 +3154,7 @@ pub async fn mtp_import(
                 let target_dir = dest_root.join(&year).join(&month_folder);
                 if let Err(e) = std::fs::create_dir_all(&target_dir) {
                     eprintln!("create_dir {:?}: {}", target_dir, e);
-                    skipped += 1;
+                    skip_fail += 1;
                     continue;
                 }
                 let filename = if obj.name.is_empty() {
@@ -3134,31 +3170,68 @@ pub async fn mtp_import(
                 if dest_path.exists() {
                     if let Ok(md) = std::fs::metadata(&dest_path) {
                         if md.len() == obj.size {
-                            skipped += 1;
+                            skip_dest += 1;
                             continue;
                         }
                     }
                 }
 
-                // Download the file bytes from the phone.
-                let _bytes = match unsafe {
-                    crate::mtp::copy_object_with_device(&device, &obj.id, &dest_path)
-                } {
-                    Ok(n) => n,
-                    Err(e) => {
-                        eprintln!("copy_object {}: {}", obj.id, e);
-                        let _ = std::fs::remove_file(&dest_path);
-                        skipped += 1;
-                        continue;
+                // v1.5.151 — Patient retry around copy_object. iPhone
+                // auto-locks during long imports and refuses MTP reads
+                // until the user wakes + unlocks again. Old code gave
+                // up on the first error; now we back off (1s, 2s, 4s,
+                // 8s, then 30s × 6 = ~3 min per file budget) and emit
+                // mtp-import-waiting between attempts so the UI can
+                // show "iPhone locked — retry N/10". Mac shipped the
+                // same schedule in v1.5.142.
+                const RETRY_DELAYS_MS: [u64; 9] = [
+                    1_000, 2_000, 4_000, 8_000,
+                    30_000, 30_000, 30_000, 30_000, 30_000,
+                ];
+                let mut copy_ok = false;
+                let mut last_err = String::new();
+                // First attempt is free; subsequent ones pay a wait.
+                for attempt in 0..=RETRY_DELAYS_MS.len() {
+                    if attempt > 0 {
+                        let delay_ms = RETRY_DELAYS_MS[attempt - 1];
+                        ah.emit(
+                            "mtp-import-waiting",
+                            serde_json::json!({
+                                "device": device_id_clone,
+                                "filename": filename,
+                                "attempt": attempt,
+                                "max_attempts": RETRY_DELAYS_MS.len(),
+                                "wait_ms": delay_ms,
+                                "last_error": last_err.clone(),
+                            }),
+                        ).ok();
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        // Re-open the device — iPhone may have closed
+                        // the session while locked. Cheap if still alive.
                     }
-                };
+                    match unsafe { crate::mtp::copy_object_with_device(&device, &obj.id, &dest_path) } {
+                        Ok(_) => { copy_ok = true; break; }
+                        Err(e) => {
+                            last_err = e;
+                            // Clean partial file before retry so the
+                            // size-match dedup at the top doesn't
+                            // false-positive on the next attempt.
+                            let _ = std::fs::remove_file(&dest_path);
+                        }
+                    }
+                }
+                if !copy_ok {
+                    eprintln!("copy_object {} failed after retries: {}", obj.id, last_err);
+                    skip_fail += 1;
+                    continue;
+                }
 
                 // Hash + insert into photos table (reuse scanner logic).
                 let src_str = dest_path.to_string_lossy().to_string();
                 let hash = match crate::scanner::compute_hash(&src_str) {
                     Ok(h) => h,
                     Err(_) => {
-                        skipped += 1;
+                        skip_fail += 1;
                         continue;
                     }
                 };
@@ -3181,7 +3254,7 @@ pub async fn mtp_import(
                     // works correctly for dedup'd photos too.
                     let _ = std::fs::remove_file(&dest_path);
                     imported_ids.push((obj.id.clone(), src_str, existing_photo_id));
-                    skipped += 1;
+                    skip_dup += 1;
                     continue;
                 }
 
@@ -3218,7 +3291,7 @@ pub async fn mtp_import(
                         Ok(id) => id,
                         Err(e) => {
                             eprintln!("insert_photo: {e}");
-                            skipped += 1;
+                            skip_fail += 1;
                             continue;
                         }
                     }
@@ -3228,6 +3301,10 @@ pub async fn mtp_import(
                 copied += 1;
 
                 if i % 5 == 0 || i == total - 1 {
+                    // v1.5.151 — Emit the new skip-reason buckets alongside
+                    // the legacy `skipped` total so an older frontend keeps
+                    // working without changes.
+                    let skipped = skip_dest + skip_dup + skip_fail;
                     ah.emit(
                         "mtp-import-progress",
                         serde_json::json!({
@@ -3237,6 +3314,9 @@ pub async fn mtp_import(
                             "total": total,
                             "copied": copied,
                             "skipped": skipped,
+                            "skip_dest": skip_dest,
+                            "skip_dup": skip_dup,
+                            "skip_fail": skip_fail,
                         }),
                     )
                     .ok();
@@ -3260,26 +3340,39 @@ pub async fn mtp_import(
                 tx.commit().map_err(|e| e.to_string())?;
             }
 
+            // v1.5.151 — Final event also carries the skip-reason split.
+            let skipped = skip_dest + skip_dup + skip_fail;
             ah.emit(
                 "mtp-import-complete",
                 serde_json::json!({
                     "device": device_id_clone,
                     "copied": copied,
                     "skipped": skipped,
+                    "skip_dest": skip_dest,
+                    "skip_dup": skip_dup,
+                    "skip_fail": skip_fail,
                     "total": total,
                 }),
             )
             .ok();
 
-            Ok((copied, skipped, total))
+            Ok((copied, skip_dest, skip_dup, skip_fail, total))
         })
         .await
         .map_err(|e| format!("mtp_import join: {e}"))??;
 
+        // v1.5.151 — Return the skip-reason split so the cleanup screen
+        // can show "X already in library · Y already in dest · Z failed"
+        // instead of just one opaque total.
+        let (copied, skip_dest, skip_dup, skip_fail, total) = result;
+        let skipped = skip_dest + skip_dup + skip_fail;
         Ok(serde_json::json!({
-            "copied": result.0,
-            "skipped": result.1,
-            "total": result.2,
+            "copied": copied,
+            "skipped": skipped,
+            "skip_dest": skip_dest,
+            "skip_dup": skip_dup,
+            "skip_fail": skip_fail,
+            "total": total,
         }))
     }
 }

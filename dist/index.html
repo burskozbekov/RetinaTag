@@ -1792,6 +1792,32 @@ select.tb-select:focus{border-color:var(--red-dark)}
           <input type="checkbox" id="mtpRemember" checked style="accent-color:var(--accent)" />
           Remember this folder
         </label>
+        <!-- v1.5.151 — Import options. Mirror of Mac's filter panel:
+             pre-download filter saves bandwidth on big phones. NOTE:
+             favorites filter is Mac-only (iOS Favorites flag is not
+             exposed via WPD on Windows); cleanup-side delete-non-
+             favorites still works fine because it's device-side. -->
+        <details style="margin-top:10px;font-size:12px;color:var(--text2);background:var(--bg2);border-radius:6px;padding:6px 10px">
+          <summary style="cursor:pointer;color:var(--cream2);font-weight:600;padding:4px 0">⚙ Import options</summary>
+          <div style="display:grid;grid-template-columns:auto 1fr;gap:8px 12px;margin-top:8px;align-items:center">
+            <span style="opacity:.7">What to import:</span>
+            <select id="mtpFilterKind" style="background:var(--bg);color:var(--cream);border:1px solid var(--border2);border-radius:4px;padding:3px 6px;font-size:12px">
+              <option value="all">All photos &amp; videos</option>
+              <option value="image">Photos only</option>
+              <option value="video">Videos only</option>
+            </select>
+            <span style="opacity:.7">Date range:</span>
+            <select id="mtpFilterDate" style="background:var(--bg);color:var(--cream);border:1px solid var(--border2);border-radius:4px;padding:3px 6px;font-size:12px">
+              <option value="">All time</option>
+              <option value="30d">Last 30 days</option>
+              <option value="90d">Last 90 days</option>
+              <option value="1y">Last 1 year</option>
+            </select>
+          </div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:8px;line-height:1.45">
+            Filtering happens on-device before download. <i>Note: filtering by iPhone "favorites" isn't supported on Windows — that flag isn't exposed via WPD. The post-import "delete except favorites" cleanup still works.</i>
+          </div>
+        </details>
       </div>
 
       <!-- Phase D: import progress -->
@@ -5218,13 +5244,31 @@ $('btnMtpStart').onclick = async () => {
   $('mtpProgressFill').style.width = '0%';
   $('mtpProgressLabel').textContent = 'Starting import…';
   _mtpResetRate();
+  _mtpUserActedOnCleanup = false;
+
+  // v1.5.151 — Read import-options panel values. Empty/all = no filter.
+  const kindSel = $('mtpFilterKind');
+  const dateSel = $('mtpFilterDate');
+  const filterKind = kindSel && kindSel.value && kindSel.value !== 'all' ? kindSel.value : null;
+  // Translate the dropdown to an ISO date threshold (UTC midnight today
+  // minus N days). All-time = null.
+  let dateFromIso = null;
+  if (dateSel && dateSel.value) {
+    const days = { '30d': 30, '90d': 90, '1y': 365 }[dateSel.value];
+    if (days) {
+      const d = new Date(); d.setUTCDate(d.getUTCDate() - days);
+      dateFromIso = d.toISOString().slice(0, 10); // YYYY-MM-DD
+    }
+  }
 
   try {
     const r = await invoke('mtp_import', {
       deviceId: _mtpState.activeDevice.id,
       destDir: _mtpState.destDir,
-      objectIds: null,  // import everything
+      objectIds: null,  // import everything (filtered by params below)
       rememberDest: $('mtpRemember').checked,
+      filterKind,
+      dateFromIso,
     });
     _mtpStopRate();
     showMtpCleanupOptions(r);
@@ -5235,47 +5279,123 @@ $('btnMtpStart').onclick = async () => {
   }
 };
 
+// v1.5.151 — Render the new skip-reason split if available, falling back
+// to the legacy single "skipped" counter on old payloads.
+function _mtpRenderSkipLine(p){
+  const sub = $('mtpProgressSub'); if(!sub) return;
+  const sd = p.skip_dest|0, sx = p.skip_dup|0, sf = p.skip_fail|0;
+  const split_total = sd + sx + sf;
+  const has_split = (typeof p.skip_dest === 'number')
+    || (typeof p.skip_dup === 'number')
+    || (typeof p.skip_fail === 'number');
+  if(!has_split){
+    sub.textContent = `${p.copied|0} copied · ${p.skipped|0} skipped`;
+    return;
+  }
+  const parts = [];
+  if(sx > 0) parts.push(`${sx} already in library`);
+  if(sd > 0) parts.push(`${sd} already in destination`);
+  if(sf > 0) parts.push(`<span style="color:var(--red)">${sf} failed</span>`);
+  const tail = parts.length ? ' · ' + parts.join(' · ') : '';
+  sub.innerHTML = `${p.copied|0} copied · ${split_total} skipped${tail}`;
+}
+
 listen('mtp-import-progress', ({payload:p})=>{
   if (!$('mtpProgress') || $('mtpProgress').style.display === 'none') return;
   const pct = p.total > 0 ? (100 * p.done / p.total) : 0;
   $('mtpProgressFill').style.width = pct.toFixed(1) + '%';
   $('mtpProgressLabel').textContent = `${p.done}/${p.total} — ${p.current || ''}`;
-  $('mtpProgressSub').textContent = `${p.copied} copied, ${p.skipped} skipped`;
+  _mtpRenderSkipLine(p);
   _mtpRecordSample(p.done|0, p.total|0);
+});
+
+// v1.5.151 — mtp-import-waiting fires between retries when the iPhone
+// has locked itself mid-import. Show the user that we're patient and
+// what's happening. The label restores naturally on the next progress
+// event after the copy succeeds.
+listen('mtp-import-waiting', ({payload:p})=>{
+  if (!$('mtpProgress') || $('mtpProgress').style.display === 'none') return;
+  const att = p.attempt|0, max = p.max_attempts|0;
+  const secs = Math.round((p.wait_ms|0) / 1000);
+  $('mtpProgressLabel').innerHTML =
+    `⏸ <span style="color:var(--amber)">iPhone locked or busy</span> — waiting ${secs}s before retry ${att}/${max}…`;
 });
 
 listen('mtp-import-complete', ({payload:p})=>{
   if (!$('mtpProgress') || $('mtpProgress').style.display === 'none') return;
   $('mtpProgressFill').style.width = '100%';
   $('mtpProgressLabel').textContent = `✅ Done: ${p.copied} copied, ${p.skipped} skipped`;
+  _mtpRenderSkipLine(p);
   // v1.5.150 — Freeze the elapsed clock at completion. ETA collapses
   // to "—" naturally since done == total now.
   _mtpStopRate();
   const et = $('mtpProgressEta'); if(et) et.textContent = 'done';
 });
 
+// v1.5.151 — Race guard so the auto-cleanup prompt doesn't fire after
+// the user has already clicked one of the three cleanup buttons. Set
+// to true inside each button's handler, checked by the auto-prompt.
+let _mtpUserActedOnCleanup = false;
+
 function showMtpCleanupOptions(r) {
   $('mtpProgress').style.display = 'none';
   $('mtpCleanup').style.display = 'block';
+  // v1.5.151 — Surface the skip-reason split in the done summary
+  // (same template the in-flight progress used).
+  const sd = r.skip_dest|0, sx = r.skip_dup|0, sf = r.skip_fail|0;
+  const has_split = (typeof r.skip_dest === 'number')
+    || (typeof r.skip_dup === 'number')
+    || (typeof r.skip_fail === 'number');
+  let skipDetail = `<b>${r.skipped|0}</b> skipped`;
+  if (has_split && (sd + sx + sf) > 0) {
+    const parts = [];
+    if (sx > 0) parts.push(`${sx} already in library`);
+    if (sd > 0) parts.push(`${sd} already in destination`);
+    if (sf > 0) parts.push(`<span style="color:var(--red)">${sf} failed</span>`);
+    skipDetail = `<b>${sd + sx + sf}</b> skipped <span style="opacity:.7;font-size:11.5px">(${parts.join(' · ')})</span>`;
+  }
   $('mtpDoneSummary').innerHTML =
-    `✅ Import complete: <b>${r.copied}</b> copied, ` +
-    `<b>${r.skipped}</b> skipped (${r.total} total).`;
+    `✅ Import complete: <b>${r.copied|0}</b> copied, ` + skipDetail +
+    ` (${r.total|0} total).`;
   loadPhotos(); refreshStats(); refreshFolders();
+  // v1.5.151 — Auto-prompt for cleanup if anything was copied. 350ms
+  // delay so the user has a moment to see the summary first; race
+  // guard so a manual click on any of the three buttons cancels.
+  if ((r.copied|0) > 0) {
+    setTimeout(() => {
+      if (_mtpUserActedOnCleanup) return;
+      const n = (r.copied|0);
+      const ok = confirm(
+        `${n} photo${n === 1 ? '' : 's'} imported.\n\n` +
+        `Delete from phone except ⭐ favorites? ` +
+        `Favorites on the phone stay, the rest are permanently removed.`
+      );
+      if (!_mtpUserActedOnCleanup && ok) {
+        doKeepFavoritesDeleteRest(true);
+      }
+    }, 350);
+  }
 }
 
 $('btnMtpKeep').onclick = () => {
+  _mtpUserActedOnCleanup = true;
   $('mtpModal').classList.remove('open');
   toast('Photos kept on phone', 'info');
 };
 
-$('btnMtpKeepFavs').onclick = async () => {
+// v1.5.151 — Shared cleanup action so the manual button AND the
+// auto-prompt route through one code path. `skipConfirm` lets the
+// auto-prompt skip the second confirm (user already said yes once).
+async function doKeepFavoritesDeleteRest(skipConfirm){
   if (!_mtpState.activeDevice) return;
-  const ok = confirm(
-    'Photos marked as favorites (⭐) on your phone will be kept. '+
-    'The rest will be PERMANENTLY deleted from the phone. This cannot be undone.\n\n'+
-    'Continue?'
-  );
-  if (!ok) return;
+  if (!skipConfirm) {
+    const ok = confirm(
+      'Photos marked as favorites (⭐) on your phone will be kept. '+
+      'The rest will be PERMANENTLY deleted from the phone. This cannot be undone.\n\n'+
+      'Continue?'
+    );
+    if (!ok) return;
+  }
   try {
     toast('Cleaning up phone…', 'info');
     const r = await invoke('mtp_delete_non_favorites', { deviceId: _mtpState.activeDevice.id });
@@ -5284,9 +5404,15 @@ $('btnMtpKeepFavs').onclick = async () => {
   } catch(e) {
     toast('Delete failed: ' + e, 'error');
   }
+}
+
+$('btnMtpKeepFavs').onclick = () => {
+  _mtpUserActedOnCleanup = true;
+  doKeepFavoritesDeleteRest(false);
 };
 
 $('btnMtpWipe').onclick = async () => {
+  _mtpUserActedOnCleanup = true; // v1.5.151 — block auto-prompt
   if (!_mtpState.activeDevice || !_mtpState.media) return;
   const ok = confirm(
     `All ${_mtpState.media.photo_count + _mtpState.media.video_count} `+
