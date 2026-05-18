@@ -9087,22 +9087,45 @@ function renderTagMgmt(tags){
         <button class="btn btn-xs btn-secondary" data-action="merge" title="Merge into…">🔗</button>
         <button class="btn btn-xs btn-danger" data-action="delete" title="Delete">✕</button>
       </div>`;
+    // v1.5.132 — After any tag mutation we MUST sync the rest of the
+    // app, not just re-open the Tag Management modal. The old code
+    // only refreshed the modal itself, which left:
+    //   * the gallery's `photos` array holding the old tag chips on
+    //     every card (visible after closing the modal)
+    //   * the detail panel showing the renamed/deleted/merged tag for
+    //     the currently selected photo
+    //   * stats / refine-bar / dashboard cards out of date
+    // The helper inlines the common refresh; each handler still
+    // re-opens the modal so the user keeps their context.
+    const _afterTagMutation = async () => {
+      if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+      if (typeof refreshStats === 'function') refreshStats();
+      // Re-render detail panel for the selected photo if one is open
+      // so chip lists update without requiring a re-click.
+      if (typeof selectedId !== 'undefined' && selectedId && typeof selectPhoto === 'function') {
+        try { selectPhoto(selectedId, selectedPath); } catch(_){}
+      }
+      $('btnTagMgmt').click();
+    };
     item.querySelector('[data-action="rename"]').onclick=async()=>{
       const newName=prompt('Rename "'+t.tag+'" to:',t.tag);
       if(!newName||newName===t.tag)return;
       await invoke('rename_tag_global',{oldName:t.tag,newName:newName.trim().toLowerCase()});
-      toast('Renamed','success');$('btnTagMgmt').click();
+      toast('Renamed','success');
+      await _afterTagMutation();
     };
     item.querySelector('[data-action="merge"]').onclick=async()=>{
       const target=prompt('Merge "'+t.tag+'" into which tag?');
       if(!target)return;
       await invoke('merge_tags',{source:t.tag,target:target.trim().toLowerCase()});
-      toast('Merged','success');$('btnTagMgmt').click();
+      toast('Merged','success');
+      await _afterTagMutation();
     };
     item.querySelector('[data-action="delete"]').onclick=async()=>{
       if(!confirm('Delete tag "'+t.tag+'" from all '+t.count+' photos?'))return;
       await invoke('delete_tag_global',{tag:t.tag});
-      toast('Deleted','success');$('btnTagMgmt').click();
+      toast('Deleted','success');
+      await _afterTagMutation();
     };
     list.appendChild(item);
   }
