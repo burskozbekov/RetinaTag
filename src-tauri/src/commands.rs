@@ -1801,20 +1801,42 @@ pub async fn delete_all_xmp_sidecars(
         v
     };
 
-    let mut deleted = 0usize;
-    for folder in &folders {
-        let p = std::path::Path::new(folder);
-        if !p.exists() { continue; }
-        let rd = match std::fs::read_dir(p) { Ok(r) => r, Err(_) => continue };
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("xmp")).unwrap_or(false) {
-                if std::fs::remove_file(&path).is_ok() {
-                    deleted += 1;
+    // v1.5.146 — Mac-audit follow-up. Was walking every photo folder
+    // with .exists() + read_dir() + remove_file() directly on the
+    // tokio worker. With a few hundred folders on an SMB share, the
+    // syscalls can take minutes — and any one slow folder stalled the
+    // IPC mutex until it completed. Also apply the v1.5.144 network-
+    // path skip: if a folder lives on an unreachable share, don't
+    // pretend we can't find XMP files there; we just defer (the user
+    // can retry once the share is up).
+    let deleted = tauri::async_runtime::spawn_blocking(move || -> usize {
+        let mut share_status: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let mut deleted = 0usize;
+        for folder in &folders {
+            // Skip vault-unreachable shares so a momentary outage
+            // doesn't make the user think their XMPs got cleaned up.
+            if is_network_path(folder) {
+                let root = share_root_of(folder);
+                let reachable = *share_status.entry(root.clone())
+                    .or_insert_with(|| std::fs::metadata(&root).is_ok());
+                if !reachable { continue; }
+            }
+            let p = std::path::Path::new(folder);
+            if !p.exists() { continue; }
+            let rd = match std::fs::read_dir(p) { Ok(r) => r, Err(_) => continue };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("xmp")).unwrap_or(false) {
+                    if std::fs::remove_file(&path).is_ok() {
+                        deleted += 1;
+                    }
                 }
             }
         }
-    }
+        deleted
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?;
     Ok(deleted)
 }
 
