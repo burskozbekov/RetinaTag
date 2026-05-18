@@ -4165,8 +4165,13 @@ async function loadRelatedTags(tags,pid){
   for(const it of list){
     const chip=document.createElement('span');
     chip.className='related-tag-chip';
+    // v1.5.142 — Escape tag name before HTML interpolation. Tags
+    // generally come from clean AI output or the user-typed input
+    // (which is lowercased + trimmed but not stripped of `<`), so a
+    // weird DB row with `<` could otherwise break the chip render
+    // — or, in the worst case, execute as HTML.
     chip.title=`Add "${it.name}" (co-occurs ${it.count}×)`;
-    chip.innerHTML=`+ ${it.name}<span class="rt-count">${it.count}</span>`;
+    chip.innerHTML=`+ ${_esc(it.name)}<span class="rt-count">${it.count}</span>`;
     chip.onclick=async()=>{
       if(!selectedId)return;
       const sid=selectedId,newTag=it.name;
@@ -9151,7 +9156,10 @@ function renderTagMgmt(tags){
   const filtered=search?tags.filter(t=>t.tag.includes(search)):tags;
   for(const t of filtered){
     const item=document.createElement('div');item.className='tag-mgmt-item';
-    item.innerHTML=`<span class="tag-mgmt-name">${t.tag}</span>
+    // v1.5.142 — Escape tag name before HTML interpolation (defensive
+    // mirror of the related-tag-chip fix). t.count is numeric so it's
+    // safe as-is.
+    item.innerHTML=`<span class="tag-mgmt-name">${_esc(t.tag)}</span>
       <span class="tag-mgmt-count">${t.count} photos</span>
       <div class="tag-mgmt-actions">
         <button class="btn btn-xs btn-secondary" data-action="rename" title="Rename">✏</button>
