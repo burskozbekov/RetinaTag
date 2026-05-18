@@ -1799,6 +1799,14 @@ select.tb-select:focus{border-color:var(--red-dark)}
         <div class="progress-track" style="margin-bottom:8px"><div class="progress-fill" id="mtpProgressFill" style="width:0%"></div></div>
         <div style="font-size:12px;color:var(--text2)" id="mtpProgressLabel">Importing…</div>
         <div style="font-size:11px;color:var(--text3);margin-top:4px" id="mtpProgressSub"></div>
+        <!-- v1.5.150 — Mirror of Mac's speed/ETA/elapsed rows. Pure JS
+             (timestamps + sliding window); no Rust change needed because
+             we already get done/total in the progress event. -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:6px;font-size:10.5px;color:var(--text3)">
+          <div><span style="opacity:.6">Speed:</span> <span id="mtpProgressSpeed" style="color:var(--cream2)">—</span></div>
+          <div><span style="opacity:.6">ETA:</span> <span id="mtpProgressEta" style="color:var(--cream2)">—</span></div>
+          <div><span style="opacity:.6">Elapsed:</span> <span id="mtpProgressElapsed" style="color:var(--cream2)">—</span></div>
+        </div>
       </div>
 
       <!-- Phase E: after import — cleanup options -->
@@ -5144,6 +5152,64 @@ $('btnMtpPickDir').onclick = async () => {
 };
 $('mtpDestDir').onclick = () => $('btnMtpPickDir').click();
 
+// v1.5.150 — Sliding-window rate tracker for the MTP progress UI.
+// Matches Mac's v1.5.142 implementation: keep up to 20 (timestamp,
+// done) samples, derive speed from the head-vs-tail delta, project
+// ETA from current speed. _mtpStartedAt drives the elapsed counter.
+let _mtpSamples = [];
+let _mtpStartedAt = 0;
+let _mtpElapsedTimer = null;
+function _mtpResetRate(){
+  _mtpSamples = [];
+  _mtpStartedAt = Date.now();
+  if(_mtpElapsedTimer){ clearInterval(_mtpElapsedTimer); }
+  _mtpElapsedTimer = setInterval(_mtpRenderElapsed, 1000);
+  _mtpRenderElapsed();
+  const sp = $('mtpProgressSpeed'), et = $('mtpProgressEta');
+  if(sp) sp.textContent = '—';
+  if(et) et.textContent = '—';
+}
+function _mtpStopRate(){
+  if(_mtpElapsedTimer){ clearInterval(_mtpElapsedTimer); _mtpElapsedTimer = null; }
+}
+function _mtpFmtDuration(sec){
+  if(!isFinite(sec) || sec < 0) return '—';
+  sec = Math.round(sec);
+  if(sec < 60) return sec + 's';
+  const m = Math.floor(sec/60), s = sec%60;
+  if(m < 60) return s>0 ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m/60), mm = m%60;
+  return mm>0 ? `${h}h ${mm}m` : `${h}h`;
+}
+function _mtpRenderElapsed(){
+  const el = $('mtpProgressElapsed');
+  if(!el || !_mtpStartedAt) return;
+  el.textContent = _mtpFmtDuration((Date.now() - _mtpStartedAt) / 1000);
+}
+function _mtpRecordSample(done, total){
+  const now = Date.now();
+  _mtpSamples.push({ t: now, done });
+  if(_mtpSamples.length > 20) _mtpSamples.shift();
+  // Need at least 2 samples spanning >=1.5s to compute a stable rate.
+  if(_mtpSamples.length < 2) return;
+  const first = _mtpSamples[0];
+  const last  = _mtpSamples[_mtpSamples.length - 1];
+  const dt = (last.t - first.t) / 1000;
+  if(dt < 1.5) return;
+  const dn = last.done - first.done;
+  const rate = dn / dt; // photos/s
+  const sp = $('mtpProgressSpeed');
+  if(sp) sp.textContent = (rate >= 10 ? rate.toFixed(0) : rate.toFixed(1)) + ' photos/s';
+  const et = $('mtpProgressEta');
+  if(et){
+    if(rate > 0 && total > done){
+      et.textContent = '~' + _mtpFmtDuration((total - done) / rate);
+    }else{
+      et.textContent = '—';
+    }
+  }
+}
+
 $('btnMtpStart').onclick = async () => {
   if (!_mtpState.activeDevice || !_mtpState.destDir) return;
   $('mtpConfirm').style.display = 'none';
@@ -5151,6 +5217,7 @@ $('btnMtpStart').onclick = async () => {
   $('btnMtpStart').style.display = 'none';
   $('mtpProgressFill').style.width = '0%';
   $('mtpProgressLabel').textContent = 'Starting import…';
+  _mtpResetRate();
 
   try {
     const r = await invoke('mtp_import', {
@@ -5159,8 +5226,10 @@ $('btnMtpStart').onclick = async () => {
       objectIds: null,  // import everything
       rememberDest: $('mtpRemember').checked,
     });
+    _mtpStopRate();
     showMtpCleanupOptions(r);
   } catch(e) {
+    _mtpStopRate();
     $('mtpProgressLabel').textContent = 'Import error: ' + e;
     toast('MTP import error: ' + e, 'error');
   }
@@ -5172,12 +5241,17 @@ listen('mtp-import-progress', ({payload:p})=>{
   $('mtpProgressFill').style.width = pct.toFixed(1) + '%';
   $('mtpProgressLabel').textContent = `${p.done}/${p.total} — ${p.current || ''}`;
   $('mtpProgressSub').textContent = `${p.copied} copied, ${p.skipped} skipped`;
+  _mtpRecordSample(p.done|0, p.total|0);
 });
 
 listen('mtp-import-complete', ({payload:p})=>{
   if (!$('mtpProgress') || $('mtpProgress').style.display === 'none') return;
   $('mtpProgressFill').style.width = '100%';
   $('mtpProgressLabel').textContent = `✅ Done: ${p.copied} copied, ${p.skipped} skipped`;
+  // v1.5.150 — Freeze the elapsed clock at completion. ETA collapses
+  // to "—" naturally since done == total now.
+  _mtpStopRate();
+  const et = $('mtpProgressEta'); if(et) et.textContent = 'done';
 });
 
 function showMtpCleanupOptions(r) {
