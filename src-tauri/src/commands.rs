@@ -8,6 +8,52 @@ use std::os::windows::process::CommandExt;
 
 use crate::{clip, db, export, exif_reader, models::*, providers::{self, DEFAULT_OLLAMA_URL}, router::SmartRouter, thumbnail, xmp, AppState};
 
+// v1.5.144 — Network-mount detection. Windows equivalent of Mac's
+// `/sbin/mount` parsing: we ask the OS what kind of drive a path
+// lives on and treat DRIVE_REMOTE the same way Mac treats SMB/AFP.
+// Used by the health-check + orphan-cleanup paths so a transiently
+// unreachable network share never causes us to false-classify every
+// photo as deleted (which would then let the user click "fix" and
+// wipe their whole library's DB rows).
+//
+// UNC paths (`\\server\share\...`) are inherently remote and don't
+// need GetDriveTypeW — short-circuit those first. Mapped drive
+// letters (`Z:\...`) need the syscall because we can't tell from
+// the path alone whether Z: is a USB stick or an SMB mount.
+//
+// Returns false (treat as local, safe to stat) on unknown/error so
+// non-Windows builds and any future ambiguity defaults to the
+// historical behaviour rather than newly hiding local files.
+#[cfg(target_os = "windows")]
+fn is_network_path(path: &str) -> bool {
+    // UNC: starts with \\ or //
+    let trimmed = path.trim_start();
+    if trimmed.starts_with(r"\\") || trimmed.starts_with("//") {
+        return true;
+    }
+    // Drive-letter form ("D:\..."): probe with GetDriveTypeW.
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && (bytes[0] as char).is_ascii_alphabetic() {
+        let root = format!("{}:\\", (bytes[0] as char).to_ascii_uppercase());
+        let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+        use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+        use windows::core::PCWSTR;
+        // Safety: GetDriveTypeW reads the wide-string up to NUL; we
+        // pass a freshly-built UTF-16 buffer terminated with 0.
+        // DRIVE_REMOTE = 4 per the Win32 API contract — using the raw
+        // integer rather than the windows-rs symbol avoids pulling in
+        // an extra feature flag just for one named constant.
+        let dt = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+        return dt == 4;
+    }
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_network_path(_path: &str) -> bool {
+    false
+}
+
 // ── Folder / Scan ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -8646,25 +8692,57 @@ pub async fn get_year_month_counts(state: tauri::State<'_, AppState>) -> Result<
 
 #[tauri::command]
 pub async fn run_health_check(state: tauri::State<'_, AppState>) -> Result<HealthReport, String> {
+    // v1.5.144 — Two changes versus the previous version:
+    //   1. The path.exists() walk happens inside spawn_blocking so a
+    //      stale path can't strangle a tokio worker (same class as the
+    //      v1.5.143 get_file_date fix).
+    //   2. Paths on a network drive that's currently unreachable are
+    //      NOT counted as orphans. is_network_path() detects mapped
+    //      SMB drives and UNC paths; if the share is offline we'd
+    //      otherwise classify every photo as deleted, and the user
+    //      could then click "Fix" (fix_health_issues) and wipe every
+    //      DB row. Mac shipped the same guard in v1.5.132 using
+    //      /sbin/mount; here we use GetDriveTypeW.
     let all_photos = {
         let conn = state.db.lock().map_err(|_| "db lock")?;
         db::get_all_photo_paths(&conn).map_err(|e| e.to_string())?
     };
     let total_checked = all_photos.len() as i64;
+    let thumbs_dir = state.thumbnails_dir.clone();
 
-    let orphaned: Vec<(i64, String)> = all_photos.into_iter()
-        .filter(|(_, path)| !std::path::Path::new(path).exists())
-        .collect();
+    let (orphaned, actual_thumb_files): (Vec<(i64, String)>, i64) = tauri::async_runtime::spawn_blocking(move || {
+        // Cache reachability per unique share root so a library with
+        // 50k photos on one share probes the root ONCE, not 50k times.
+        let mut share_status: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let orphaned: Vec<(i64, String)> = all_photos.into_iter()
+            .filter(|(_, path)| {
+                if is_network_path(path) {
+                    let root = share_root_of(path);
+                    let reachable = *share_status.entry(root.clone())
+                        .or_insert_with(|| std::fs::metadata(&root).is_ok());
+                    if !reachable {
+                        // Share is down — DEFER, don't classify as
+                        // orphan. Wrong answer here would let the
+                        // user wipe their library's DB rows.
+                        return false;
+                    }
+                    // Share is live → file genuinely missing is a real
+                    // orphan. Fall through to the normal exists() check.
+                }
+                !std::path::Path::new(path).exists()
+            })
+            .collect();
+        let actual = std::fs::read_dir(&thumbs_dir).map(|d| d.count()).unwrap_or(0) as i64;
+        (orphaned, actual)
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?;
 
-    // Count missing thumbnails
-    let thumbs_dir = &state.thumbnails_dir;
     let conn = state.db.lock().map_err(|_| "db lock")?;
     let missing_thumbs: i64 = conn.query_row(
         "SELECT COUNT(*) FROM photos WHERE thumbnail_path IS NOT NULL AND thumbnail_path != ''",
         [], |r| r.get(0)
     ).unwrap_or(0);
-    // We'd need to check each file exists, but for speed just report the count
-    let actual_thumb_files = std::fs::read_dir(thumbs_dir).map(|d| d.count()).unwrap_or(0) as i64;
     let missing_thumbnails = (missing_thumbs - actual_thumb_files).max(0);
 
     Ok(HealthReport {
@@ -8672,6 +8750,30 @@ pub async fn run_health_check(state: tauri::State<'_, AppState>) -> Result<Healt
         missing_thumbnails,
         total_checked,
     })
+}
+
+// v1.5.144 — Compute the share root for a path so callers can cache
+// reachability per unique root rather than per-row. For UNC paths
+// (`\\server\share\folder\file`) the root is `\\server\share`; for
+// drive-letter paths (`D:\folder\file`) the root is `D:\`.
+//
+// Returned as a String so the caller can use it as a HashMap key
+// without dealing with PathBuf hashing quirks across Windows/Unix
+// case folding. We never mutate the value — just probe it via
+// std::fs::metadata().
+fn share_root_of(path: &str) -> String {
+    if path.starts_with(r"\\") || path.starts_with("//") {
+        let parts: Vec<&str> = path.split(|c| c == '\\' || c == '/').filter(|s| !s.is_empty()).collect();
+        if parts.len() >= 2 {
+            return format!(r"\\{}\{}", parts[0], parts[1]);
+        }
+    }
+    if path.len() >= 3 && path.as_bytes()[1] == b':' {
+        return format!("{}:\\", path.chars().next().unwrap());
+    }
+    // Fall back to the path itself — metadata() will error and the
+    // caller will defer the row, which is the safe outcome.
+    path.to_string()
 }
 
 #[tauri::command]
@@ -8682,13 +8784,21 @@ pub async fn fix_health_issues(state: tauri::State<'_, AppState>) -> Result<usiz
     // could be many GB of leaked files invisible to the UI. Now we look
     // up the hash + path before delete so we can wipe the thumbnail and
     // any encrypted blob too.
+    //
+    // v1.5.144 — Two safety fixes:
+    //   1. Whole orphan walk now runs inside spawn_blocking so the
+    //      path.exists() calls don't strangle the tokio runtime when
+    //      any photo lives on a slow share.
+    //   2. Network paths on an unreachable share are NOT classified
+    //      as orphans. Without this, a momentary SMB outage at the
+    //      time the user clicks "Fix" would cause every photo on
+    //      that share to be deleted from the DB — irrecoverable
+    //      without a backup. Mirrors v1.5.132 on Mac.
     let thumbs_dir = state.thumbnails_dir.clone();
-    let orphan_rows: Vec<(i64, String, String)> = {
+    let all_rows: Vec<(i64, String, String)> = {
         let conn = state.db.lock().map_err(|_| "db lock")?;
         let mut stmt = conn
-            .prepare(
-                "SELECT id, COALESCE(hash, ''), path FROM photos",
-            )
+            .prepare("SELECT id, COALESCE(hash, ''), path FROM photos")
             .map_err(|e| e.to_string())?;
         let rows: Vec<(i64, String, String)> = stmt
             .query_map([], |r| {
@@ -8696,28 +8806,53 @@ pub async fn fix_health_issues(state: tauri::State<'_, AppState>) -> Result<usiz
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
-            .filter(|(_, _, p)| !std::path::Path::new(p).exists())
             .collect();
         rows
     };
+    let thumbs_dir_clone = thumbs_dir.clone();
+    let orphan_rows: Vec<(i64, String, String)> = tauri::async_runtime::spawn_blocking(move || {
+        let mut share_status: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        all_rows.into_iter()
+            .filter(|(_, _, p)| {
+                if is_network_path(p) {
+                    let root = share_root_of(p);
+                    let reachable = *share_status.entry(root.clone())
+                        .or_insert_with(|| std::fs::metadata(&root).is_ok());
+                    if !reachable {
+                        return false; // defer — share is down
+                    }
+                }
+                !std::path::Path::new(p).exists()
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?;
+
     if orphan_rows.is_empty() {
         return Ok(0);
     }
     // Delete the thumbnail + .rtenc files BEFORE removing the DB rows so a
     // crash mid-delete leaves recoverable state (next health-check will
-    // see the orphans again and retry).
-    for (_id, hash, path) in &orphan_rows {
-        if !hash.is_empty() {
-            let cache = thumbnail::thumb_cache_name(hash);
-            let tp = thumbs_dir.join(&cache);
-            let _ = std::fs::remove_file(&tp);
+    // see the orphans again and retry). Also blocking IO — keep it on
+    // the same dedicated thread.
+    let orphan_for_cleanup = orphan_rows.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        for (_id, hash, path) in &orphan_for_cleanup {
+            if !hash.is_empty() {
+                let cache = thumbnail::thumb_cache_name(hash);
+                let tp = thumbs_dir_clone.join(&cache);
+                let _ = std::fs::remove_file(&tp);
+            }
+            // .rtenc vault blob (in case the user un-vaulted then deleted the
+            // restored file outside RetinaTag).
+            if path.ends_with(".rtenc") {
+                let _ = std::fs::remove_file(path);
+            }
         }
-        // .rtenc vault blob (in case the user un-vaulted then deleted the
-        // restored file outside RetinaTag).
-        if path.ends_with(".rtenc") {
-            let _ = std::fs::remove_file(path);
-        }
-    }
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?;
     let orphaned: Vec<i64> = orphan_rows.iter().map(|(id, _, _)| *id).collect();
     let conn = state.db.lock().map_err(|_| "db lock")?;
     db::delete_photos_by_ids(&conn, &orphaned).map_err(|e| e.to_string())
