@@ -15489,6 +15489,20 @@ async function filterOnThisDay(){
   document.querySelectorAll('.folder-item').forEach(f=>f.classList.remove('active'));
   $('onThisDayItem').classList.add('active');
   curFolder=''; curSearch=''; curRating=''; curMonth='';
+  // v1.5.134 — Also clear the person filter. get_on_this_day is called
+  // directly below (it doesn't route through loadPhotos), so leaving
+  // _currentPersonFilter set would keep the "Buğra" pill visible while
+  // the results actually contain photos from everyone whose MM-DD
+  // matches today. Misleading UI: pill says one thing, grid shows
+  // another. Clearing the pill matches what the data actually is.
+  if (typeof _currentPersonFilter !== 'undefined' && _currentPersonFilter
+      && typeof clearPersonFilter === 'function') {
+    // Clear the state directly without triggering clearPersonFilter's
+    // own loadPhotos() — we're about to render our own results.
+    _currentPersonFilter = null;
+    const pill = $('searchPersonPill'); if (pill) pill.classList.remove('active');
+    const box = document.querySelector('.search-box'); if (box) box.classList.remove('person-active');
+  }
   try{
     const rows=await invoke('get_on_this_day',{monthDay});
     // Unwrap to the photo payload and keep dates handy for headers.
