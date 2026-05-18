@@ -4175,6 +4175,39 @@ pub fn relink_photo_path(conn: &Connection, photo_id: i64, new_path: &str) -> Re
 ///      losing row first (the photo already has the canonical form
 ///      in that case — losing the dupe is the correct outcome).
 ///
+/// v1.5.152 — Backfill: rewrite any `date_taken` that landed in DB
+/// with WPD's slash-format ("2025/09/15:14:30:00") to the ISO form
+/// the rest of the pipeline expects ("2025-09-15 14:30:00").
+///
+/// Caused by pre-v1.5.152 mtp_import storing obj.date_created as-is.
+/// Symptom: timeline year dial showed bogus "2025/09"-style buttons
+/// because JS split('-') treated the whole prefix as a year.
+///
+/// Idempotent and bounded — touches only rows whose first 10 chars
+/// contain a '/'. Returns the count of rows updated.
+pub fn normalize_date_taken_format(conn: &Connection) -> Result<usize> {
+    // Step 1: replace '/' → '-' across the whole string.
+    // Step 2: if the char at index 10 is ':' (separator between
+    //         date and time), rewrite it to a space — ISO accepts
+    //         space or 'T' between date and time, not colon.
+    let n_slash = conn.execute(
+        "UPDATE photos
+         SET date_taken = REPLACE(date_taken, '/', '-')
+         WHERE date_taken IS NOT NULL
+           AND INSTR(SUBSTR(date_taken, 1, 10), '/') > 0",
+        [],
+    )?;
+    let n_colon = conn.execute(
+        "UPDATE photos
+         SET date_taken = SUBSTR(date_taken, 1, 10) || ' ' || SUBSTR(date_taken, 12)
+         WHERE date_taken IS NOT NULL
+           AND LENGTH(date_taken) > 10
+           AND SUBSTR(date_taken, 11, 1) = ':'",
+        [],
+    )?;
+    Ok(n_slash + n_colon)
+}
+
 /// Returns (groups_merged, rows_renamed, rows_deleted_due_to_conflict).
 /// Idempotent: running again after merge is a no-op.
 pub fn normalize_tag_case(conn: &Connection) -> Result<(usize, usize, usize)> {

@@ -7175,13 +7175,25 @@ async function loadTimeline(reset=true){
   }catch(e){toast('Timeline load failed: '+e,'error');return;}
   _tlByYear=new Map();
   // Backend returns Vec<(String, i64)> → array-of-[year_month,count] tuples.
+  // v1.5.152 — Some date_taken strings landed in the DB with slash or
+  // colon separators (WPD on Windows hands iPhone dates back as
+  // "2025/09/15:14:30:00"; EXIF DateTimeOriginal is colon-format).
+  // SUBSTR(date_taken, 1, 7) on the SQL side preserves those, and the
+  // raw split('-') then put the whole "2025/09" as a single year key,
+  // making the year dial show bogus "2025/09" buttons alongside the
+  // real ones. Normalize separators before splitting so the dial only
+  // ever sees integer years.
   for(const b of (_tlBuckets||[])){
-    const ym=Array.isArray(b)?b[0]:b.year_month;
+    const ym0=Array.isArray(b)?b[0]:b.year_month;
     const cnt=Array.isArray(b)?b[1]:b.count;
-    if(!ym||ym.length<7)continue;
+    if(!ym0||ym0.length<7)continue;
+    const ym = String(ym0).replace(/[\/:]/g,'-');
     const [y,m]=ym.split('-');
+    if(!y||!m)continue;
+    const mm = parseInt(m,10);
+    if(!isFinite(mm) || mm < 1 || mm > 12)continue;
     if(!_tlByYear.has(y))_tlByYear.set(y,[]);
-    _tlByYear.get(y).push({mm:parseInt(m,10),count:cnt});
+    _tlByYear.get(y).push({mm,count:cnt});
   }
   // Reverse dial direction: oldest years on the LEFT, newest on the RIGHT.
   // Scrolling right = moving forward in time (past → present), which matches

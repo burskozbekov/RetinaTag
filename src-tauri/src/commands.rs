@@ -3271,7 +3271,25 @@ pub async fn mtp_import(
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let media_type = if obj.is_video { "video" } else { "image" };
-                let date_taken = obj.date_created.clone();
+                // v1.5.152 — Normalize WPD's date format to ISO before
+                // storing. WPD on Windows returns iPhone dates as
+                // "2025/09/15:14:30:00"; the calendar/timeline SQL
+                // assumes ISO ("2025-09-15 14:30:00"), and the timeline
+                // dial in particular crashed into bogus "2025/09" year
+                // entries because split('-') couldn't see the slashes.
+                // Normalize once at the boundary so the rest of the
+                // pipeline doesn't have to defend.
+                let date_taken = obj.date_created.as_deref().map(|s| {
+                    let mut t = s.replace('/', "-");
+                    // Some pipelines also write "2025-09-15:14:30:00" —
+                    // colon between date and time instead of a space.
+                    // ISO accepts space; rewrite the first colon at
+                    // position 10 (right after YYYY-MM-DD) to a space.
+                    if t.len() > 10 && t.as_bytes().get(10) == Some(&b':') {
+                        t.replace_range(10..11, " ");
+                    }
+                    t
+                });
 
                 let new_photo = db::NewPhoto {
                     path: &src_str,

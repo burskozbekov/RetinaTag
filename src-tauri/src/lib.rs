@@ -449,6 +449,25 @@ pub fn run() {
                             let _ = writeln!(log, "  normalize_tag_case error: {}", e);
                         }
                     }
+                    // v1.5.152 — One-shot fix for WPD's slash-separated
+                    // date_taken values that pre-1.5.152 MTP imports
+                    // wrote raw into the DB. Broke the timeline year
+                    // dial. Idempotent: rows already in ISO are skipped
+                    // by the WHERE clauses.
+                    match db::normalize_date_taken_format(&conn) {
+                        Ok(n) => {
+                            if n > 0 {
+                                let _ = writeln!(
+                                    log,
+                                    "  normalize_date_taken_format: rewrote {} rows from slash/colon form to ISO",
+                                    n
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let _ = writeln!(log, "  normalize_date_taken_format error: {}", e);
+                        }
+                    }
                 }
 
                 // Pull (id, path) for every photo.
