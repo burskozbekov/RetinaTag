@@ -7459,7 +7459,13 @@ async function deleteSingleDup(gi, pi) {
     _dupGroups[gi].photos.splice(pi, 1);
     if (_dupGroups[gi].photos.length <= 1) _dupGroups.splice(gi, 1);
     renderDuplicates();
+    // v1.5.130 — Also refresh the gallery's photos array so switching
+    // back to Gallery view doesn't show stale broken-thumbnail cards
+    // for files that no longer exist on disk. The duplicates flow
+    // previously only updated _dupGroups + stats + folders, which left
+    // the main grid's in-memory list pointing at deleted paths.
     refreshStats(); refreshFolders();
+    if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
     toast('Deleted: ' + photo.filename, 'success');
   } catch(e) { toast('Delete failed: ' + e, 'error'); }
 }
@@ -7475,6 +7481,8 @@ async function deleteDupGroup(gi) {
     _dupGroups = _dupGroups.filter(g => g.photos.length > 1);
     renderDuplicates();
     refreshStats(); refreshFolders();
+    // v1.5.130 — see deleteSingleDup; same stale-gallery fix.
+    if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
     toast(`Deleted ${toDelete.length} duplicates`, 'success');
   } catch(e) { toast('Delete failed: ' + e, 'error'); }
 }
@@ -7493,6 +7501,8 @@ async function deleteAllDuplicates() {
     _dupGroups = [];
     renderDuplicates();
     refreshStats(); refreshFolders();
+    // v1.5.130 — see deleteSingleDup; same stale-gallery fix.
+    if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
     toast(`Deleted ${allIds.length} duplicates — library cleaned!`, 'success');
   } catch(e) { toast('Delete failed: ' + e, 'error'); }
 }
