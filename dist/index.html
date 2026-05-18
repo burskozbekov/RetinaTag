@@ -3698,9 +3698,35 @@ async function selectPhoto(id,path){
         const prev=parseInt($('starRow')?.dataset.curRating||'0')||0;
         await invoke('set_rating',{photoId:id,rating:nr}).catch(()=>{});
         renderStars(nr);
+        // v1.5.138 — Mirror of v1.5.137's favorite-toggle sync. Update the
+        // in-memory row so the card's rating badge refreshes, and if the
+        // user has a rating filter active (e.g. "5★+") the photo either
+        // drops out or shows up correctly after the change.
+        if (Array.isArray(photos)) {
+          const i = photos.findIndex(p => p && p.id === id);
+          if (i >= 0) photos[i].rating = nr;
+        }
+        // Determine if the current rating filter "cares" about this change:
+        // any non-empty curRating (0..5, -1, 'fav') is a filter that may
+        // include or exclude based on rating. We re-fetch in that case so
+        // the grid stays consistent.
+        if (curRating !== '' && curRating != null) {
+          if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+        } else if (typeof renderGrid === 'function') {
+          renderGrid(true);
+        }
         pushUndo(`rating → ${prev||'none'}`,async()=>{
           await invoke('set_rating',{photoId:id,rating:prev}).catch(()=>{});
           if(selectedId===id)renderStars(prev);
+          if (Array.isArray(photos)) {
+            const i = photos.findIndex(p => p && p.id === id);
+            if (i >= 0) photos[i].rating = prev;
+          }
+          if (curRating !== '' && curRating != null) {
+            if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+          } else if (typeof renderGrid === 'function') {
+            renderGrid(true);
+          }
         });
         toastUndo('Rating: '+'&#9733;'.repeat(nr),'success');
       };
