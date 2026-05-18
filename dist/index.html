@@ -10805,12 +10805,31 @@ document.addEventListener('keydown',e=>{
     const sid=selectedId;
     const prevR=(photos.find(p=>p.id===sid)||{}).rating||0;
     const nr=parseInt(e.key);
-    invoke('set_rating',{photoId:sid,rating:nr}).catch(()=>toast('Rating failed','error'));
+    invoke('set_rating',{photoId:sid,rating:nr}).then(()=>{
+      // v1.5.140 — Match the batch-rating handler a few lines up: also
+      // mutate photos[].rating + renderGrid so the card's rating badge
+      // updates without the user having to scroll the card out and
+      // back. If a rating filter is active and the new rating moves
+      // the photo out of (or into) the filter band, re-fetch so the
+      // grid stays consistent.
+      const ph = photos.find(p=>p.id===sid); if (ph) ph.rating = nr;
+      if (curRating !== '' && curRating != null) {
+        if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+      } else if (typeof renderGrid === 'function') {
+        renderGrid(true);
+      }
+    }).catch(()=>toast('Rating failed','error'));
     toastUndo('Rating: '+(e.key==='0'?'cleared':'&#9733;'.repeat(nr)),'success');
     renderStars(nr);
     pushUndo(`rating → ${prevR||'none'}`,async()=>{
       await invoke('set_rating',{photoId:sid,rating:prevR}).catch(()=>{});
       if(selectedId===sid)renderStars(prevR);
+      const ph2 = photos.find(p=>p.id===sid); if (ph2) ph2.rating = prevR;
+      if (curRating !== '' && curRating != null) {
+        if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+      } else if (typeof renderGrid === 'function') {
+        renderGrid(true);
+      }
     });
     e.preventDefault();return;
   }
@@ -10834,11 +10853,28 @@ document.addEventListener('keydown',e=>{
   if(selectedId&&(e.key==='x'||e.key==='X')){
     const sid=selectedId;
     const prevR=(photos.find(p=>p.id===sid)||{}).rating||0;
-    invoke('set_rating',{photoId:sid,rating:-1}).catch(()=>toast('Rating failed','error'));
+    invoke('set_rating',{photoId:sid,rating:-1}).then(()=>{
+      // v1.5.140 — Match batch-reject + the 1-5 rating handler: mutate
+      // the in-memory row and refresh the grid card. If a rating
+      // filter is active (which would include the "rejected" view),
+      // re-fetch so the card drops into or out of the visible band.
+      const ph = photos.find(p=>p.id===sid); if (ph) ph.rating = -1;
+      if (curRating !== '' && curRating != null) {
+        if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+      } else if (typeof renderGrid === 'function') {
+        renderGrid(true);
+      }
+    }).catch(()=>toast('Rating failed','error'));
     toastUndo('Photo rejected','success');renderStars(-1);
     pushUndo('reject',async()=>{
       await invoke('set_rating',{photoId:sid,rating:prevR}).catch(()=>{});
       if(selectedId===sid)renderStars(prevR);
+      const ph2 = photos.find(p=>p.id===sid); if (ph2) ph2.rating = prevR;
+      if (curRating !== '' && curRating != null) {
+        if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+      } else if (typeof renderGrid === 'function') {
+        renderGrid(true);
+      }
     });
     e.preventDefault();return;
   }
