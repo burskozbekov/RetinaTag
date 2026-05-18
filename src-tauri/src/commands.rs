@@ -3144,30 +3144,55 @@ pub async fn mtp_import(
             let mut skip_fail = 0usize;
             let mut imported_ids: Vec<(String, String, i64)> = Vec::new(); // (object_id, dest_path, photo_id)
 
+            // v1.5.153 — Temp inbox for the slow-path (WPD date missing).
+            // Files land here first, then get re-bucketed using their own
+            // EXIF / mtime so they never end up in `Unknown/Unknown/`.
+            let inbox = dest_root.join("_inbox_tmp");
+            let _ = std::fs::create_dir_all(&inbox);
+
             for (i, obj) in objects.iter().enumerate() {
-                // Decide destination path. We don't have EXIF yet (would
-                // need to download the file first). Use the MTP
-                // date_created if present; otherwise drop into an
-                // "Unknown" bucket and let the scanner reorganize on
-                // re-scan if needed.
-                let (year, month_folder) = parse_mtp_date_bucket(obj.date_created.as_deref());
-                let target_dir = dest_root.join(&year).join(&month_folder);
-                if let Err(e) = std::fs::create_dir_all(&target_dir) {
-                    eprintln!("create_dir {:?}: {}", target_dir, e);
-                    skip_fail += 1;
-                    continue;
-                }
                 let filename = if obj.name.is_empty() {
                     format!("mtp_{}.bin", i)
                 } else {
                     obj.name.clone()
                 };
-                let dest_path = target_dir.join(&filename);
 
-                // If a file with this name already exists at this size,
-                // assume it's the same image and skip. A real content
-                // dedup happens later via hash.
-                if dest_path.exists() {
+                // v1.5.153 — Two-path placement. FAST path: WPD knows the
+                // capture date → place directly into the bucket so we can
+                // skip the download entirely if the file is already there.
+                // SLOW path: WPD has no date → download to a temp inbox,
+                // then read EXIF + mtime from the file itself and pick a
+                // real year/month. Either way: the file NEVER lands in
+                // "Unknown/Unknown/" anymore.
+                let (opt_year, opt_month_folder) = parse_mtp_date_bucket(obj.date_created.as_deref());
+                let use_fast_path = opt_year != "Unknown";
+
+                let target_dir = if use_fast_path {
+                    dest_root.join(&opt_year).join(&opt_month_folder)
+                } else {
+                    // Slow path: download first, decide bucket later.
+                    inbox.clone()
+                };
+                if let Err(e) = std::fs::create_dir_all(&target_dir) {
+                    eprintln!("create_dir {:?}: {}", target_dir, e);
+                    skip_fail += 1;
+                    continue;
+                }
+                // For the slow path the file name in the inbox is
+                // prefixed with the index so two phone-side objects with
+                // the same filename don't collide during the temp stage.
+                let dest_path = if use_fast_path {
+                    target_dir.join(&filename)
+                } else {
+                    target_dir.join(format!("{}_{}", i, filename))
+                };
+
+                // Fast-path skip — if a file with this name already exists
+                // at this size in the bucket, assume it's the same image
+                // and skip download entirely. A real content dedup
+                // happens later via hash. (Slow path can't optimize
+                // this — we don't know the bucket yet.)
+                if use_fast_path && dest_path.exists() {
                     if let Ok(md) = std::fs::metadata(&dest_path) {
                         if md.len() == obj.size {
                             skip_dest += 1;
@@ -3226,8 +3251,47 @@ pub async fn mtp_import(
                     continue;
                 }
 
+                // v1.5.153 — Slow path: file is now in _inbox_tmp. Read
+                // EXIF / mtime to figure out a real year/month bucket,
+                // then move into place. NEVER falls into Unknown/.
+                let final_path: std::path::PathBuf = if use_fast_path {
+                    dest_path.clone()
+                } else {
+                    let (year, month) = date_bucket_for_file(&dest_path.to_string_lossy());
+                    let month_name = english_month_name(month);
+                    let real_dir = dest_root
+                        .join(format!("{:04}", year))
+                        .join(format!("{:02}-{}", month, month_name));
+                    if let Err(e) = std::fs::create_dir_all(&real_dir) {
+                        eprintln!("create_dir {:?}: {}", real_dir, e);
+                        let _ = std::fs::remove_file(&dest_path);
+                        skip_fail += 1;
+                        continue;
+                    }
+                    let real_path = real_dir.join(&filename);
+                    // Late dest-exists check: file might already be in
+                    // the real bucket from a prior import. Honour the
+                    // same size-match shortcut as the fast path.
+                    if real_path.exists() {
+                        if let Ok(md) = std::fs::metadata(&real_path) {
+                            if md.len() == obj.size {
+                                let _ = std::fs::remove_file(&dest_path);
+                                skip_dest += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    if let Err(e) = std::fs::rename(&dest_path, &real_path) {
+                        eprintln!("rename inbox→bucket failed: {}", e);
+                        let _ = std::fs::remove_file(&dest_path);
+                        skip_fail += 1;
+                        continue;
+                    }
+                    real_path
+                };
+
                 // Hash + insert into photos table (reuse scanner logic).
-                let src_str = dest_path.to_string_lossy().to_string();
+                let src_str = final_path.to_string_lossy().to_string();
                 let hash = match crate::scanner::compute_hash(&src_str) {
                     Ok(h) => h,
                     Err(_) => {
@@ -3252,7 +3316,7 @@ pub async fn mtp_import(
                     // Delete our duplicate and still record the mtp
                     // mapping so "delete from phone except favorites"
                     // works correctly for dedup'd photos too.
-                    let _ = std::fs::remove_file(&dest_path);
+                    let _ = std::fs::remove_file(&final_path);
                     imported_ids.push((obj.id.clone(), src_str, existing_photo_id));
                     skip_dup += 1;
                     continue;
@@ -3263,10 +3327,10 @@ pub async fn mtp_import(
                 // when the user runs a scan over the destination folder
                 // (or when the existing watch-folder picks it up — we
                 // could wire that here, but keeping this command small).
-                let file_size = std::fs::metadata(&dest_path)
+                let file_size = std::fs::metadata(&final_path)
                     .map(|m| m.len() as i64)
                     .unwrap_or(obj.size as i64);
-                let folder = dest_path
+                let folder = final_path
                     .parent()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
@@ -3340,6 +3404,12 @@ pub async fn mtp_import(
                     .ok();
                 }
             }
+
+            // v1.5.153 — Tear down the slow-path temp inbox once the
+            // loop is done. Best-effort: if any leftovers exist (a
+            // crash mid-rename, etc.) they stay for the user to deal
+            // with manually, but the empty dir gets removed cleanly.
+            let _ = std::fs::remove_dir(&inbox);
 
             // Record the mtp_imports mapping in one transaction.
             {

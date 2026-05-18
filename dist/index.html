@@ -10021,8 +10021,14 @@ async function loadScanHistory(){
 $('btnAddWatch').onclick=async()=>{
   const folder=await invoke('open_folder_dialog').catch(()=>null);
   if(!folder)return;
-  await invoke('add_watch_folder',{path:folder,autoTag:true}).catch(e=>toast(e,'error'));
-  refreshWatchFolders();toast('Watch folder added','success');
+  // v1.5.153 — Default auto-tag to OFF. Was TRUE which silently
+  // burned AI-tagging credits whenever the watcher saw new files
+  // (e.g. straight after an iPhone MTP import). The user can toggle
+  // it ON per-folder from the Watch Folders list once they've
+  // confirmed they want this behaviour.
+  await invoke('add_watch_folder',{path:folder,autoTag:false}).catch(e=>toast(e,'error'));
+  refreshWatchFolders();
+  toast('Watch folder added (auto-tag OFF — enable from the list if needed)','success');
 };
 async function removeWatch(id){
   await invoke('remove_watch_folder',{id}).catch(e=>toast(e,'error'));refreshWatchFolders();
