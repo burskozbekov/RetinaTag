@@ -16421,6 +16421,20 @@ async function findSimilarPhotos(photoId){
     const srcName = srcPhoto?.filename || (srcPhoto?.path||'').split(/[\\/]/).pop() || '';
     const results=await invoke('find_similar',{photoId:id,limit:50});
     if(!results.length){toast('No similar photos found. Index CLIP first.','error');return;}
+    // v1.5.135 — find_similar returns across the whole library, not
+    // restricted to the active person filter. Leaving the pill set
+    // would lie about what the user is looking at. Clear it inline
+    // (don't route through clearPersonFilter, which would kick off
+    // its own loadPhotos before we replace photos with the results).
+    // On "Back" via restorePhotos, loadPhotos sees the cleared
+    // _currentPersonFilter and returns the full library — consistent
+    // with the cleared-pill UI rather than confusingly snapping back
+    // to a person filter the user didn't re-apply.
+    if (typeof _currentPersonFilter !== 'undefined' && _currentPersonFilter) {
+      _currentPersonFilter = null;
+      const pill = $('searchPersonPill'); if (pill) pill.classList.remove('active');
+      const box = document.querySelector('.search-box'); if (box) box.classList.remove('person-active');
+    }
     _savedPhotos=[...photos];
     _simResultsCache = results.map(r=>({...r.photo,_similarity:r.similarity}));
     _simThreshold = 0;
