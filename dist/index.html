@@ -13990,6 +13990,15 @@ function closeLightbox() {
       }
     }
   }catch(_){/* non-fatal */}
+  // v1.5.139 — Refresh visible grid cards. The lightbox keyboard
+  // shortcuts (H favorite, X reject, 1–5 rate) mutate `photos[i]`
+  // in-place but don't touch the DOM cards behind the lightbox; so
+  // a user who rates/favorites with the keyboard then closes used
+  // to see the grid's badges still showing the pre-change state
+  // until they scrolled (forcing virtual recycling). renderGrid(true)
+  // wipes and re-creates the visible cards while preserving scroll
+  // position — cheap and only fires on close, not per-keypress.
+  try { if (typeof renderGrid === 'function') renderGrid(true); } catch(_){}
 }
 
 // ── Lightbox zoom & pan ─────────────────────────────────────────────────────
