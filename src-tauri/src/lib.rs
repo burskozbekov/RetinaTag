@@ -853,6 +853,7 @@ pub fn run() {
             commands::vault_set_pin,
             commands::vault_unlock,
             commands::vault_clear_pin,
+            commands::vault_add_paths,
             commands::vault_reset_full,
             commands::vault_set_pin_with_recovery,
             commands::vault_verify_mnemonic,

@@ -2023,6 +2023,20 @@ select.tb-select:focus{border-color:var(--red-dark)}
           </div>
         </div>
         <input id="vaultSearchInput" type="text" placeholder="🔍 Search vault by filename or tag..." oninput="_vaultFilter()" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;color:var(--cream);font-size:12px;margin-bottom:8px" />
+        <!-- v1.5.149 — Vault drag-drop dropzone. Matches Mac's v1.5.142
+             UI: golden dashed border, click-to-pick or drag-drop a
+             folder. Drop routing is handled in JS (vault modal open +
+             unlocked → vault_add_paths). -->
+        <div id="vaultDropzone" onclick="vaultPickFolderToAdd()"
+             style="border:2px dashed rgba(220,180,80,.55);border-radius:8px;padding:14px;text-align:center;cursor:pointer;color:var(--text2);font-size:12px;margin-bottom:8px;background:rgba(220,180,80,.04);transition:background .12s,border-color .12s"
+             onmouseover="this.style.background='rgba(220,180,80,.1)'"
+             onmouseout="this.style.background='rgba(220,180,80,.04)'"
+             title="Drop a folder or files here, or click to pick a folder">
+          <div style="font-size:18px;line-height:1;margin-bottom:4px">📥</div>
+          <div><b style="color:rgba(255,210,120,.95)">Drop folders or files here</b> to add to vault</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:3px">or click to pick a folder</div>
+        </div>
+        <div id="vaultAddStatus" style="display:none;font-size:11.5px;color:var(--cream2);background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px"></div>
         <div id="vaultPhotos" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(140px, 1fr));gap:8px;max-height:400px;overflow-y:auto"></div>
         <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)" id="vaultBioRow">
           <div style="font-size:12px;color:var(--text3);margin-bottom:6px">Windows Hello</div>
@@ -13421,6 +13435,90 @@ function vaultLock() {
   document.getElementById('vaultModal').classList.remove('open');
   toast('Vault locked');
 }
+
+// ── v1.5.149: drag-drop / click-pick folders into the vault ─────────
+// Mirrors Mac's v1.5.142 UI. Two entry points share the same Rust
+// command (vault_add_paths): clicking the dropzone opens a folder
+// picker; dragging files/folders onto the vault modal claims the
+// drop (preempting the find-by-example handler) and forwards the
+// paths to the same function.
+async function vaultPickFolderToAdd(){
+  if(!_vaultUnlocked){ toast('Unlock the vault first','warn'); return; }
+  try{
+    const folder = await invoke('open_folder_dialog');
+    if(!folder) return;
+    await _vaultAddPathsAndRefresh([folder]);
+  }catch(e){ toast('Pick failed: '+e,'error'); }
+}
+
+async function _vaultAddPathsAndRefresh(paths){
+  if(!Array.isArray(paths) || paths.length===0) return;
+  const status = document.getElementById('vaultAddStatus');
+  if(status){ status.style.display='block'; status.textContent = `Scanning ${paths.length} path${paths.length===1?'':'s'}…`; }
+  try{
+    const r = await invoke('vault_add_paths', { paths });
+    const total = r.total|0, enc = r.encrypted|0, dup = r.already_in_vault|0, skip = r.skipped|0;
+    const errs = (Array.isArray(r.errors) ? r.errors.length : 0);
+    let summary = `✓ ${enc} encrypted`;
+    if(dup>0) summary += ` · ${dup} already in vault`;
+    if(skip>dup) summary += ` · ${skip-dup} skipped`;
+    if(errs>0) summary += ` · ${errs} errors`;
+    if(status) status.textContent = summary;
+    toast(`Vault: ${summary} (of ${total} files)`,'success');
+    // Reload the vault grid so the new entries show up.
+    if(typeof openVault==='function'){
+      // openVault refetches list_private_photos with the current KEK.
+      try{ await openVault(); }catch(_){}
+    }
+  }catch(e){
+    if(status) status.textContent = `Error: ${String(e).slice(0,160)}`;
+    toast('Vault add failed: '+e,'error');
+  }
+  // Auto-hide the status line after a few seconds so it doesn't linger.
+  setTimeout(()=>{ if(status) status.style.display='none'; }, 6000);
+}
+
+// vault-add-progress event listener — live counter while encryption
+// runs. Doesn't block the result toast above; just gives the user
+// something to watch for big folders.
+(async function initVaultAddProgress(){
+  try{
+    const { listen } = window.__TAURI__.event;
+    await listen('vault-add-progress', (ev)=>{
+      const p = (ev && ev.payload) || {};
+      const status = document.getElementById('vaultAddStatus');
+      if(!status) return;
+      if(p.phase === 'scanning'){
+        status.style.display='block';
+        status.textContent = `Found ${p.total|0} file(s) to encrypt…`;
+      }else if(p.phase === 'encrypting'){
+        status.style.display='block';
+        status.textContent = `Encrypting ${p.done|0}/${p.total|0}…`;
+      }
+      // 'done' is handled by the resolve path in _vaultAddPathsAndRefresh.
+    });
+  }catch(_){}
+})();
+
+// Vault-aware drag-drop listener. Registered BEFORE find-by-example
+// so it sees drops first. Claims the drop when the vault modal is
+// open AND unlocked AND Shift is NOT held (shift = find-similar).
+// Otherwise falls through (no return preempts other handlers).
+(async function initVaultDragDrop(){
+  try{
+    const { listen } = window.__TAURI__.event;
+    await listen('tauri://drag-drop', async (ev)=>{
+      const paths = (ev && ev.payload && ev.payload.paths) || [];
+      if(!paths.length) return;
+      const modal = document.getElementById('vaultModal');
+      const open = modal && modal.classList.contains('open');
+      if(!open || !_vaultUnlocked) return;
+      if(window._findSimShiftHeld) return; // let find-by-example handle it
+      // Claim the drop.
+      await _vaultAddPathsAndRefresh(paths);
+    });
+  }catch(_){}
+})();
 
 // ── Windows Hello biometric unlock ────────────────────────────────────
 // `vault_biometric_status` returns { available, enrolled }. We surface

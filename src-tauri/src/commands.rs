@@ -10584,6 +10584,224 @@ pub fn vault_clear_pin(
     db::vault_clear_pin(&conn).map_err(|e| e.to_string())
 }
 
+/// v1.5.149 — Drag-drop folders/files straight into the vault. Mac
+/// shipped the matching `vault_add_paths` command in v1.5.142; this
+/// port is the Windows-side equivalent so a user who has both
+/// machines on the shared SMB volume sees the same dropzone UX on
+/// either side.
+///
+/// Walks each input path:
+///   - File: process directly if it's a media file (not already .rtenc)
+///   - Folder: WalkDir max_depth 20, same filter
+///
+/// For each candidate:
+///   1. Hash. Already-vaulted (private=1) by hash → already_in_vault++.
+///   2. Insert/upsert the DB row with the original metadata.
+///   3. encrypt_in_place — atomic write to `.rtenc`, remove plaintext.
+///   4. mark_photo_encrypted (DB path → .rtenc, original_path stashed)
+///      + set_photo_private(true).
+///
+/// Emits `vault-add-progress` events:
+///   - { phase: "scanning",   total }                              (once)
+///   - { phase: "encrypting", done, total }                        (every 5)
+///   - { phase: "done", total, encrypted, already_in_vault, … }    (once)
+#[tauri::command]
+pub async fn vault_add_paths(
+    paths: Vec<String>,
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    // Reject up-front when locked — same guard pattern as
+    // toggle_photo_private (v1.5.73 P0 leak fix).
+    let kek: [u8; 32] = {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        match *g {
+            Some(k) => k,
+            None => return Err("Vault is locked — unlock it first before adding paths.".into()),
+        }
+    };
+    let db_arc = state.db.clone();
+    let ah = app_handle.clone();
+
+    let result: serde_json::Value = tauri::async_runtime::spawn_blocking(move || -> serde_json::Value {
+        use walkdir::WalkDir;
+        use tauri::Emitter;
+
+        // Phase 1 — scan input roots to a flat candidate list.
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        for p_str in &paths {
+            let p = std::path::Path::new(p_str);
+            if !p.exists() { continue; }
+            if p.is_file() {
+                if crate::scanner::is_media_file(p)
+                    && !crate::vault_files::is_encrypted_path(p)
+                {
+                    candidates.push(p.to_path_buf());
+                }
+            } else if p.is_dir() {
+                for entry in WalkDir::new(p)
+                    .max_depth(20)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let ep = entry.path();
+                    if ep.is_file()
+                        && crate::scanner::is_media_file(ep)
+                        && !crate::vault_files::is_encrypted_path(ep)
+                    {
+                        candidates.push(ep.to_path_buf());
+                    }
+                }
+            }
+        }
+        let _ = ah.emit("vault-add-progress", serde_json::json!({
+            "phase": "scanning",
+            "total": candidates.len(),
+        }));
+
+        // Phase 2 — encrypt each candidate.
+        let total = candidates.len();
+        let mut encrypted = 0usize;
+        let mut already_in_vault = 0usize;
+        let mut skipped = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+
+        for (i, path) in candidates.iter().enumerate() {
+            let done = i + 1;
+            // Throttled progress: every 5 files + at completion. Keeps
+            // the IPC channel calm even on a 5,000-file vault import.
+            if done % 5 == 0 || done == total {
+                let _ = ah.emit("vault-add-progress", serde_json::json!({
+                    "phase": "encrypting",
+                    "done": done,
+                    "total": total,
+                }));
+            }
+
+            // 1) Hash. Failure here usually means the share went away
+            //    mid-walk; we record and continue with the next file.
+            let hash = match crate::scanner::compute_hash(&path.to_string_lossy()) {
+                Ok(h) => h,
+                Err(e) => {
+                    errors.push(format!("hash {}: {}", path.display(), e));
+                    continue;
+                }
+            };
+
+            // 2) Hash-match lookup. If this file is already in the
+            //    library and already private, we treat it as a no-op
+            //    (drag-drop is idempotent — drop the same folder twice
+            //    safely).
+            let existing: Option<(i64, i32)> = {
+                let conn = match db_arc.lock() {
+                    Ok(c) => c,
+                    Err(_) => { errors.push("db lock".into()); continue; }
+                };
+                conn.query_row(
+                    "SELECT id, private FROM photos WHERE hash = ?1 LIMIT 1",
+                    rusqlite::params![&hash],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i32>(1)?)),
+                ).ok()
+            };
+            if let Some((_id, is_private)) = existing {
+                if is_private == 1 {
+                    already_in_vault += 1;
+                    skipped += 1;
+                    continue;
+                }
+            }
+
+            // 3) Collect metadata for the (possibly new) DB row.
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
+            let folder = path.parent().and_then(|p| p.to_str()).unwrap_or("").to_string();
+            let size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
+            let media_type = crate::scanner::media_type_for_path(path).to_string();
+            let (width, height) = if media_type == "image" {
+                image::image_dimensions(path)
+                    .ok()
+                    .map(|(w, h)| (Some(w as i32), Some(h as i32)))
+                    .unwrap_or((None, None))
+            } else {
+                (None, None)
+            };
+
+            let original_path = path.to_string_lossy().to_string();
+            let photo_id = {
+                let conn = match db_arc.lock() {
+                    Ok(c) => c,
+                    Err(_) => { errors.push("db lock".into()); continue; }
+                };
+                let np = crate::db::NewPhoto {
+                    path: &original_path,
+                    filename: &filename,
+                    folder: &folder,
+                    hash: &hash,
+                    size,
+                    width,
+                    height,
+                    media_type: &media_type,
+                    date_taken: None,
+                    duration_secs: None,
+                };
+                match crate::db::insert_photo(&conn, &np) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        errors.push(format!("insert {}: {}", path.display(), e));
+                        continue;
+                    }
+                }
+            };
+
+            // 4) Encrypt → .rtenc. This removes the plaintext file on
+            //    success. If encrypt fails, the row stays pointing at
+            //    the original plaintext path (recoverable).
+            let enc_path = match crate::vault_files::encrypt_in_place(path, &kek) {
+                Ok(ep) => ep,
+                Err(e) => {
+                    errors.push(format!("encrypt {}: {}", path.display(), e));
+                    continue;
+                }
+            };
+
+            // 5) Point the DB row at the .rtenc + flip the private flag.
+            {
+                let conn = match db_arc.lock() {
+                    Ok(c) => c,
+                    Err(_) => { errors.push("db lock".into()); continue; }
+                };
+                let _ = crate::db::mark_photo_encrypted(
+                    &conn, photo_id,
+                    &enc_path.to_string_lossy(), &original_path,
+                );
+                let _ = crate::db::set_photo_private(&conn, photo_id, true);
+            }
+            encrypted += 1;
+        }
+
+        let _ = ah.emit("vault-add-progress", serde_json::json!({
+            "phase": "done",
+            "total": total,
+            "encrypted": encrypted,
+            "already_in_vault": already_in_vault,
+            "skipped": skipped,
+            "errors": errors.len(),
+        }));
+
+        serde_json::json!({
+            "total": total,
+            "encrypted": encrypted,
+            "already_in_vault": already_in_vault,
+            "skipped": skipped,
+            "errors": errors,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(result)
+}
+
 /// v1.5.63 — Faz 2: PIN setup that ALSO generates a 24-word BIP39
 /// recovery phrase. Returns the phrase exactly once. Caller MUST
 /// display it to the user and warn them this is the only time it's
