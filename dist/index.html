@@ -10906,10 +10906,25 @@ document.addEventListener('keydown',e=>{
     invoke('set_favorite',{photoId:sid,favorite:nf}).catch(()=>toast('Favorite failed','error'));
     if(photo)photo.favorite=nf;
     toastUndo(nf?'Favorited':'Unfavorited','success');renderFavButton(nf);
+    // v1.5.141 — Match v1.5.137 (detail-panel heart) and v1.5.140
+    // (1-5/X): refresh the grid card and re-fetch if the favorites
+    // filter is active. Without this the user could press F to
+    // unfavorite a photo from the favorites view and the photo
+    // would stay visible (still in photos[], no card re-render).
+    if (curRating === 'fav') {
+      if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+    } else if (typeof renderGrid === 'function') {
+      renderGrid(true);
+    }
     pushUndo(nf?'favorited':'unfavorited',async()=>{
       await invoke('set_favorite',{photoId:sid,favorite:prev}).catch(()=>{});
       if(selectedId===sid)renderFavButton(prev);
       const ph=photos.find(p=>p.id===sid);if(ph)ph.favorite=prev;
+      if (curRating === 'fav') {
+        if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+      } else if (typeof renderGrid === 'function') {
+        renderGrid(true);
+      }
     });
     e.preventDefault();return;
   }
