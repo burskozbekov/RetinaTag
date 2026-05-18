@@ -3966,7 +3966,20 @@ function renderTags(tags,pid){
       e.stopPropagation();
       const removedTag=t.tag;
       try{
-        await invoke('remove_tag',{photoId:pid,tag:removedTag});chip.remove();refreshStats();
+        await invoke('remove_tag',{photoId:pid,tag:removedTag});
+        chip.remove();
+        // v1.5.136 — Decrement the visible "Tags · N" badge. addTag
+        // (line ~4120) updates this from get_photo_detail, but the
+        // remove path was only removing the chip from the DOM —
+        // leaving the badge stuck at the pre-removal count until the
+        // next selectPhoto round-trip. Idempotent decrement avoids a
+        // server round-trip for what is purely client-side state.
+        const _tcEl = $('detailTagCount');
+        if (_tcEl) {
+          const cur = parseInt(_tcEl.textContent || '0') || 0;
+          _tcEl.textContent = Math.max(0, cur - 1);
+        }
+        refreshStats();
         pushUndo(`tag -${removedTag}`,async()=>{
           await invoke('add_tag',{photoId:pid,tag:removedTag}).catch(()=>{});
           if(selectedId===pid){const d=await invoke('get_photo_detail',{photoId:pid});renderTags(d.tags,pid);$('detailTagCount').textContent=d.tags.length;}
