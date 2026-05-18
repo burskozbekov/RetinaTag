@@ -2871,6 +2871,16 @@ pub async fn start_watching(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    // v1.5.145 — Third command flagged in Mac Claude's audit. The
+    // notify crate's RecommendedWatcher.watch() validates the path
+    // synchronously by stat()ing it. With a watched folder on an
+    // unresponsive SMB share, the tokio worker that handled the JS
+    // "Save settings → Start watching" invoke would hang inside
+    // FolderWatcher::new(), starving the IPC mutex until the share
+    // came back. Move the constructor into spawn_blocking; the
+    // resulting RecommendedWatcher is Send (Windows backend uses
+    // ReadDirectoryChangesW which is Send + Sync) so we can carry
+    // it back across the await and stash in state.
     let (folders, auto_tag_set) = {
         let conn = state.db.lock().map_err(|_| "db lock")?;
         let all = db::get_watch_folders(&conn).map_err(|e| e.to_string())?;
@@ -2894,10 +2904,14 @@ pub async fn start_watching(
     let tag_running = state.tag_running.clone();
     let tag_stop = state.tag_stop.clone();
 
-    let watcher = crate::watcher::FolderWatcher::new(
-        folders, db_arc, thumbs_dir, app_handle,
-        auto_tag_set, tag_running, tag_stop,
-    ).map_err(|e| e.to_string())?;
+    let watcher = tauri::async_runtime::spawn_blocking(move || {
+        crate::watcher::FolderWatcher::new(
+            folders, db_arc, thumbs_dir, app_handle,
+            auto_tag_set, tag_running, tag_stop,
+        ).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))??;
 
     // Store watcher in state
     let mut guard = state.watcher.lock().map_err(|_| "watcher lock")?;
