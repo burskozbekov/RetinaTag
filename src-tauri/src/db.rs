@@ -1941,9 +1941,15 @@ pub fn remove_watch_folder(conn: &Connection, id: i64) -> Result<()> {
 }
 
 pub fn get_watch_folders(conn: &Connection) -> Result<Vec<crate::models::WatchFolder>> {
+    // v1.5.128 — Watch-folders panel count: apply private=0 so a folder
+    // whose photos are all in the vault doesn't show an inflated count
+    // (or in the all-private case, a non-zero figure that reveals vault
+    // size). The watch_folders row itself stays — the user explicitly
+    // added the folder and clearing it would be confusing — but the
+    // count now matches what's actually browsable.
     let mut stmt = conn.prepare(
         "SELECT w.id, w.path, w.enabled, w.auto_tag, w.last_checked,
-                (SELECT COUNT(*) FROM photos WHERE folder LIKE w.path || '%') AS cnt
+                (SELECT COUNT(*) FROM photos WHERE folder LIKE w.path || '%' AND private = 0) AS cnt
          FROM watch_folders w ORDER BY w.path"
     )?;
     let rows = stmt.query_map([], |r| {
