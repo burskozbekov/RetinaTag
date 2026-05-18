@@ -4878,17 +4878,33 @@ pub async fn get_file_date(
     photo_id: i64,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    // v1.5.143 — Was calling std::fs::metadata(&path) directly on the
+    // tokio worker. JS invokes this for every photo in the grid (per-
+    // card date display). If even one photo lives on a slow/stale
+    // network share, the metadata() syscall blocks that worker; with
+    // a few cards on stale paths, the entire Tauri IPC mutex
+    // (respond_async_serialized_inner) stalls behind them and every
+    // subsequent invoke from the frontend hangs — symptoms range from
+    // "settings dialog freezes" to full-app deadlock. Same class as
+    // the Mac freeze that took the iPhone-import session a day to
+    // bisect. Move the blocking syscall into spawn_blocking so the
+    // tokio runtime keeps responding while the share resolves
+    // (or fails).
     let path = {
         let conn = state.db.lock().map_err(|_| "db lock")?;
         let (p, _) = db::get_photo_path_and_hash(&conn, photo_id)
             .map_err(|e| e.to_string())?;
         p
     };
-    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-    // Prefer created time, fallback to modified
-    let time = meta.created().or_else(|_| meta.modified()).map_err(|e| e.to_string())?;
-    let dt: chrono::DateTime<chrono::Local> = time.into();
-    Ok(dt.format("%d/%m/%Y %H:%M").to_string())
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        // Prefer created time, fallback to modified
+        let time = meta.created().or_else(|_| meta.modified()).map_err(|e| e.to_string())?;
+        let dt: chrono::DateTime<chrono::Local> = time.into();
+        Ok(dt.format("%d/%m/%Y %H:%M").to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
 }
 
 // ── 13. Version Check (simple update notification) ──────────────────────────
