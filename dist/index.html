@@ -3713,9 +3713,41 @@ async function selectPhoto(id,path){
       const nf=!prev;
       await invoke('set_favorite',{photoId:id,favorite:nf}).catch(()=>{});
       renderFavButton(nf);
+      // v1.5.137 — Keep the gallery and any active filter in sync with the
+      // heart toggle. Before this fix the toggle only updated the DB and
+      // the detail-panel button:
+      //   * photos[].favorite stayed stale, so the card's heart badge in
+      //     the grid kept showing the pre-toggle state
+      //   * if the user was viewing the Favorites filter and unfavorited
+      //     a photo, the photo stayed visible in the grid even though it
+      //     no longer matched
+      // Mutate the in-memory row, then either re-fetch (when the active
+      // filter cares about favorites) or just re-render visible cards.
+      if (Array.isArray(photos)) {
+        const i = photos.findIndex(p => p && p.id === id);
+        if (i >= 0) photos[i].favorite = nf;
+      }
+      if (curRating === 'fav') {
+        // Favorites filter active → re-fetch so the unfavorited photo
+        // drops out (or a freshly-favorited one shows up if it wasn't in
+        // the current visible set).
+        if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+      } else if (typeof renderGrid === 'function') {
+        // Just refresh the heart badge on the affected card.
+        renderGrid(true);
+      }
       pushUndo(nf?'favorited':'unfavorited',async()=>{
         await invoke('set_favorite',{photoId:id,favorite:prev}).catch(()=>{});
         if(selectedId===id)renderFavButton(prev);
+        if (Array.isArray(photos)) {
+          const i = photos.findIndex(p => p && p.id === id);
+          if (i >= 0) photos[i].favorite = prev;
+        }
+        if (curRating === 'fav') {
+          if (typeof loadPhotos === 'function') { loadPhotos().catch(()=>{}); }
+        } else if (typeof renderGrid === 'function') {
+          renderGrid(true);
+        }
       });
       toastUndo(nf?'Favorited':'Unfavorited','success');
     };
