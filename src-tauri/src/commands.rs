@@ -3424,18 +3424,29 @@ fn parse_mtp_date_bucket(s: Option<&str>) -> (String, String) {
     // Chop off anything after the first ':' group past the date.
     let date_part = iso_like.split(':').next().unwrap_or(&iso_like);
     if let Ok(d) = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
-        let month_name = match d.month() {
-            1 => "Ocak", 2 => "Şubat", 3 => "Mart", 4 => "Nisan",
-            5 => "Mayıs", 6 => "Haziran", 7 => "Temmuz", 8 => "Ağustos",
-            9 => "Eylül", 10 => "Ekim", 11 => "Kasım", 12 => "Aralık",
-            _ => "Unknown",
-        };
+        // v1.5.147 — Match Mac's v1.5.x rename: English month names
+        // (Mac reverted all UI strings to English along with v1.5.139)
+        // AND drop the redundant year prefix from the inner folder
+        // (we're already inside `Year/`, so `08-August` is enough
+        // versus the old `2024-08 - August`). Goal is identical
+        // imported folder layout across Mac+Windows so an SMB-shared
+        // library doesn't end up with two parallel structures.
+        let month_name = english_month_name(d.month());
         return (
             d.year().to_string(),
-            format!("{:04}-{:02} - {}", d.year(), d.month(), month_name),
+            format!("{:02}-{}", d.month(), month_name),
         );
     }
     ("Unknown".to_string(), "Unknown".to_string())
+}
+
+fn english_month_name(m: u32) -> &'static str {
+    match m {
+        1 => "January", 2 => "February", 3 => "March", 4 => "April",
+        5 => "May", 6 => "June", 7 => "July", 8 => "August",
+        9 => "September", 10 => "October", 11 => "November", 12 => "December",
+        _ => "Unknown",
+    }
 }
 
 #[tauri::command]
@@ -3548,11 +3559,14 @@ pub async fn import_from_device(
             }
 
             // 2. Figure out the year/month bucket from EXIF, or fall back to mtime
+            // v1.5.147 — see parse_mtp_date_bucket: English names, no
+            // year prefix inside the year folder. Same folder layout
+            // for the import_from_device path.
             let (year, month) = date_bucket_for_file(&src_str);
-            let month_name = turkish_month_name(month);
+            let month_name = english_month_name(month);
             let subdir = dest_root
                 .join(format!("{:04}", year))
-                .join(format!("{:04}-{:02} - {}", year, month, month_name));
+                .join(format!("{:02}-{}", month, month_name));
             if std::fs::create_dir_all(&subdir).is_err() {
                 skipped += 1;
                 continue;
@@ -3705,23 +3719,10 @@ fn parse_year_month(s: &str) -> Option<(i32, u32)> {
     Some((year, month))
 }
 
-fn turkish_month_name(m: u32) -> &'static str {
-    match m {
-        1 => "Ocak",
-        2 => "Şubat",
-        3 => "Mart",
-        4 => "Nisan",
-        5 => "Mayıs",
-        6 => "Haziran",
-        7 => "Temmuz",
-        8 => "Ağustos",
-        9 => "Eylül",
-        10 => "Ekim",
-        11 => "Kasım",
-        12 => "Aralık",
-        _ => "",
-    }
-}
+// v1.5.147 — turkish_month_name removed. english_month_name above is
+// the single source of truth for MTP/import folder naming. UI strings
+// have been English across the rest of the app for a while; the MTP
+// folder layout was the last Turkish holdout.
 
 // ── 5. Tag Management ───────────────────────────────────────────────────────
 
