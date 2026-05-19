@@ -13989,6 +13989,52 @@ function _vaultEnterFolder(folderId){
   _vaultRender(_vaultPhotosCache);
   _vaultBumpActivity();
 }
+// v1.5.162 — Show the folder in Explorer by decrypting every photo
+// under it back to its original on-disk path. Pops Explorer to that
+// directory on success so the user lands exactly where the content is.
+// The .rtenc copies stay in place — this is a temporary mirror, not
+// a permanent move out of vault.
+async function _vaultRevealFolder(f) {
+  _vaultBumpActivity();
+  if (!confirm(`Show "${f.name}" in Explorer?\n\nThis decrypts ${f.photo_count} item(s) back to:\n${f.original_path}\n\nThe vault copies stay encrypted. Click 🔒 on the folder later to re-lock.`)) {
+    return;
+  }
+  try {
+    const r = await invoke('vault_decrypt_folder_to_explorer', { folderId: f.id });
+    if (r.errors && r.errors.length) {
+      toast(`Revealed ${r.decrypted}, with ${r.errors.length} error(s)`, 'error');
+      console.warn('vault_decrypt_folder_to_explorer errors:', r.errors);
+    } else {
+      toast(`Revealed ${r.decrypted} file(s) to Explorer`);
+    }
+    // Open Explorer at the revealed root so the user sees it immediately.
+    try { await invoke('open_file', { path: r.root_path }); } catch(_) {}
+  } catch (e) {
+    toast('Reveal failed: ' + e, 'error');
+  }
+}
+// v1.5.162 — Re-seal a previously-revealed folder. Deletes the
+// plaintext mirror; .rtenc untouched. Edits made while revealed are
+// discarded — see the Rust comment in vault_relock_folder for why
+// "commit edits" isn't built in.
+async function _vaultRelockFolder(f) {
+  _vaultBumpActivity();
+  if (!confirm(`Re-lock "${f.name}"?\n\nThis removes the decrypted Explorer copy.\nVault contents stay sealed.\n\nAny edits you made while revealed will NOT be saved back to the vault.`)) {
+    return;
+  }
+  try {
+    const r = await invoke('vault_relock_folder', { folderId: f.id });
+    if (r.errors && r.errors.length) {
+      toast(`Re-locked ${r.removed_files} file(s), ${r.errors.length} error(s)`, 'error');
+      console.warn('vault_relock_folder errors:', r.errors);
+    } else {
+      toast(`Re-locked ${r.removed_files} file(s)`);
+    }
+    vaultRefresh();
+  } catch (e) {
+    toast('Re-lock failed: ' + e, 'error');
+  }
+}
 async function _vaultRender(list){
   const grid = document.getElementById('vaultPhotos');
   grid.innerHTML = '';
@@ -14053,10 +14099,34 @@ async function _vaultRender(list){
     const card = document.createElement('div');
     card.style.cssText = 'position:relative;aspect-ratio:1;background:linear-gradient(135deg,#2a2418 0%,#1a1612 100%);border-radius:6px;overflow:hidden;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;border:1px solid rgba(212,175,55,.15)';
     card.title = f.original_path;
-    card.innerHTML = `<div style="font-size:32px;line-height:1">📁</div>` +
-                     `<div style="color:var(--cream);font-size:12px;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(f.name)}</div>` +
-                     `<div style="color:var(--text3);font-size:10px">${f.photo_count} item${f.photo_count===1?'':'s'}</div>`;
-    card.onclick = () => _vaultEnterFolder(f.id);
+    // v1.5.162 — Two tiny buttons in the top-right corner: 👁 reveals
+    // the folder back to Explorer (decrypt-to-mirror), 🔒 re-seals
+    // (deletes the mirror, .rtenc stays). Hidden until hover so the
+    // card stays clean for casual browsing.
+    card.innerHTML =
+      `<div style="position:absolute;top:4px;right:4px;display:flex;gap:4px;opacity:0;transition:opacity 0.15s" data-folder-actions>` +
+        `<button title="Show in Explorer" data-vault-reveal style="background:rgba(0,0,0,.75);border:none;color:#fff;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer">👁</button>` +
+        `<button title="Re-lock (remove from Explorer)" data-vault-relock style="background:rgba(0,0,0,.75);border:none;color:#fff;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer">🔒</button>` +
+      `</div>` +
+      `<div style="font-size:32px;line-height:1">📁</div>` +
+      `<div style="color:var(--cream);font-size:12px;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(f.name)}</div>` +
+      `<div style="color:var(--text3);font-size:10px">${f.photo_count} item${f.photo_count===1?'':'s'}</div>`;
+    card.onmouseenter = () => { const a = card.querySelector('[data-folder-actions]'); if (a) a.style.opacity = '1'; };
+    card.onmouseleave = () => { const a = card.querySelector('[data-folder-actions]'); if (a) a.style.opacity = '0'; };
+    card.onclick = (ev) => {
+      const t = ev.target;
+      if (t && t.closest && t.closest('[data-vault-reveal]')) {
+        ev.stopPropagation();
+        _vaultRevealFolder(f);
+        return;
+      }
+      if (t && t.closest && t.closest('[data-vault-relock]')) {
+        ev.stopPropagation();
+        _vaultRelockFolder(f);
+        return;
+      }
+      _vaultEnterFolder(f.id);
+    };
     grid.appendChild(card);
   }
 

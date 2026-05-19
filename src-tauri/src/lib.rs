@@ -934,6 +934,8 @@ pub fn run() {
             commands::vault_kek_loaded,
             commands::vault_decrypt_to_temp,
             commands::list_vault_folders,
+            commands::vault_decrypt_folder_to_explorer,
+            commands::vault_relock_folder,
             commands::get_private_thumbnail,
             commands::get_private_photo_data,
             commands::vault_pending_file_migration_count,

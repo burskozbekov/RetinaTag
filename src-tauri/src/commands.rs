@@ -10577,6 +10577,255 @@ pub async fn vault_decrypt_to_temp(
     Ok(dest.to_string_lossy().into_owned())
 }
 
+/// v1.5.162 — Folder-vault step 5/5 (decrypt half).
+///
+/// Temporarily reveal a vault folder to Explorer: recreate the original
+/// directory on disk and decrypt every .rtenc photo whose vault_folder_id
+/// chains up to this folder back to a plaintext file. The user can then
+/// browse / copy / share / edit those files with any Windows program,
+/// and call `vault_relock_folder` later to re-seal the contents.
+///
+/// We do NOT modify the DB rows during reveal — `photos.path` still
+/// points at the .rtenc blob, `private` is still 1, the vault still
+/// owns the encrypted bytes. The plaintext is a temporary mirror;
+/// re-locking just deletes the mirror.
+///
+/// Walks all descendants of `folder_id` (so a single reveal at root
+/// unsealsthe whole tree). Returns the root directory path so the FE
+/// can pop Explorer at the right place.
+///
+/// Errors: vault locked, folder row missing, original_path parent does
+/// not exist (user deleted the desktop?), I/O failure mid-decrypt.
+#[tauri::command]
+pub async fn vault_decrypt_folder_to_explorer(
+    folder_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let kek: [u8; 32] = {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        match *g {
+            Some(k) => k,
+            None => return Err("Vault is locked — unlock it first.".into()),
+        }
+    };
+
+    let db_arc = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        // Collect: this folder + every descendant (BFS through parent_id).
+        let conn = db_arc.lock().map_err(|_| "db lock")?;
+        let root: (String, String) = conn.query_row(
+            "SELECT name, original_path FROM vault_folders WHERE id = ?1",
+            rusqlite::params![folder_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ).map_err(|e| format!("folder {} not found: {}", folder_id, e))?;
+
+        let mut all_folder_ids: Vec<i64> = vec![folder_id];
+        let mut frontier: Vec<i64> = vec![folder_id];
+        while let Some(pid) = frontier.pop() {
+            let mut stmt = conn.prepare("SELECT id FROM vault_folders WHERE parent_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let kids: Vec<i64> = stmt.query_map(rusqlite::params![pid], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            for k in &kids {
+                all_folder_ids.push(*k);
+                frontier.push(*k);
+            }
+        }
+
+        // For each folder, mkdir original_path + decrypt every photo whose
+        // vault_folder_id matches it. We rely on photos.path being the
+        // .rtenc location, and we derive the plaintext destination from
+        // photos.original_path (set at vault_add_paths time). That makes
+        // the decrypt fully content-addressed: even if the user moved
+        // their library, we still rebuild at the *original* location.
+        let mut decrypted = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for fid in &all_folder_ids {
+            let f_orig_path: String = conn.query_row(
+                "SELECT original_path FROM vault_folders WHERE id = ?1",
+                rusqlite::params![fid],
+                |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            if let Err(e) = std::fs::create_dir_all(&f_orig_path) {
+                errors.push(format!("mkdir {}: {}", f_orig_path, e));
+                continue;
+            }
+
+            let mut stmt = conn.prepare(
+                "SELECT path, original_path FROM photos
+                  WHERE vault_folder_id = ?1 AND private = 1"
+            ).map_err(|e| e.to_string())?;
+            let rows: Vec<(String, Option<String>)> = stmt
+                .query_map(rusqlite::params![fid], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            for (enc_path, original_path) in rows {
+                let enc_pb = std::path::PathBuf::from(&enc_path);
+                if !crate::vault_files::is_encrypted_path(&enc_pb) {
+                    errors.push(format!("not a .rtenc: {}", enc_path));
+                    continue;
+                }
+                let dest_pb = match original_path
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| crate::vault_files::original_path_for(&enc_pb))
+                {
+                    Some(p) => p,
+                    None => {
+                        errors.push(format!("can't derive plaintext path for {}", enc_path));
+                        continue;
+                    }
+                };
+                // If a stale plaintext from a previous reveal is sitting
+                // there, skip — overwriting silently would lose user
+                // edits. The FE shows this as "already revealed".
+                if dest_pb.exists() { continue; }
+                if let Err(e) = crate::vault_files::decrypt_to_file(&enc_pb, &dest_pb, &kek) {
+                    errors.push(format!("decrypt {}: {}", enc_path, e));
+                    continue;
+                }
+                decrypted += 1;
+            }
+        }
+
+        Ok(serde_json::json!({
+            "root_path": &root.1,
+            "root_name": &root.0,
+            "decrypted": decrypted,
+            "errors": errors,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// v1.5.162 — Folder-vault step 5/5 (re-seal half).
+///
+/// Reverse of `vault_decrypt_folder_to_explorer`. Walks the same folder
+/// tree and removes the plaintext mirror — the .rtenc blobs stay
+/// untouched, so the vault content is unchanged. After this call,
+/// Explorer can no longer open any of those files.
+///
+/// We deliberately do NOT re-encrypt edited content: that would race
+/// against any open file handle (Word doc still in use, mpv playing
+/// a video), and the user expectation here is "I'm done looking,
+/// hide it again", not "I edited these and want the edits preserved".
+/// If we ever want to support edits, that's a separate "commit edits
+/// to vault" verb.
+///
+/// Errors: vault locked, folder row missing, I/O failure on remove.
+/// Best-effort throughout — a single file with a permission denied
+/// doesn't abort the whole sweep.
+#[tauri::command]
+pub async fn vault_relock_folder(
+    folder_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        if g.is_none() {
+            return Err("Vault is locked — unlock it first.".into());
+        }
+    }
+
+    let db_arc = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = db_arc.lock().map_err(|_| "db lock")?;
+
+        // BFS the tree just like the decrypt verb so we cover all
+        // descendants in one call.
+        let mut all_folder_ids: Vec<i64> = vec![folder_id];
+        let mut frontier: Vec<i64> = vec![folder_id];
+        while let Some(pid) = frontier.pop() {
+            let mut stmt = conn.prepare("SELECT id FROM vault_folders WHERE parent_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let kids: Vec<i64> = stmt.query_map(rusqlite::params![pid], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            for k in &kids {
+                all_folder_ids.push(*k);
+                frontier.push(*k);
+            }
+        }
+
+        let mut removed_files = 0usize;
+        let mut removed_dirs = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+
+        // Phase A — delete every plaintext mirror file.
+        for fid in &all_folder_ids {
+            let mut stmt = conn.prepare(
+                "SELECT path, original_path FROM photos
+                  WHERE vault_folder_id = ?1 AND private = 1"
+            ).map_err(|e| e.to_string())?;
+            let rows: Vec<(String, Option<String>)> = stmt
+                .query_map(rusqlite::params![fid], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            for (enc_path, original_path) in rows {
+                let enc_pb = std::path::PathBuf::from(&enc_path);
+                let dest_pb = match original_path
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| crate::vault_files::original_path_for(&enc_pb))
+                {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if !dest_pb.exists() { continue; }
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&dest_pb) {
+                    errors.push(format!("remove plaintext {}: {}", dest_pb.display(), e));
+                } else {
+                    removed_files += 1;
+                }
+            }
+        }
+
+        // Phase B — remove empty mirror directories deepest-first.
+        // Collect each folder's original_path, walk it, rm any dir that's empty.
+        // We're looking at the directories the user would see in Explorer;
+        // if anything other than our just-removed plaintext sits there
+        // (user dropped a new note, took a screenshot during reveal),
+        // remove_dir returns ENOTEMPTY and we leave it alone.
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        for fid in &all_folder_ids {
+            let p: String = conn.query_row(
+                "SELECT original_path FROM vault_folders WHERE id = ?1",
+                rusqlite::params![fid],
+                |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            dirs.push(std::path::PathBuf::from(p));
+        }
+        dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        for d in dirs {
+            if !d.exists() { continue; }
+            if let Err(e) = std::fs::remove_dir(&d) {
+                let msg = e.to_string();
+                if !msg.contains("not empty") && !msg.contains("non-empty") {
+                    errors.push(format!("rmdir {}: {}", d.display(), msg));
+                }
+            } else {
+                removed_dirs += 1;
+            }
+        }
+
+        Ok(serde_json::json!({
+            "removed_files": removed_files,
+            "removed_dirs": removed_dirs,
+            "errors": errors,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// v1.5.64 — Faz 2.3: True if Windows Hello is set up AND the vault
 /// has a stored bio_blob the FE can attempt to use. The FE shows the
 /// "Use Windows Hello" button only when both are true.
