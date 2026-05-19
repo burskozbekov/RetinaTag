@@ -2057,6 +2057,18 @@ select.tb-select:focus{border-color:var(--red-dark)}
           </div>
         </div>
         <input id="vaultSearchInput" type="text" placeholder="🔍 Search vault by filename or tag..." oninput="_vaultFilter()" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;color:var(--cream);font-size:12px;margin-bottom:8px" />
+        <!-- v1.5.169 — Vault filter chips mirroring gallery's quick-filter-chips.
+             Click toggles the active filter; click again clears. Reuses .qf-chip
+             CSS so the visual treatment is identical to gallery. -->
+        <div id="vaultFilterChips" class="quick-filter-chips" style="margin:0 0 8px 0;flex-wrap:wrap">
+          <button class="qf-chip active" data-vault-filter="all">All</button>
+          <button class="qf-chip" data-vault-filter="image">Photos</button>
+          <button class="qf-chip" data-vault-filter="video">Videos</button>
+          <button class="qf-chip" data-vault-filter="fav" title="Favorites">♥</button>
+          <button class="qf-chip" data-vault-filter="5" title="5★">★★★★★</button>
+          <button class="qf-chip" data-vault-filter="4" title="4★+">★★★★</button>
+          <button class="qf-chip" data-vault-filter="3" title="3★+">★★★</button>
+        </div>
         <!-- v1.5.149 — Vault drag-drop dropzone. Matches Mac's v1.5.142
              UI: golden dashed border, click-to-pick or drag-drop a
              folder. Drop routing is handled in JS (vault modal open +
@@ -13695,6 +13707,13 @@ function vaultLock() {
   // expects.
   _vaultFoldersCache = [];
   _vaultCurrentFolderId = null;
+  // v1.5.169 — Reset the quick-filter chip too. A relocked vault should
+  // forget that the user was viewing only videos / 4★+ so the next
+  // unlock starts fresh.
+  _vaultFilterMode = 'all';
+  document.querySelectorAll('#vaultFilterChips .qf-chip').forEach(b => {
+    b.classList.toggle('active', b.dataset.vaultFilter === 'all');
+  });
   document.getElementById('vaultModal').classList.remove('open');
   toast('Vault locked');
 }
@@ -13991,6 +14010,30 @@ let _vaultPhotosCache = [];
 // which folder the user has drilled into (null = top level / "all").
 let _vaultFoldersCache = [];
 let _vaultCurrentFolderId = null;
+// v1.5.169 — Active quick-filter chip. Mirrors gallery's curRating /
+// curMediaType but kept vault-local so it doesn't leak into the
+// gallery's filter state. Values: 'all' | 'image' | 'video' | 'fav'
+// | '5' | '4' | '3' | '2' | '1'. 'all' is the no-filter idle.
+let _vaultFilterMode = 'all';
+function _vaultSetFilterMode(mode){
+  _vaultFilterMode = mode || 'all';
+  // Sync chip active state visually.
+  document.querySelectorAll('#vaultFilterChips .qf-chip').forEach(b => {
+    b.classList.toggle('active', b.dataset.vaultFilter === _vaultFilterMode);
+  });
+  _vaultRender(_vaultPhotosCache);
+  _vaultBumpActivity();
+}
+// Wire chip clicks once at boot. The event delegation pattern means
+// re-rendering chips (we don't, but if we ever do) doesn't lose handlers.
+document.addEventListener('click', (e) => {
+  const chip = e.target && e.target.closest && e.target.closest('#vaultFilterChips .qf-chip');
+  if (!chip) return;
+  const m = chip.dataset.vaultFilter;
+  if (!m) return;
+  // Click on active chip → clear to 'all'. Same as gallery toggle.
+  _vaultSetFilterMode(_vaultFilterMode === m && m !== 'all' ? 'all' : m);
+});
 async function vaultRefresh() {
   try {
     _vaultPhotosCache = await invoke('list_private_photos') || [];
@@ -14128,6 +14171,27 @@ async function _vaultRender(list){
                    ).join('') +
                    `</div>`;
     }
+  }
+
+  // v1.5.169 — Apply the active quick-filter chip BEFORE the count and
+  // render. Filter is a final pass over displayPhotos; folder context
+  // and search both stay in their pre-filter behaviour, so a chip-only
+  // narrow is layered on top of whatever scope the user is browsing.
+  if (_vaultFilterMode && _vaultFilterMode !== 'all') {
+    displayPhotos = displayPhotos.filter(p => {
+      switch (_vaultFilterMode) {
+        case 'image': return (p.media_type || 'image') === 'image';
+        case 'video': return p.media_type === 'video';
+        case 'fav':   return !!p.favorite;
+        case '5':
+        case '4':
+        case '3':
+        case '2':
+        case '1':
+          return (p.rating || 0) >= parseInt(_vaultFilterMode, 10);
+        default: return true;
+      }
+    });
   }
 
   // Count for the header — folders + visible photos at this scope.
