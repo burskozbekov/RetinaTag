@@ -13188,8 +13188,62 @@ async function openLightbox(photoId) {
       const assetUrl = convertFileSrc(playablePath);
       img.style.display = 'none';
       videoEl.style.display = 'block';
+      // v1.5.181 — Tear the previous video down CLEANLY before assigning a
+      // new src. Without this, fast ←/→ navigation between videos was
+      // leaving the previous source's MediaPlayer/MFT handles open inside
+      // WebView2; combined with the autoplay-then-muted-retry sequence
+      // below (two play() promises against the same element across the
+      // tear-down boundary) it was triggering WebView2 GPU crashes that
+      // looked like spontaneous shutdowns to the user. Stop the old
+      // playback, drop the source, force the element back to a clean
+      // HAVE_NOTHING state, THEN swap in the new URL.
+      try { videoEl.pause(); } catch(_) {}
+      // Resolve any pending play() promise the previous open might have
+      // left dangling so the upcoming play() doesn't race against an
+      // in-flight AbortError.
+      if (videoEl._lastPlayPromise) {
+        try { await videoEl._lastPlayPromise.catch(()=>{}); } catch(_) {}
+        videoEl._lastPlayPromise = null;
+      }
+      videoEl.removeAttribute('src');
+      try { videoEl.load(); } catch(_) {}
       videoEl.src = assetUrl;
       videoEl.currentTime = 0;
+      // v1.5.181 — One-time error handler. Without it, an unsupported
+      // codec / disk read failure inside WebView2's media stack would
+      // fire MEDIA_ERR_DECODE / MEDIA_ERR_SRC_NOT_SUPPORTED, the element
+      // would silently stall, and on some Windows builds the renderer
+      // would then crash. We catch the error, fall back gracefully to
+      // the thumbnail + Open Externally button, and toast the user so
+      // they know what happened.
+      if (!videoEl._errAttached) {
+        videoEl._errAttached = true;
+        videoEl.addEventListener('error', () => {
+          const err = videoEl.error;
+          // Codes: 1 ABORTED, 2 NETWORK, 3 DECODE, 4 SRC_NOT_SUPPORTED.
+          // 1 fires legitimately whenever we tear down for navigation;
+          // ignore that one so we don't toast on every swap.
+          if (!err || err.code === 1) return;
+          console.error('[lbVideo] media error', err.code, err.message);
+          try { videoEl.pause(); } catch(_) {}
+          videoEl.style.display = 'none';
+          const fallbackImg = thumbCache.get(_lbCurrentId);
+          img.src = fallbackImg || '';
+          img.style.display = '';
+          if (playBtn) playBtn.style.display = 'block';
+          toast('In-app playback failed (codec or disk). Click "Open externally" to launch the system player.', 'warn');
+        });
+      }
+      // v1.5.181 — Hook the ended event so a finished clip stops the
+      // play() loop and doesn't keep the GPU decoder alive. Without it,
+      // a long video left running silently in the background was
+      // pinning the WebView2 media foundation pipeline open.
+      if (!videoEl._endedAttached) {
+        videoEl._endedAttached = true;
+        videoEl.addEventListener('ended', () => {
+          try { videoEl.pause(); } catch(_) {}
+        });
+      }
       // v1.5.114 — Persist volume/muted across plays via localStorage. The
       // old behaviour force-muted every video, which was correct for
       // browser autoplay policy on a cold page load but wrong once the
@@ -13218,7 +13272,10 @@ async function openLightbox(photoId) {
           } catch(_){}
         });
       }
-      videoEl.play().catch(() => {
+      // v1.5.181 — Stash the play() promise so the next swap (above)
+      // can await it before tearing the element down. Prevents the
+      // "two play()s racing across src change" crash path.
+      videoEl._lastPlayPromise = videoEl.play().catch(() => {
         // Autoplay blocked — usually because we restored an unmuted
         // state with no fresh user gesture. Mute and retry; suspend
         // persistence so this fallback doesn't overwrite the user's
@@ -13226,12 +13283,13 @@ async function openLightbox(photoId) {
         // the suspension flag is gone and the change persists.
         videoEl._volPersistSuspended = true;
         videoEl.muted = true;
-        videoEl.play().catch(() => { /* still blocked — user can press play */ });
+        const retry = videoEl.play().catch(() => { /* still blocked — user can press play */ });
         // The volumechange task may be queued asynchronously by the
         // engine; 50 ms is generous enough that any pending dispatch
         // sees the suspension flag, and short enough that a real
         // user interaction immediately after will still persist.
         setTimeout(() => { videoEl._volPersistSuspended = false; }, 50);
+        return retry;
       });
       spinner.style.display = 'none';
       playBtn.style.display = 'block';
@@ -14936,9 +14994,16 @@ function closeLightbox() {
   if (pb) pb.style.display = 'none';
   // Stop any in-app video playback and release the file handle so other
   // apps (or a subsequent delete) can touch the file.
+  // v1.5.181 — Resolve any pending play() promise before tearing down so
+  // a subsequent reopen doesn't race against a still-resolving promise
+  // from the previous close (the WebView2 crash path).
   const vid = document.getElementById('lbVideo');
   if (vid) {
     try { vid.pause(); } catch(_) {}
+    if (vid._lastPlayPromise) {
+      try { vid._lastPlayPromise.catch(()=>{}); } catch(_) {}
+      vid._lastPlayPromise = null;
+    }
     vid.removeAttribute('src');
     try { vid.load(); } catch(_) {}
     vid.style.display = 'none';
