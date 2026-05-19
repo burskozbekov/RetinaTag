@@ -11413,6 +11413,7 @@ pub async fn vault_add_paths(
     };
     let db_arc = state.db.clone();
     let ah = app_handle.clone();
+    let store_dir = state.vault_store_dir.clone();
 
     let result: serde_json::Value = tauri::async_runtime::spawn_blocking(move || -> serde_json::Value {
         use walkdir::WalkDir;
@@ -11645,7 +11646,42 @@ pub async fn vault_add_paths(
                 }
             };
 
-            let enc_path_str = enc_path.to_string_lossy().to_string();
+            // v1.5.173 — Move the sealed blob into the central vault-store
+            // directory. encrypt_in_place writes it next to the original
+            // (`<orig>.<ext>.rtenc`), which means the user's Desktop\VAULT\
+            // folder stays full of *.rtenc files and Explorer keeps showing
+            // the supposedly-private folder. Moving the blob to
+            // %LOCALAPPDATA%\com.retinatag.app\vault-store\rt_<hash>.rtenc
+            // empties the original folder, and v1.5.157's empty-dir cleanup
+            // then removes it. Net effect: dropping a folder onto the vault
+            // makes both the originals AND the folder disappear from
+            // Explorer entirely.
+            //
+            // Filename uses the file's content hash so re-encrypting the
+            // same content (idempotent drop) overwrites a stable name
+            // instead of accumulating uniqs. Hash is computed earlier in
+            // this loop iteration; we have it in scope.
+            let store_path = store_dir.join(format!("rt_{}.rtenc", &hash));
+            let final_enc_path = if store_path != enc_path {
+                match crate::vault_files::move_to_store(&enc_path, &store_path) {
+                    Ok(()) => store_path,
+                    Err(e) => {
+                        // Couldn't move to store — keep the .rtenc next to
+                        // the original (pre-v1.5.173 behaviour) so the
+                        // photo is still recoverable, but report the
+                        // partial state so support can investigate.
+                        errors.push(format!(
+                            "moved-to-store failed for {} (kept next to original): {}",
+                            path.display(), e
+                        ));
+                        enc_path
+                    }
+                }
+            } else {
+                enc_path
+            };
+
+            let enc_path_str = final_enc_path.to_string_lossy().to_string();
             let db_ok = match db_arc.lock() {
                 Err(_) => {
                     errors.push(format!("db lock for {}", path.display()));
@@ -11737,8 +11773,11 @@ pub async fn vault_add_paths(
                 }
                 encrypted += 1;
             } else {
-                // Rollback: drop the .rtenc. Original is still on disk.
-                if let Err(e) = crate::vault_files::remove_file_with_fallback(&enc_path) {
+                // Rollback: drop the .rtenc wherever it actually landed
+                // (store dir post-move, or next to the original if the
+                // move-to-store fallback ran). Original plaintext is
+                // still on disk so the user keeps the photo.
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&final_enc_path) {
                     errors.push(format!("rollback failed to remove rtenc for {}: {}", path.display(), e));
                 }
                 // Already pushed a per-step error above.

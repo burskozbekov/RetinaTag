@@ -140,6 +140,33 @@ pub fn decrypt_to_file(
     Ok(())
 }
 
+/// v1.5.173 — Move a sealed `.rtenc` from wherever encrypt_in_place
+/// wrote it to its long-term home in the central vault-store dir.
+/// Tries `fs::rename` first (atomic on the same volume); if that
+/// fails (most often because src and dst are on different volumes —
+/// Windows returns ERROR_NOT_SAME_DEVICE = 17), falls back to
+/// copy+delete. Copy preserves the bytes 1:1; the sealed envelope's
+/// auth tag stays intact, so decrypt still works against the moved
+/// blob.
+///
+/// On success: returns Ok(()), src is gone, dst exists with same
+/// bytes. On failure: leaves whatever state the FS gave us — caller
+/// decides whether to roll back the DB write.
+pub fn move_to_store(src: &Path, dst: &Path) -> Result<(), String> {
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(src, dst).map_err(|e| {
+                format!("copy {} -> {}: {}", src.display(), dst.display(), e)
+            })?;
+            fs::remove_file(src).map_err(|e| {
+                format!("remove src {} after copy: {}", src.display(), e)
+            })?;
+            Ok(())
+        }
+    }
+}
+
 /// v1.5.154 — Best-effort file removal with a real error on failure.
 /// Replaces patterns like `let _ = fs::remove_file(...)` that silently
 /// swallowed permission / sharing-violation errors and left orphan

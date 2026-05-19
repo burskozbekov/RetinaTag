@@ -246,6 +246,19 @@ pub struct AppState {
     /// of whether the user clicked 🔒 themselves or the auto-lock timer
     /// fired while they were browsing the reveal in Explorer.
     pub revealed_folders: Arc<Mutex<Vec<i64>>>,
+    /// v1.5.173 — Central vault-store directory at
+    /// `%LOCALAPPDATA%\com.retinatag.app\vault-store\`. Every new
+    /// .rtenc blob produced by vault_add_paths lands here instead of
+    /// next to the user's plaintext source. Without this, encrypting
+    /// `C:\Users\foo\Desktop\VAULT\` left `VAULT\bugra.jpg.rtenc` and
+    /// friends sitting in plain sight on the desktop — the folder
+    /// stayed populated (with sealed blobs), v1.5.157's empty-dir
+    /// cleanup skipped it, and the user saw their "vault" still
+    /// present in Explorer with weird `.rtenc` extensions. Moving the
+    /// blobs to this central store leaves the desktop folder empty,
+    /// v1.5.157 then removes it, and the vault becomes truly invisible
+    /// to Explorer.
+    pub vault_store_dir: std::path::PathBuf,
 }
 
 /// Suppress Windows "The application was unable to start correctly (0xc0000142)"
@@ -409,6 +422,20 @@ pub fn run() {
                 }
             }
 
+            // v1.5.173 — Central vault-store directory. Created up-front so
+            // vault_add_paths can move freshly-sealed .rtenc blobs in here
+            // without racing the directory's first-time creation. Lives under
+            // LOCALAPPDATA (NOT roaming) so blobs never sync to Folder
+            // Redirection / OneDrive — the user's vault has to stay local.
+            let vault_store_dir = app
+                .path()
+                .app_local_data_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join("vault-store");
+            if let Err(e) = std::fs::create_dir_all(&vault_store_dir) {
+                eprintln!("[vault-store] create_dir_all {} failed: {}", vault_store_dir.display(), e);
+            }
+
             app.manage(AppState {
                 db: Arc::new(Mutex::new(conn)),
                 thumbnails_dir,
@@ -424,6 +451,7 @@ pub fn run() {
                 vault_kek: Mutex::new(None),
                 vault_temp_files: Arc::new(Mutex::new(Vec::new())),
                 revealed_folders: Arc::new(Mutex::new(Vec::new())),
+                vault_store_dir,
             });
 
             // Install the system tray icon + menu. Non-fatal on failure.
