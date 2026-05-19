@@ -973,6 +973,7 @@ pub fn run() {
             commands::list_vault_folders,
             commands::vault_decrypt_folder_to_explorer,
             commands::vault_relock_folder,
+            commands::vault_migrate_to_store,
             commands::get_private_thumbnail,
             commands::get_private_photo_data,
             commands::vault_pending_file_migration_count,

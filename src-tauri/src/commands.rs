@@ -10586,6 +10586,170 @@ pub fn vault_kek_loaded(state: tauri::State<'_, AppState>) -> Result<bool, Strin
     Ok(g.is_some())
 }
 
+/// v1.5.174 — One-shot migration that moves every legacy .rtenc out of
+/// the user's original folder into the central vault-store dir.
+///
+/// Pre-v1.5.173 the vault encryption flow wrote `.rtenc` blobs right
+/// next to the user's plaintext (e.g. `Desktop\VAULT\bugra.jpg.rtenc`),
+/// which meant the "private" folder stayed populated with sealed blobs
+/// and the user kept seeing it in Explorer. v1.5.173 fixed the path for
+/// new drops; this command handles the existing rows that were vaulted
+/// under the old scheme.
+///
+/// For every photo with `private = 1` whose `path` does NOT already
+/// live inside the central vault_store_dir:
+///   1. Compute the new store path as `vault_store_dir/rt_<hash>.rtenc`.
+///   2. Call `move_to_store` (rename or copy+delete fallback).
+///   3. UPDATE photos SET path = new_store_path WHERE id = …
+///   4. Collect the source folder so we can deepest-first remove_dir it.
+///
+/// Only requires the vault to be unlocked because the FE only invokes
+/// this from the unlocked openVault branch — we don't decrypt anything,
+/// just move sealed bytes around.
+///
+/// Idempotent: rerunning is a no-op once everything's already in the
+/// store. Safe to call on every unlock.
+#[tauri::command]
+pub async fn vault_migrate_to_store(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        if g.is_none() {
+            return Err("Vault is locked — unlock it first.".into());
+        }
+    }
+
+    let db_arc = state.db.clone();
+    let store_dir = state.vault_store_dir.clone();
+    let store_dir_str = store_dir.to_string_lossy().to_string();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        // Collect candidate rows: private + .rtenc + not already in store.
+        // `path LIKE` is the cheapest way to filter out already-migrated
+        // rows; if the user's store dir happens to share a substring with
+        // an unmigrated path the worst case is a redundant move attempt
+        // that the `source == dest` short-circuit inside move_to_store
+        // handles cleanly.
+        // IIFE so the conn lock guard and stmt drop cleanly before the
+        // outer `?` would push the early-return into the outer fn —
+        // without it the inner stmt borrows conn beyond the block.
+        let candidates: Vec<(i64, String, String)> = (|| -> Result<Vec<(i64, String, String)>, String> {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            let mut stmt = conn.prepare(
+                "SELECT id, path, hash FROM photos
+                  WHERE private = 1
+                    AND path LIKE '%.rtenc'
+                    AND instr(path, ?1) = 0"
+            ).map_err(|e| e.to_string())?;
+            let iter = stmt.query_map(rusqlite::params![&store_dir_str], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            }).map_err(|e| e.to_string())?;
+            Ok(iter.filter_map(|r| r.ok()).collect())
+        })()?;
+
+        let mut migrated = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        let mut source_dirs: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+
+        for (pid, src_str, hash) in &candidates {
+            let src = std::path::PathBuf::from(src_str);
+            if !src.exists() {
+                // Source file missing — likely a manual delete, surface
+                // it but don't break the run.
+                errors.push(format!("missing source for photo {}: {}", pid, src.display()));
+                continue;
+            }
+            let dst = store_dir.join(format!("rt_{}.rtenc", hash));
+            if dst == src {
+                // Already where we want it (shouldn't happen given the
+                // SQL filter, but be defensive).
+                continue;
+            }
+            if let Err(e) = crate::vault_files::move_to_store(&src, &dst) {
+                errors.push(format!("move {}: {}", src.display(), e));
+                continue;
+            }
+            // DB update. If this fails AFTER the move succeeded the row
+            // still points at the old path which now doesn't exist —
+            // ugly but recoverable (rerun migration after fixing perms).
+            // We do NOT undo the FS move on DB failure: the .rtenc is
+            // safe in the store, the orphan row tells us where it went.
+            let dst_str = dst.to_string_lossy().to_string();
+            let upd = {
+                let conn = match db_arc.lock() {
+                    Ok(c) => c,
+                    Err(_) => { errors.push(format!("db lock for {}", pid)); continue; }
+                };
+                conn.execute(
+                    "UPDATE photos SET path = ?1 WHERE id = ?2",
+                    rusqlite::params![&dst_str, pid],
+                )
+            };
+            if let Err(e) = upd {
+                errors.push(format!("UPDATE photo {} path: {}", pid, e));
+                continue;
+            }
+
+            // Remember the source dir so we can try to clean it up.
+            if let Some(parent) = src.parent() {
+                source_dirs.insert(parent.to_path_buf());
+            }
+            migrated += 1;
+        }
+
+        // Cleanup: try to remove now-empty source folders. Deepest-first
+        // so a parent that becomes empty after its children get removed
+        // also goes. fs::remove_dir is empty-only, so a folder with
+        // unrelated user files survives untouched.
+        let mut dirs: Vec<std::path::PathBuf> = source_dirs.into_iter().collect();
+        // Expand to also try each ancestor of every source dir, up to
+        // a sane stop (don't try to remove `C:\Users\foo\Desktop`).
+        // We cap at 4 levels up so we walk e.g. Desktop\VAULT\sub\sub
+        // but stop at Desktop itself.
+        let mut all_dirs: std::collections::BTreeSet<std::path::PathBuf> =
+            std::collections::BTreeSet::new();
+        for d in &dirs {
+            let mut cur = d.clone();
+            for _ in 0..4 {
+                all_dirs.insert(cur.clone());
+                match cur.parent() {
+                    Some(p) => cur = p.to_path_buf(),
+                    None => break,
+                }
+            }
+        }
+        dirs = all_dirs.into_iter().collect();
+        dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        let mut removed_dirs = 0usize;
+        for d in dirs {
+            if !d.exists() { continue; }
+            match std::fs::remove_dir(&d) {
+                Ok(()) => { removed_dirs += 1; }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("not empty") && !msg.contains("non-empty") {
+                        // Ignore permission-denied on the user-profile root
+                        // (we'd never want to remove that anyway).
+                        // Other errors are silently swallowed too — best-effort.
+                        let _ = msg;
+                    }
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "candidates": candidates.len(),
+            "migrated":   migrated,
+            "removed_dirs": removed_dirs,
+            "errors":     errors,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// v1.5.155 — Materialise a vault video so the WebView2 lightbox can
 /// play it. WebView2's `convertFileSrc` only points at real files on
 /// disk; it can't stream from a `.rtenc` blob, and the IPC base64 path

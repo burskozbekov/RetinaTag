@@ -13515,6 +13515,23 @@ async function openVault() {
       if (!_vaultFullscreen) {
         try { vaultEnterFullscreen(); } catch(_) {}
       }
+      // v1.5.174 — Fire-and-forget legacy-rtenc migration. Moves any
+      // pre-v1.5.173 .rtenc blobs out of the user's original folders
+      // into the central vault-store dir and prunes the (now-empty)
+      // source folders. Non-blocking: vaultRefresh runs immediately,
+      // migration completes in the background and a follow-up refresh
+      // picks up the new paths. Idempotent so re-unlocks are cheap.
+      (async () => {
+        try {
+          const r = await invoke('vault_migrate_to_store');
+          if (r && (r.migrated > 0 || r.removed_dirs > 0)) {
+            toast(`Vault: moved ${r.migrated} blob${r.migrated === 1 ? '' : 's'} into store${r.removed_dirs ? `, removed ${r.removed_dirs} empty folder${r.removed_dirs === 1 ? '' : 's'}` : ''}`);
+            // Re-fetch the photo list so thumbnails refresh against the
+            // new paths.
+            vaultRefresh();
+          }
+        } catch (_) { /* migration is best-effort — silent on failure */ }
+      })();
       await _vaultLoadIdleTimeout();
       await vaultRefresh();
       _vaultStartIdleTimer();
