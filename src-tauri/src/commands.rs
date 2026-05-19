@@ -11068,12 +11068,119 @@ pub async fn vault_add_paths(
             "total": candidates.len(),
         }));
 
-        // Phase 2 — encrypt each candidate.
-        let total = candidates.len();
+        // Counters used by Phase 1.5 (folder inserts) and Phase 2 (encrypt).
+        // Declared up here so the folder-insert pass can record errors
+        // without forward-declaration gymnastics.
         let mut encrypted = 0usize;
         let mut already_in_vault = 0usize;
         let mut skipped = 0usize;
         let mut errors: Vec<String> = Vec::new();
+
+        // Phase 1.5 — v1.5.159 folder-vault step 3/5. For every directory
+        // root the user dropped, insert one `vault_folders` row per
+        // directory under (and including) the root. Build a map
+        // path → row_id so Phase 2 can attach each encrypted photo to
+        // its leaf folder via `photos.vault_folder_id`.
+        //
+        // We sort dirs shallow-first so a parent's row exists before
+        // its children try to look up parent_id. Each drop session is
+        // a fresh tree: re-dropping the same folder makes a NEW row set
+        // and gets a new id — that's intentional (the old set is what
+        // step 4/5 "decrypt to Explorer" walks back).
+        //
+        // Standalone-file drops produce no folder rows. Those photos
+        // keep `vault_folder_id = NULL` and show flat in the vault UI,
+        // exactly like pre-v1.5.158 behaviour.
+        let mut folder_map: std::collections::HashMap<std::path::PathBuf, i64> =
+            std::collections::HashMap::new();
+        for p_str in &paths {
+            let root = std::path::Path::new(p_str);
+            if !root.is_dir() { continue; }
+            // Collect every dir from this root, shallow-first.
+            let mut dirs: Vec<std::path::PathBuf> = WalkDir::new(root)
+                .max_depth(20)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_dir())
+                .map(|e| e.into_path())
+                .collect();
+            dirs.sort_by_key(|p| p.components().count());
+
+            // Insert each dir as a vault_folders row. Done in one txn
+            // per root so a mid-walk DB hiccup rolls back the whole
+            // tree of this drop — cleaner than half-built hierarchies.
+            let now = chrono::Utc::now().to_rfc3339();
+            let conn_res = db_arc.lock();
+            let conn_ok = match conn_res {
+                Ok(mut conn) => match conn.transaction() {
+                    Ok(tx) => {
+                        let mut ok = true;
+                        for d in &dirs {
+                            let name = d.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let original_path = d.to_string_lossy().to_string();
+                            let parent_id: Option<i64> = if d == root {
+                                None
+                            } else {
+                                d.parent().and_then(|pp| folder_map.get(pp).copied())
+                            };
+                            let ins = tx.execute(
+                                "INSERT INTO vault_folders (name, parent_id, original_path, created_at)
+                                 VALUES (?1, ?2, ?3, ?4)",
+                                rusqlite::params![&name, parent_id, &original_path, &now],
+                            );
+                            match ins {
+                                Ok(_) => {
+                                    folder_map.insert(d.clone(), tx.last_insert_rowid());
+                                }
+                                Err(e) => {
+                                    errors.push(format!(
+                                        "vault_folders insert {}: {}", d.display(), e
+                                    ));
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok {
+                            match tx.commit() {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    errors.push(format!(
+                                        "vault_folders commit for {}: {}", root.display(), e
+                                    ));
+                                    false
+                                }
+                            }
+                        } else {
+                            // tx drops with rollback — clear the partial folder_map
+                            // entries we may have inserted for this root so they don't
+                            // point at rows that got rolled back.
+                            for d in &dirs { folder_map.remove(d); }
+                            false
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("vault_folders begin tx for {}: {}", root.display(), e));
+                        false
+                    }
+                },
+                Err(_) => {
+                    errors.push(format!("db lock for vault_folders {}", root.display()));
+                    false
+                }
+            };
+            // If folder insertion failed, encryption still proceeds —
+            // photos just won't get vault_folder_id set. Better than
+            // aborting the whole drop.
+            let _ = conn_ok;
+        }
+
+        // Phase 2 — encrypt each candidate.
+        let total = candidates.len();
 
         for (i, path) in candidates.iter().enumerate() {
             let done = i + 1;
@@ -11202,19 +11309,32 @@ pub async fn vault_add_paths(
                                     "UPDATE photos SET private = 1 WHERE id = ?1",
                                     rusqlite::params![pid],
                                 );
-                                match (upd_path, upd_priv) {
-                                    (Ok(_), Ok(_)) => match tx.commit() {
+                                // v1.5.159 — Link the photo to its leaf folder
+                                // row inserted in Phase 1.5. NULL for standalone
+                                // file drops (folder_map has no entry for the
+                                // file's parent, lookup returns None).
+                                let vault_folder_id_opt: Option<i64> = path.parent()
+                                    .and_then(|pp| folder_map.get(pp).copied());
+                                let upd_folder = tx.execute(
+                                    "UPDATE photos SET vault_folder_id = ?1 WHERE id = ?2",
+                                    rusqlite::params![vault_folder_id_opt, pid],
+                                );
+                                match (upd_path, upd_priv, upd_folder) {
+                                    (Ok(_), Ok(_), Ok(_)) => match tx.commit() {
                                         Ok(()) => true,
                                         Err(e) => {
                                             errors.push(format!("commit {}: {}", path.display(), e));
                                             false
                                         }
                                     },
-                                    (path_res, priv_res) => {
+                                    (path_res, priv_res, folder_res) => {
                                         // tx drops with rollback automatically.
                                         errors.push(format!(
-                                            "update {}: path={:?} private={:?}",
-                                            path.display(), path_res.err(), priv_res.err()
+                                            "update {}: path={:?} private={:?} folder={:?}",
+                                            path.display(),
+                                            path_res.err(),
+                                            priv_res.err(),
+                                            folder_res.err()
                                         ));
                                         false
                                     }
@@ -11303,6 +11423,7 @@ pub async fn vault_add_paths(
             "already_in_vault": already_in_vault,
             "skipped": skipped,
             "folders_removed": folders_removed,
+            "folders_created": folder_map.len(),
             "errors": errors.len(),
         }));
 
@@ -11312,6 +11433,7 @@ pub async fn vault_add_paths(
             "already_in_vault": already_in_vault,
             "skipped": skipped,
             "folders_removed": folders_removed,
+            "folders_created": folder_map.len(),
             "errors": errors,
         })
     })
