@@ -13670,6 +13670,11 @@ function vaultLock() {
   // Drop the cached photo list so the next openVault() refetches with a
   // (now-empty) decryption key, rather than showing a stale grid.
   _vaultPhotosCache = [];
+  // v1.5.161 — also reset folder tree state so re-unlocking lands at the
+  // top level rather than mid-drill into a subfolder the user no longer
+  // expects.
+  _vaultFoldersCache = [];
+  _vaultCurrentFolderId = null;
   document.getElementById('vaultModal').classList.remove('open');
   toast('Vault locked');
 }
@@ -13961,19 +13966,105 @@ window.addEventListener('keydown', (e)=>{
 // v1.5.63 — Faz 3: cached vault list so the scoped search filter
 // doesn't have to re-hit the DB on every keystroke.
 let _vaultPhotosCache = [];
+// v1.5.161 — folder tree state. _vaultFoldersCache holds the full flat
+// folder list from list_vault_folders(); _vaultCurrentFolderId tracks
+// which folder the user has drilled into (null = top level / "all").
+let _vaultFoldersCache = [];
+let _vaultCurrentFolderId = null;
 async function vaultRefresh() {
   try {
     _vaultPhotosCache = await invoke('list_private_photos') || [];
+    // Folders are best-effort — if the command fails (older builds,
+    // locked vault), we silently keep an empty list and render the
+    // photos flat. The vault still works exactly as it did pre-v1.5.161.
+    try { _vaultFoldersCache = await invoke('list_vault_folders') || []; }
+    catch(_) { _vaultFoldersCache = []; }
     _vaultRender(_vaultPhotosCache);
   } catch(err) { toast('Load failed: '+err,'error'); }
 }
+// v1.5.161 — drill into a folder. Re-renders the grid scoped to that
+// folder (and surfaces its direct child folders as cards). null = top.
+function _vaultEnterFolder(folderId){
+  _vaultCurrentFolderId = folderId;
+  _vaultRender(_vaultPhotosCache);
+  _vaultBumpActivity();
+}
 async function _vaultRender(list){
   const grid = document.getElementById('vaultPhotos');
-  document.getElementById('vaultCount').textContent = `${list.length} private photo${list.length===1?'':'s'}`;
   grid.innerHTML = '';
+
+  // ── v1.5.161 folder tree ─────────────────────────────────────────────
+  // Compute which folders to display as cards in THIS view:
+  //   * top level → folders with parent_id == null
+  //   * inside a folder → that folder's direct children
+  // And which photos to show:
+  //   * top level → list as-is (every private photo, all folders)
+  //   * inside a folder → photos with vault_folder_id == currentFolderId
+  //
+  // Search-filter bypasses the folder scope: searching always runs over
+  // _vaultPhotosCache (the full set), so a user can find a photo without
+  // remembering which folder it's in. We set _vaultCurrentFolderId=null
+  // implicitly while a search is active by checking `list !== _vaultPhotosCache`.
+  const isFiltered = (list !== _vaultPhotosCache);
+  let displayPhotos = list;
+  let displayFolders = [];
+  let breadcrumb = '';
+  if (!isFiltered && Array.isArray(_vaultFoldersCache) && _vaultFoldersCache.length) {
+    if (_vaultCurrentFolderId == null) {
+      displayFolders = _vaultFoldersCache.filter(f => f.parent_id == null);
+      // At top level, show photos with NO folder (legacy / standalone drops).
+      // Photos that live inside folders are reachable by clicking the folder.
+      displayPhotos = list.filter(p => p.vault_folder_id == null);
+    } else {
+      const cur = _vaultFoldersCache.find(f => f.id === _vaultCurrentFolderId);
+      displayFolders = _vaultFoldersCache.filter(f => f.parent_id === _vaultCurrentFolderId);
+      displayPhotos = list.filter(p => p.vault_folder_id === _vaultCurrentFolderId);
+      // Build breadcrumb by walking up parent_id chain.
+      const trail = [];
+      let node = cur;
+      while (node) {
+        trail.unshift(node);
+        node = node.parent_id == null ? null : _vaultFoldersCache.find(f => f.id === node.parent_id);
+      }
+      breadcrumb = `<div style="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:8px 4px;font-size:13px;color:var(--text2)">` +
+                   `<button onclick="_vaultEnterFolder(null)" style="background:rgba(255,255,255,.08);border:none;color:var(--cream);padding:4px 10px;border-radius:12px;cursor:pointer;font-size:12px">← All</button>` +
+                   trail.map((n, i) =>
+                     `<span style="color:var(--text3)">/</span>` +
+                     (i === trail.length - 1
+                       ? `<span style="color:var(--cream)">${_esc(n.name)}</span>`
+                       : `<button onclick="_vaultEnterFolder(${n.id})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:13px;padding:0">${_esc(n.name)}</button>`)
+                   ).join('') +
+                   `</div>`;
+    }
+  }
+
+  // Count for the header — folders + visible photos at this scope.
+  const totalCount = displayFolders.length + displayPhotos.length;
+  document.getElementById('vaultCount').textContent =
+    _vaultCurrentFolderId == null
+      ? `${list.length} private photo${list.length===1?'':'s'}`
+      : `${displayPhotos.length} in folder · ${displayFolders.length} subfolder${displayFolders.length===1?'':'s'}`;
+
+  // Render breadcrumb if we're nested.
+  if (breadcrumb) grid.insertAdjacentHTML('beforeend', breadcrumb);
+
+  // Render folder cards FIRST so they sit at the top of the grid.
+  for (const f of displayFolders) {
+    const card = document.createElement('div');
+    card.style.cssText = 'position:relative;aspect-ratio:1;background:linear-gradient(135deg,#2a2418 0%,#1a1612 100%);border-radius:6px;overflow:hidden;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;border:1px solid rgba(212,175,55,.15)';
+    card.title = f.original_path;
+    card.innerHTML = `<div style="font-size:32px;line-height:1">📁</div>` +
+                     `<div style="color:var(--cream);font-size:12px;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(f.name)}</div>` +
+                     `<div style="color:var(--text3);font-size:10px">${f.photo_count} item${f.photo_count===1?'':'s'}</div>`;
+    card.onclick = () => _vaultEnterFolder(f.id);
+    grid.appendChild(card);
+  }
+
+  // ── End v1.5.161 folder tree ─────────────────────────────────────────
+  // From here on, the original photo-rendering code, scoped to `displayPhotos`.
   // v1.5.66 — keep a stable list reference for the lightbox so ←/→
   // navigation and the index counter stay in sync with what's shown.
-  const renderList = list.slice();
+  const renderList = displayPhotos.slice();
   for (let idx = 0; idx < renderList.length; idx++) {
     const ph = renderList[idx];
     const card = document.createElement('div');
