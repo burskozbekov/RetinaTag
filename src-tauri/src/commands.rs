@@ -10609,22 +10609,16 @@ pub fn vault_kek_loaded(state: tauri::State<'_, AppState>) -> Result<bool, Strin
 ///
 /// Idempotent: rerunning is a no-op once everything's already in the
 /// store. Safe to call on every unlock.
-#[tauri::command]
-pub async fn vault_migrate_to_store(
-    state: tauri::State<'_, AppState>,
+/// v1.5.176 — Synchronous body of the migration. Public so the app
+/// startup hook in `lib.rs::run()` can call it on a background thread
+/// before any IPC is exposed. The Tauri command below wraps this in
+/// spawn_blocking so async callers (the FE) don't block their thread.
+pub fn vault_migrate_to_store_sync(
+    db_arc: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+    store_dir: std::path::PathBuf,
 ) -> Result<serde_json::Value, String> {
-    {
-        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
-        if g.is_none() {
-            return Err("Vault is locked — unlock it first.".into());
-        }
-    }
-
-    let db_arc = state.db.clone();
-    let store_dir = state.vault_store_dir.clone();
     let store_dir_str = store_dir.to_string_lossy().to_string();
-
-    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+    {
         // Collect candidate rows: private + .rtenc + not already in store.
         // `path LIKE` is the cheapest way to filter out already-migrated
         // rows; if the user's store dir happens to share a substring with
@@ -10677,7 +10671,11 @@ pub async fn vault_migrate_to_store(
                 errors.push(format!("missing source for photo {}: {}", pid, src.display()));
                 continue;
             }
-            let dst = store_dir.join(format!("rt_{}.rtenc", hash));
+            // v1.5.177 — sanitize hash for filesystem safety; same fix
+            // as vault_add_paths. See that comment for the ADS-disaster
+            // backstory.
+            let safe_hash = hash.replace(':', "_").replace(['/', '\\', '*', '?', '"', '<', '>', '|'], "_");
+            let dst = store_dir.join(format!("rt_{}.rtenc", &safe_hash));
             if dst == src {
                 // Already where we want it (shouldn't happen given the
                 // SQL filter, but be defensive).
@@ -10814,6 +10812,20 @@ pub async fn vault_migrate_to_store(
             "removed_dirs": removed_dirs,
             "errors":     errors,
         }))
+    }
+}
+
+/// v1.5.176 — Tauri-callable wrapper around `vault_migrate_to_store_sync`.
+/// Async + spawn_blocking so the FE doesn't stall its IPC thread while
+/// the migration walks the filesystem.
+#[tauri::command]
+pub async fn vault_migrate_to_store(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let db_arc = state.db.clone();
+    let store_dir = state.vault_store_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        vault_migrate_to_store_sync(db_arc, store_dir)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -11894,7 +11906,21 @@ pub async fn vault_add_paths(
             // same content (idempotent drop) overwrites a stable name
             // instead of accumulating uniqs. Hash is computed earlier in
             // this loop iteration; we have it in scope.
-            let store_path = store_dir.join(format!("rt_{}.rtenc", &hash));
+            //
+            // v1.5.177 — CRITICAL FIX. Hash format is `xxh3:<hex>` (the
+            // colon is the algorithm separator the Mac side also uses).
+            // Windows NTFS treats `:` as the Alternate Data Stream
+            // separator inside filenames, so `rt_xxh3:abc.rtenc` becomes
+            // `rt_xxh3` with `:abc.rtenc` as an ADS — and N different
+            // hashes all collapse into the SAME on-disk file with their
+            // bytes stuffed into different streams. `Remove-Item` on
+            // the base file then nukes every stream at once.
+            //
+            // The previous user's 6-photo vault was destroyed by exactly
+            // this path. We now sanitize every filesystem-hostile char
+            // out of the hash before building the store filename.
+            let safe_hash = hash.replace(':', "_").replace(['/', '\\', '*', '?', '"', '<', '>', '|'], "_");
+            let store_path = store_dir.join(format!("rt_{}.rtenc", &safe_hash));
             let final_enc_path = if store_path != enc_path {
                 match crate::vault_files::move_to_store(&enc_path, &store_path) {
                     Ok(()) => store_path,

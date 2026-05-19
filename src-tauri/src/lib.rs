@@ -451,8 +451,37 @@ pub fn run() {
                 vault_kek: Mutex::new(None),
                 vault_temp_files: Arc::new(Mutex::new(Vec::new())),
                 revealed_folders: Arc::new(Mutex::new(Vec::new())),
-                vault_store_dir,
+                vault_store_dir: vault_store_dir.clone(),
             });
+
+            // v1.5.176 — Background migration kicked off at startup. Moves
+            // legacy .rtenc blobs out of the user's original folders into
+            // the central vault-store dir and rebuilds vault_folders rows
+            // for them. KEK-free (only renames + DB metadata), so it runs
+            // before the user has ever entered their PIN. Without this
+            // hook the migration only fires when the user actually opens
+            // the vault, and the user's desktop "VAULT" folder stays
+            // visible until then. Detached thread so app boot stays fast.
+            {
+                let migration_db = app.state::<AppState>().db.clone();
+                let migration_store = vault_store_dir;
+                std::thread::spawn(move || {
+                    match commands::vault_migrate_to_store_sync(migration_db, migration_store) {
+                        Ok(v) => {
+                            let migrated = v.get("migrated").and_then(|x| x.as_u64()).unwrap_or(0);
+                            let folders = v.get("folders_reconstructed").and_then(|x| x.as_u64()).unwrap_or(0);
+                            let dirs = v.get("removed_dirs").and_then(|x| x.as_u64()).unwrap_or(0);
+                            if migrated > 0 || folders > 0 || dirs > 0 {
+                                eprintln!(
+                                    "[vault-migrate] startup pass: moved {}, rebuilt {} folder(s), removed {} dir(s)",
+                                    migrated, folders, dirs
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!("[vault-migrate] startup pass failed: {}", e),
+                    }
+                });
+            }
 
             // Install the system tray icon + menu. Non-fatal on failure.
             let handle = app.handle().clone();
