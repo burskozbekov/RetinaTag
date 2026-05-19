@@ -8358,34 +8358,53 @@ fn move_photo_private(
         let orig_path_pb = std::path::PathBuf::from(&current_path);
         if !crate::vault_files::is_encrypted_path(&orig_path_pb) && orig_path_pb.is_file() {
             crate::vault_files::cleanup_partial(&orig_path_pb);
+            // v1.5.154 — encrypt_in_place no longer deletes the source.
+            // We commit DB first, then delete the original on success
+            // OR delete the freshly-written .rtenc on failure so the
+            // source remains the single source of truth.
             let enc_path = crate::vault_files::encrypt_in_place(&orig_path_pb, kek)?;
-            // DB write — if this fails, roll back the on-disk rename so
-            // the user doesn't lose the photo. encrypt_in_place wrote
-            // .rtenc and deleted the original; we decrypt back if the
-            // DB write below errors.
             let enc_path_str = enc_path.to_string_lossy().to_string();
-            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-            if let Err(e) =
-                db::mark_photo_encrypted(&conn, photo_id, &enc_path_str, &current_path)
-            {
-                drop(conn);
-                // Best-effort rollback so the user keeps their file.
-                let _ = crate::vault_files::decrypt_to_file(
-                    &enc_path,
-                    &orig_path_pb,
-                    kek,
-                );
-                let _ = std::fs::remove_file(&enc_path);
-                return Err(format!("DB write failed, rolled back: {}", e));
+            let db_ok = {
+                let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+                match db::mark_photo_encrypted(&conn, photo_id, &enc_path_str, &current_path) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("toggle_private mark_photo_encrypted: {}", e);
+                        false
+                    }
+                }
+            };
+            if db_ok {
+                // Commit the on-disk side: remove the plaintext.
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&orig_path_pb) {
+                    // Leaked plaintext file. The .rtenc + DB row are
+                    // already correct so the photo IS in the vault;
+                    // we just couldn't delete the source. Surface so
+                    // the caller (and the user) know to investigate.
+                    return Err(format!("encrypted + DB OK but failed to remove original: {}", e));
+                }
+            } else {
+                // Roll back: drop the .rtenc, keep the original.
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&enc_path) {
+                    eprintln!("toggle_private rollback failed to remove rtenc: {}", e);
+                }
+                return Err("DB write failed, rolled back — original kept on disk".to_string());
             }
         }
         if thumb_path.is_file() {
             if let Ok(bytes) = std::fs::read(&thumb_path) {
                 let sealed = crate::vault_crypto::seal(kek, &bytes).map_err(|e| e.to_string())?;
-                let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-                db::store_encrypted_thumb(&conn, photo_id, &sealed).map_err(|e| e.to_string())?;
-                drop(conn);
-                let _ = std::fs::remove_file(&thumb_path);
+                // v1.5.154 — Was: store_encrypted_thumb result was `?`'d
+                // but `let _ = std::fs::remove_file(&thumb_path)` silently
+                // swallowed remove errors. Surface those too — same class.
+                {
+                    let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+                    db::store_encrypted_thumb(&conn, photo_id, &sealed)
+                        .map_err(|e| e.to_string())?;
+                }
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&thumb_path) {
+                    eprintln!("toggle_private remove plaintext thumb: {}", e);
+                }
             }
         }
         let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
@@ -8399,12 +8418,35 @@ fn move_photo_private(
                 .or_else(|| crate::vault_files::original_path_for(&cur))
                 .ok_or_else(|| "cannot determine restore path".to_string())?;
             if dest.exists() {
-                let _ = std::fs::remove_file(&dest);
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&dest) {
+                    return Err(format!("destination already exists and won't unlink: {}", e));
+                }
             }
+            // v1.5.154 — decrypt_to_file no longer deletes the .rtenc.
+            // Same atomicity dance: DB first, then remove .rtenc on
+            // success, or remove the freshly-written plaintext on
+            // failure so the .rtenc remains ground truth.
             crate::vault_files::decrypt_to_file(&cur, &dest, kek)?;
-            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-            db::mark_photo_decrypted(&conn, photo_id, &dest.to_string_lossy())
-                .map_err(|e| e.to_string())?;
+            let db_ok = {
+                let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+                match db::mark_photo_decrypted(&conn, photo_id, &dest.to_string_lossy()) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("toggle_private mark_photo_decrypted: {}", e);
+                        false
+                    }
+                }
+            };
+            if db_ok {
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&cur) {
+                    return Err(format!("decrypted + DB OK but failed to remove rtenc: {}", e));
+                }
+            } else {
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&dest) {
+                    eprintln!("toggle_private rollback failed to remove plaintext: {}", e);
+                }
+                return Err("DB write failed, rolled back — .rtenc kept on disk".to_string());
+            }
         }
         let blob_opt: Option<Vec<u8>> = {
             let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
@@ -8412,10 +8454,21 @@ fn move_photo_private(
         };
         if let Some(blob) = blob_opt {
             if !thumb_path.as_os_str().is_empty() {
-                if let Ok(plain) = crate::vault_crypto::open(kek, &blob) {
-                    let _ = std::fs::write(&thumb_path, &plain);
-                    let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-                    let _ = db::clear_encrypted_thumb(&conn, photo_id);
+                match crate::vault_crypto::open(kek, &blob) {
+                    Ok(plain) => {
+                        // v1.5.154 — surface write/clear errors instead of `let _`.
+                        if let Err(e) = std::fs::write(&thumb_path, &plain) {
+                            eprintln!("toggle_private restore thumb write: {}", e);
+                        } else {
+                            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+                            if let Err(e) = db::clear_encrypted_thumb(&conn, photo_id) {
+                                eprintln!("toggle_private clear_encrypted_thumb: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("toggle_private decrypt thumb: {}", e);
+                    }
                 }
             }
         }
@@ -10590,13 +10643,59 @@ pub async fn vault_run_file_migration(
                     continue;
                 }
             };
-            if let Ok(c) = db_arc.lock() {
-                let _ = db::mark_photo_encrypted(
+            // v1.5.154 — Atomicity: commit the DB UPDATE FIRST, then
+            // delete the original. If the DB step fails we roll back
+            // by removing the freshly-written .rtenc so the original
+            // stays as the ground truth (rather than the previous
+            // behaviour where encrypt_in_place silently deleted the
+            // original before any DB work).
+            let db_ok = if let Ok(c) = db_arc.lock() {
+                match db::mark_photo_encrypted(
                     &c,
                     *photo_id,
                     &enc_path.to_string_lossy(),
                     path_str,
+                ) {
+                    Ok(()) => true,
+                    Err(db_err) => {
+                        eprintln!("vault_migrate mark_photo_encrypted({}): {}", photo_id, db_err);
+                        false
+                    }
+                }
+            } else {
+                eprintln!("vault_migrate: db lock poisoned for photo {}", photo_id);
+                false
+            };
+            if db_ok {
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&p) {
+                    // Rare on Windows but possible if another app
+                    // (Explorer preview, Adobe Bridge) holds a handle.
+                    // Original-still-on-disk is a leaked plaintext —
+                    // the .rtenc + DB row are already correct, so the
+                    // photo IS in the vault. Just surface a warning.
+                    let _ = app_handle.emit(
+                        "vault-migration",
+                        serde_json::json!({
+                            "phase":"error",
+                            "photo_id": *photo_id,
+                            "message": format!("Encrypted OK but couldn't remove original: {}", e),
+                        }),
+                    );
+                }
+            } else {
+                // Rollback: drop the .rtenc, original survives.
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&enc_path) {
+                    eprintln!("vault_migrate rollback failed to remove rtenc: {}", e);
+                }
+                let _ = app_handle.emit(
+                    "vault-migration",
+                    serde_json::json!({
+                        "phase":"error",
+                        "photo_id": *photo_id,
+                        "message": "DB commit failed — kept original, removed rtenc",
+                    }),
                 );
+                continue;
             }
             done += 1;
             let _ = app_handle.emit(
@@ -10908,35 +11007,18 @@ pub async fn vault_add_paths(
             };
 
             let original_path = path.to_string_lossy().to_string();
-            let photo_id = {
-                let conn = match db_arc.lock() {
-                    Ok(c) => c,
-                    Err(_) => { errors.push("db lock".into()); continue; }
-                };
-                let np = crate::db::NewPhoto {
-                    path: &original_path,
-                    filename: &filename,
-                    folder: &folder,
-                    hash: &hash,
-                    size,
-                    width,
-                    height,
-                    media_type: &media_type,
-                    date_taken: None,
-                    duration_secs: None,
-                };
-                match crate::db::insert_photo(&conn, &np) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        errors.push(format!("insert {}: {}", path.display(), e));
-                        continue;
-                    }
-                }
-            };
 
-            // 4) Encrypt → .rtenc. This removes the plaintext file on
-            //    success. If encrypt fails, the row stays pointing at
-            //    the original plaintext path (recoverable).
+            // v1.5.154 — Atomicity pass (matches Mac's v1.5.159):
+            //   1. Encrypt to .rtenc (no source delete yet).
+            //   2. Run insert + UPDATE path/private inside a single
+            //      SQLite transaction. If ANY step fails, rollback
+            //      and remove the .rtenc — original stays put.
+            //   3. Only after the transaction commits do we remove
+            //      the plaintext source.
+            // Pre-1.5.154 the source was deleted by encrypt_in_place
+            // and the two UPDATEs ran as `let _ =` — a silent commit
+            // failure left orphan .rtenc files with no DB row, and
+            // the photo was effectively lost.
             let enc_path = match crate::vault_files::encrypt_in_place(path, &kek) {
                 Ok(ep) => ep,
                 Err(e) => {
@@ -10945,19 +11027,91 @@ pub async fn vault_add_paths(
                 }
             };
 
-            // 5) Point the DB row at the .rtenc + flip the private flag.
-            {
-                let conn = match db_arc.lock() {
-                    Ok(c) => c,
-                    Err(_) => { errors.push("db lock".into()); continue; }
-                };
-                let _ = crate::db::mark_photo_encrypted(
-                    &conn, photo_id,
-                    &enc_path.to_string_lossy(), &original_path,
-                );
-                let _ = crate::db::set_photo_private(&conn, photo_id, true);
+            let enc_path_str = enc_path.to_string_lossy().to_string();
+            let db_ok = match db_arc.lock() {
+                Err(_) => {
+                    errors.push(format!("db lock for {}", path.display()));
+                    false
+                }
+                Ok(mut conn) => match conn.transaction() {
+                    Err(e) => {
+                        errors.push(format!("begin tx {}: {}", path.display(), e));
+                        false
+                    }
+                    Ok(tx) => {
+                        // Insert (or fetch existing id on UNIQUE conflict).
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let inserted = tx.execute(
+                            "INSERT OR IGNORE INTO photos
+                                (path, filename, folder, hash, size, width, height,
+                                 created_at, status, media_type, date_taken, duration_secs)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, NULL, NULL)",
+                            rusqlite::params![
+                                &original_path, &filename, &folder, &hash, size,
+                                width, height, now, media_type,
+                            ],
+                        );
+                        let photo_id_res: Result<i64, rusqlite::Error> = match inserted {
+                            Ok(rows) if rows > 0 => Ok(tx.last_insert_rowid()),
+                            Ok(_) => tx.query_row(
+                                "SELECT id FROM photos WHERE path = ?1",
+                                rusqlite::params![&original_path],
+                                |r| r.get(0),
+                            ),
+                            Err(e) => Err(e),
+                        };
+                        match photo_id_res {
+                            Err(e) => {
+                                errors.push(format!("insert {}: {}", path.display(), e));
+                                false
+                            }
+                            Ok(pid) => {
+                                let upd_path = tx.execute(
+                                    "UPDATE photos SET path = ?1, original_path = ?2 WHERE id = ?3",
+                                    rusqlite::params![&enc_path_str, &original_path, pid],
+                                );
+                                let upd_priv = tx.execute(
+                                    "UPDATE photos SET private = 1 WHERE id = ?1",
+                                    rusqlite::params![pid],
+                                );
+                                match (upd_path, upd_priv) {
+                                    (Ok(_), Ok(_)) => match tx.commit() {
+                                        Ok(()) => true,
+                                        Err(e) => {
+                                            errors.push(format!("commit {}: {}", path.display(), e));
+                                            false
+                                        }
+                                    },
+                                    (path_res, priv_res) => {
+                                        // tx drops with rollback automatically.
+                                        errors.push(format!(
+                                            "update {}: path={:?} private={:?}",
+                                            path.display(), path_res.err(), priv_res.err()
+                                        ));
+                                        false
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            if db_ok {
+                // Commit on-disk: remove the plaintext source. If this
+                // fails the photo is still safe (in vault + DB row OK),
+                // just leaks a plaintext copy — flag in errors.
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(path) {
+                    errors.push(format!("encrypted but plaintext not removed for {}: {}", path.display(), e));
+                }
+                encrypted += 1;
+            } else {
+                // Rollback: drop the .rtenc. Original is still on disk.
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&enc_path) {
+                    errors.push(format!("rollback failed to remove rtenc for {}: {}", path.display(), e));
+                }
+                // Already pushed a per-step error above.
             }
-            encrypted += 1;
         }
 
         let _ = ah.emit("vault-add-progress", serde_json::json!({

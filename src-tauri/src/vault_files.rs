@@ -71,9 +71,17 @@ pub fn is_encrypted_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Encrypt the file at `original_path` in place: writes
-/// `<original_path>.rtenc` atomically, then removes the original.
-/// Returns the resulting `.rtenc` path.
+/// Encrypt the file at `original_path`: writes `<original_path>.rtenc`
+/// atomically and returns the resulting `.rtenc` path. **As of v1.5.154
+/// this function does NOT delete the original** — that is the caller's
+/// job, and it must happen AFTER the DB row has been committed.
+///
+/// Rationale: pre-1.5.154 this function deleted the source as soon as
+/// the `.rtenc` was on disk. A silent DB-commit failure downstream
+/// (e.g. `let _ = conn.execute(UPDATE ... private=1)`) then meant the
+/// original was gone, the encrypted blob was on disk, but no row
+/// tracked it → the photo was effectively lost. Mirror of Mac's v1.5.159
+/// fix.
 ///
 /// Errors:
 /// - `original_path` doesn't exist or isn't a regular file
@@ -107,21 +115,15 @@ pub fn encrypt_in_place(original_path: &Path, kek: &[u8; 32]) -> Result<PathBuf,
     framed.extend_from_slice(&sealed); // nonce + ciphertext + tag
 
     write_atomic(&enc_path, &framed)?;
-    // Only delete the plaintext after the encrypted file is durably on disk.
-    fs::remove_file(original_path).map_err(|e| {
-        // .rtenc already committed; user can manually swap if delete fails.
-        format!(
-            "encrypted output written ({}) but failed to remove original: {}",
-            enc_path.display(),
-            e
-        )
-    })?;
+    // v1.5.154 — Caller commits DB row first, then deletes the
+    // original via remove_file_with_fallback. If the DB commit fails
+    // the caller rolls back by deleting the rtenc instead.
     Ok(enc_path)
 }
 
-/// Reverse of `encrypt_in_place`: produce the original plaintext file
-/// at `dest_path` from `encrypted_path`. The .rtenc file is removed
-/// only AFTER `dest_path` is durably written.
+/// Decrypt `.rtenc` to a plaintext file at `dest_path`. **As of v1.5.154
+/// this function does NOT delete the encrypted source** — caller's
+/// job after DB commit. Same atomicity reason as `encrypt_in_place`.
 pub fn decrypt_to_file(
     encrypted_path: &Path,
     dest_path: &Path,
@@ -135,14 +137,21 @@ pub fn decrypt_to_file(
         ));
     }
     write_atomic(dest_path, &plaintext)?;
-    fs::remove_file(encrypted_path).map_err(|e| {
-        format!(
-            "plaintext written ({}) but failed to remove encrypted blob: {}",
-            dest_path.display(),
-            e
-        )
-    })?;
     Ok(())
+}
+
+/// v1.5.154 — Best-effort file removal with a real error on failure.
+/// Replaces patterns like `let _ = fs::remove_file(...)` that silently
+/// swallowed permission / sharing-violation errors and left orphan
+/// .rtenc files on disk after a vault op. The caller decides what to
+/// do with the error (most surface it as a per-photo failure but
+/// keep the batch going).
+pub fn remove_file_with_fallback(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove {}: {}", path.display(), e)),
+    }
 }
 
 /// Read & decrypt the entire encrypted blob into a Vec. Used by the
