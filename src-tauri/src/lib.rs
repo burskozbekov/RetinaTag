@@ -238,6 +238,14 @@ pub struct AppState {
     /// locked vault would leave plaintext videos on disk until the next
     /// vacuum run, defeating the whole point of the vault.
     pub vault_temp_files: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    /// v1.5.164 — IDs of vault folders currently revealed to Explorer
+    /// via `vault_decrypt_folder_to_explorer`. `vault_relock_folder` pops
+    /// its id on success; `vault_lock` drains the whole list and walks
+    /// each to shred the plaintext mirror BEFORE clearing the KEK, so
+    /// "locked" really means locked (no plaintext on disk) regardless
+    /// of whether the user clicked 🔒 themselves or the auto-lock timer
+    /// fired while they were browsing the reveal in Explorer.
+    pub revealed_folders: Arc<Mutex<Vec<i64>>>,
 }
 
 /// Suppress Windows "The application was unable to start correctly (0xc0000142)"
@@ -415,6 +423,7 @@ pub fn run() {
                 last_shown_face_ids: Mutex::new(Vec::new()),
                 vault_kek: Mutex::new(None),
                 vault_temp_files: Arc::new(Mutex::new(Vec::new())),
+                revealed_folders: Arc::new(Mutex::new(Vec::new())),
             });
 
             // Install the system tray icon + menu. Non-fatal on failure.
