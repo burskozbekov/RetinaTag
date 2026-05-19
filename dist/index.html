@@ -2086,7 +2086,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
              (blue accent against the dark backdrop). -->
         <div id="vaultSelectionBar" style="display:none;align-items:center;gap:10px;padding:6px 10px;margin:0 0 8px 0;background:rgba(90,127,168,.12);border:1px solid rgba(90,127,168,.4);border-radius:6px;font-size:12px;color:var(--cream2)">
           <span id="vaultSelectionCount" style="font-weight:600">0 selected</span>
-          <button class="btn-sm btn-secondary" onclick="_vaultBulkUnhide()" style="margin-left:auto">Unhide all</button>
+          <button class="btn-sm btn-secondary" onclick="_vaultBulkUnhide()" title="Unlock selected (remove from vault)" style="margin-left:auto">Unlock all</button>
           <button class="btn-sm btn-secondary" onclick="_vaultClearSelection()">Clear</button>
         </div>
         <!-- v1.5.149 — Vault drag-drop dropzone. Matches Mac's v1.5.142
@@ -2150,7 +2150,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
     <span id="vaultLbName" style="color:var(--text2);max-width:60vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
   </div>
   <div style="position:absolute;top:10px;right:14px;display:flex;gap:8px">
-    <button class="btn-sm btn-secondary" onclick="vaultLbUnhide()" title="Make public (P)">📤 Unhide</button>
+    <button class="btn-sm btn-secondary" onclick="vaultLbUnhide()" title="Unlock — remove from vault (P)">📤 Unlock</button>
     <button class="btn-sm btn-secondary" onclick="vaultLbClose()" title="Close (Esc)">&#10005;</button>
   </div>
   <button id="vaultLbPrev" class="btn-ghost" onclick="vaultLbNav(-1)" style="position:absolute;left:14px;top:50%;transform:translateY(-50%);background:rgba(0,0,0,.4);color:#fff;border:none;font-size:32px;width:48px;height:48px;border-radius:50%;cursor:pointer">‹</button>
@@ -14157,7 +14157,7 @@ window.addEventListener('keydown', (e) => {
 async function _vaultBulkUnhide(){
   if (_vaultSelectedIds.size === 0) return;
   const ids = Array.from(_vaultSelectedIds);
-  if (!confirm(`Unhide ${ids.length} photo${ids.length === 1 ? '' : 's'} from the vault?\n\nThe encrypted files will be decrypted back to their original locations.`)) return;
+  if (!confirm(`Unlock ${ids.length} photo${ids.length === 1 ? '' : 's'} from the vault?\n\nThe encrypted files will be decrypted back to their original locations.`)) return;
   _vaultBumpActivity();
   let ok = 0, errs = 0;
   for (const id of ids) {
@@ -14469,7 +14469,7 @@ async function _vaultRender(list){
       `<div class="photo-info"><div class="photo-name" title="${_fn}">${_fn}</div>` +
         `<div class="photo-meta"><span class="status-dot ${status}"></span>${tagCount} tag${tagCount !== 1 ? 's' : ''}</div>` +
       `</div>` +
-      `<button class="vault-unhide-btn" title="Unhide" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.7);border:none;color:#fff;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer;opacity:0;transition:opacity .15s;z-index:3">Unhide</button>`;
+      `<button class="vault-unhide-btn" title="Unlock — remove from vault" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.7);border:none;color:#fff;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer;opacity:0;transition:opacity .15s;z-index:3">Unlock</button>`;
 
     // Hover reveals the Unhide button (matches gallery pattern of
     // chrome-on-hover) so the card looks clean while browsing but the
