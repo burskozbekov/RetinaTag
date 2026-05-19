@@ -2080,6 +2080,15 @@ select.tb-select:focus{border-color:var(--red-dark)}
             <option value="rating">Highest rated</option>
           </select>
         </div>
+        <!-- v1.5.171 — Multi-select action bar. Hidden when no cards
+             are selected; slides into view when the user Ctrl/Shift+
+             clicks. Same visual language as gallery's selection bar
+             (blue accent against the dark backdrop). -->
+        <div id="vaultSelectionBar" style="display:none;align-items:center;gap:10px;padding:6px 10px;margin:0 0 8px 0;background:rgba(90,127,168,.12);border:1px solid rgba(90,127,168,.4);border-radius:6px;font-size:12px;color:var(--cream2)">
+          <span id="vaultSelectionCount" style="font-weight:600">0 selected</span>
+          <button class="btn-sm btn-secondary" onclick="_vaultBulkUnhide()" style="margin-left:auto">Unhide all</button>
+          <button class="btn-sm btn-secondary" onclick="_vaultClearSelection()">Clear</button>
+        </div>
         <!-- v1.5.149 — Vault drag-drop dropzone. Matches Mac's v1.5.142
              UI: golden dashed border, click-to-pick or drag-drop a
              folder. Drop routing is handled in JS (vault modal open +
@@ -13729,6 +13738,11 @@ function vaultLock() {
   _vaultSortMode = 'newest';
   const ss = document.getElementById('vaultSortSelect');
   if (ss) ss.value = 'newest';
+  // v1.5.171 — Drop the multi-select set so a fresh unlock doesn't
+  // inherit stale selection state from before the lock.
+  _vaultSelectedIds.clear();
+  _vaultLastClickedIdx = -1;
+  _vaultUpdateSelectionBar();
   document.getElementById('vaultModal').classList.remove('open');
   toast('Vault locked');
 }
@@ -14038,6 +14052,45 @@ function _vaultSetSortMode(mode){
   _vaultRender(_vaultPhotosCache);
   _vaultBumpActivity();
 }
+// v1.5.171 — multi-select state. Mirrors gallery's selectedIds/lastClickedIdx
+// so Ctrl+click toggles a single card and Shift+click ranges between the
+// last anchor and the new click. Live across renders within the same vault
+// session; reset by vault_lock and by Clear/bulk-action buttons.
+let _vaultSelectedIds = new Set();
+let _vaultLastClickedIdx = -1;
+function _vaultClearSelection(){
+  _vaultSelectedIds.clear();
+  _vaultLastClickedIdx = -1;
+  document.querySelectorAll('#vaultPhotos .photo-card.multi-selected')
+    .forEach(c => c.classList.remove('multi-selected'));
+  _vaultUpdateSelectionBar();
+}
+function _vaultUpdateSelectionBar(){
+  const bar = document.getElementById('vaultSelectionBar');
+  if (!bar) return;
+  const n = _vaultSelectedIds.size;
+  if (n === 0) {
+    bar.style.display = 'none';
+  } else {
+    bar.style.display = 'flex';
+    const lbl = document.getElementById('vaultSelectionCount');
+    if (lbl) lbl.textContent = `${n} selected`;
+  }
+}
+async function _vaultBulkUnhide(){
+  if (_vaultSelectedIds.size === 0) return;
+  const ids = Array.from(_vaultSelectedIds);
+  if (!confirm(`Unhide ${ids.length} photo${ids.length === 1 ? '' : 's'} from the vault?\n\nThe encrypted files will be decrypted back to their original locations.`)) return;
+  _vaultBumpActivity();
+  let ok = 0, errs = 0;
+  for (const id of ids) {
+    try { await invoke('toggle_photo_private', { photoId: id }); ok++; }
+    catch(_) { errs++; }
+  }
+  toast(`Unhid ${ok}${errs ? `, ${errs} error${errs === 1 ? '' : 's'}` : ''}`);
+  _vaultClearSelection();
+  vaultRefresh();
+}
 function _vaultSetFilterMode(mode){
   _vaultFilterMode = mode || 'all';
   // Sync chip active state visually.
@@ -14302,6 +14355,7 @@ async function _vaultRender(list){
   //
   // Parallel thumb fetch from v1.5.163 is preserved: cards render
   // synchronously with the placeholder SVG, thumb swaps in async.
+  _vaultUpdateSelectionBar();
   for (let idx = 0; idx < renderList.length; idx++) {
     const ph = renderList[idx];
     const here = idx;
@@ -14355,14 +14409,52 @@ async function _vaultRender(list){
       await invoke('toggle_photo_private', { photoId: ph.id });
       vaultRefresh();
     };
-    // Single click → open lightbox (gallery uses dblclick, but vault
-    // historically uses single-click and changing that breaks muscle
-    // memory for existing users).
-    card.onclick = () => {
+    // v1.5.171 — Multi-select on Ctrl/Cmd+click and Shift+range; plain
+    // click still opens the lightbox to preserve muscle memory. Mirrors
+    // gallery's selectedIds / lastClickedIdx flow with a tiny tweak:
+    // gallery uses single-click to "select and update detail panel",
+    // vault has no detail panel yet, so plain click stays as "open".
+    card.onclick = (e) => {
+      _vaultBumpActivity();
+      if (e.ctrlKey || e.metaKey) {
+        if (_vaultSelectedIds.has(ph.id)) {
+          _vaultSelectedIds.delete(ph.id);
+          card.classList.remove('multi-selected');
+        } else {
+          _vaultSelectedIds.add(ph.id);
+          card.classList.add('multi-selected');
+        }
+        _vaultLastClickedIdx = here;
+        _vaultUpdateSelectionBar();
+        return;
+      }
+      if (e.shiftKey && _vaultLastClickedIdx >= 0) {
+        const from = Math.min(_vaultLastClickedIdx, here);
+        const to = Math.max(_vaultLastClickedIdx, here);
+        for (let si = from; si <= to; si++) {
+          const sp = renderList[si];
+          if (sp) _vaultSelectedIds.add(sp.id);
+        }
+        // Re-paint selection state on every visible card.
+        document.querySelectorAll('#vaultPhotos .photo-card').forEach(c => {
+          const cid = parseInt(c.dataset.id, 10);
+          c.classList.toggle('multi-selected', _vaultSelectedIds.has(cid));
+        });
+        _vaultUpdateSelectionBar();
+        return;
+      }
+      // Plain click → lightbox (existing behaviour).
       _vaultLbList = renderList;
       vaultLbOpen(here);
     };
+    // Restore selection styling after re-render if this id is selected.
+    if (_vaultSelectedIds.has(ph.id)) card.classList.add('multi-selected');
     grid.appendChild(card);
+
+    // v1.5.171 — keep the selection bar in sync after every render so
+    // a filter/sort change doesn't leave a stale "0 selected" badge.
+    // (The set itself is preserved; only the bar visibility / count
+    // need refreshing.)
 
     // Parallel thumb fetch (v1.5.163 behaviour preserved).
     (async () => {
