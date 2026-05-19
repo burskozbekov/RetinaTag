@@ -2060,14 +2060,25 @@ select.tb-select:focus{border-color:var(--red-dark)}
         <!-- v1.5.169 — Vault filter chips mirroring gallery's quick-filter-chips.
              Click toggles the active filter; click again clears. Reuses .qf-chip
              CSS so the visual treatment is identical to gallery. -->
-        <div id="vaultFilterChips" class="quick-filter-chips" style="margin:0 0 8px 0;flex-wrap:wrap">
-          <button class="qf-chip active" data-vault-filter="all">All</button>
-          <button class="qf-chip" data-vault-filter="image">Photos</button>
-          <button class="qf-chip" data-vault-filter="video">Videos</button>
-          <button class="qf-chip" data-vault-filter="fav" title="Favorites">♥</button>
-          <button class="qf-chip" data-vault-filter="5" title="5★">★★★★★</button>
-          <button class="qf-chip" data-vault-filter="4" title="4★+">★★★★</button>
-          <button class="qf-chip" data-vault-filter="3" title="3★+">★★★</button>
+        <div style="display:flex;align-items:center;gap:8px;margin:0 0 8px 0;flex-wrap:wrap">
+          <div id="vaultFilterChips" class="quick-filter-chips" style="margin:0;flex-wrap:wrap">
+            <button class="qf-chip active" data-vault-filter="all">All</button>
+            <button class="qf-chip" data-vault-filter="image">Photos</button>
+            <button class="qf-chip" data-vault-filter="video">Videos</button>
+            <button class="qf-chip" data-vault-filter="fav" title="Favorites">♥</button>
+            <button class="qf-chip" data-vault-filter="5" title="5★">★★★★★</button>
+            <button class="qf-chip" data-vault-filter="4" title="4★+">★★★★</button>
+            <button class="qf-chip" data-vault-filter="3" title="3★+">★★★</button>
+          </div>
+          <!-- v1.5.170 — sort dropdown to round out the gallery-style top bar -->
+          <select id="vaultSortSelect" onchange="_vaultSetSortMode(this.value)"
+                  style="margin-left:auto;padding:3px 8px;background:var(--card2);color:var(--cream2);border:1px solid var(--border2);border-radius:14px;font-size:11px;cursor:pointer;letter-spacing:-.3px">
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="name">Name (A→Z)</option>
+            <option value="name_desc">Name (Z→A)</option>
+            <option value="rating">Highest rated</option>
+          </select>
         </div>
         <!-- v1.5.149 — Vault drag-drop dropzone. Matches Mac's v1.5.142
              UI: golden dashed border, click-to-pick or drag-drop a
@@ -13714,6 +13725,10 @@ function vaultLock() {
   document.querySelectorAll('#vaultFilterChips .qf-chip').forEach(b => {
     b.classList.toggle('active', b.dataset.vaultFilter === 'all');
   });
+  // v1.5.170 — Same for sort.
+  _vaultSortMode = 'newest';
+  const ss = document.getElementById('vaultSortSelect');
+  if (ss) ss.value = 'newest';
   document.getElementById('vaultModal').classList.remove('open');
   toast('Vault locked');
 }
@@ -14015,6 +14030,14 @@ let _vaultCurrentFolderId = null;
 // gallery's filter state. Values: 'all' | 'image' | 'video' | 'fav'
 // | '5' | '4' | '3' | '2' | '1'. 'all' is the no-filter idle.
 let _vaultFilterMode = 'all';
+// v1.5.170 — sort mode for the vault grid. Mirrors gallery's sort options.
+// Values: 'newest' | 'oldest' | 'name' | 'name_desc' | 'rating'.
+let _vaultSortMode = 'newest';
+function _vaultSetSortMode(mode){
+  _vaultSortMode = mode || 'newest';
+  _vaultRender(_vaultPhotosCache);
+  _vaultBumpActivity();
+}
 function _vaultSetFilterMode(mode){
   _vaultFilterMode = mode || 'all';
   // Sync chip active state visually.
@@ -14190,6 +14213,26 @@ async function _vaultRender(list){
         case '1':
           return (p.rating || 0) >= parseInt(_vaultFilterMode, 10);
         default: return true;
+      }
+    });
+  }
+  // v1.5.170 — Apply sort AFTER filter so the chip narrows first, then
+  // the remaining set sorts in-place. Defaults to newest-first which
+  // matches what list_private_photos already returns from the DB,
+  // making the no-op case truly no-op (no extra sort pass).
+  if (_vaultSortMode && _vaultSortMode !== 'newest') {
+    const dateOf = p => p.date_taken || '';
+    displayPhotos = displayPhotos.slice().sort((a, b) => {
+      switch (_vaultSortMode) {
+        case 'oldest': return dateOf(a).localeCompare(dateOf(b));
+        case 'name':
+          return (a.filename || '').localeCompare(b.filename || '', undefined, { sensitivity: 'base', numeric: true });
+        case 'name_desc':
+          return (b.filename || '').localeCompare(a.filename || '', undefined, { sensitivity: 'base', numeric: true });
+        case 'rating':
+          // Higher rating first; tiebreak by newer first.
+          return (b.rating || 0) - (a.rating || 0) || dateOf(b).localeCompare(dateOf(a));
+        default: return 0;
       }
     });
   }
