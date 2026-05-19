@@ -466,6 +466,47 @@ pub fn init_db(path: &str) -> Result<Connection> {
     // get migrated on next unlock — see commands::vault_unlock.
     conn.execute_batch("ALTER TABLE vault ADD COLUMN kek_version INTEGER NOT NULL DEFAULT 1;").ok();
 
+    // v1.5.158 — Folder-vault step 2/5: schema for the folder hierarchy.
+    //
+    // Pre-1.5.158 the vault was a flat bucket — every encrypted photo was
+    // a sibling, even if the user had dropped a deeply nested directory.
+    // The user asked: "drop a folder onto the vault, see the folder in
+    // the vault, click in, double-click out". That requires tracking the
+    // tree, which this table does.
+    //
+    // Each row is one directory the user dropped (or a subdir thereof
+    // discovered while walking). `parent_id` is NULL for tree roots —
+    // the literal path the user dropped onto the dropzone. `original_path`
+    // is the directory's absolute path AT DROP TIME, kept so a future
+    // "decrypt to Explorer" (step 4/5) puts the folder back exactly where
+    // it came from.
+    //
+    // Idempotency: we never key on absolute path alone (the user could
+    // drop the same folder, delete it, drop it again — fresh ID), so
+    // the (parent_id, name) unique index is the source of identity
+    // WITHIN A SINGLE drop event. Re-drops produce new IDs and let
+    // step 4/5 decide whether to merge or keep separate.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS vault_folders (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL,
+            parent_id     INTEGER NULL,
+            original_path TEXT NOT NULL,
+            created_at    TEXT NOT NULL,
+            FOREIGN KEY (parent_id) REFERENCES vault_folders(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_folders_parent ON vault_folders(parent_id);"
+    ).ok();
+    // `vault_folder_id` on photos = which vault folder this encrypted
+    // photo belongs to. NULL for photos that were vaulted as standalone
+    // files (not from a dropped folder) — those still show as flat in
+    // the vault UI. The FK has ON DELETE SET NULL so deleting a folder
+    // row leaves the photo rows intact (we don't want a dangling delete
+    // to evaporate vault entries — the user undoes via "decrypt to
+    // Explorer", not via DB pruning).
+    conn.execute_batch("ALTER TABLE photos ADD COLUMN vault_folder_id INTEGER NULL REFERENCES vault_folders(id) ON DELETE SET NULL;").ok();
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_photos_vault_folder ON photos(vault_folder_id);").ok();
+
     // GPS cluster cache: pre-computed location clusters for the Map view.
     // Re-built when user asks for it, not every scan.
     conn.execute_batch(
