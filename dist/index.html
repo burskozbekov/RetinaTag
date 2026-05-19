@@ -2060,15 +2060,27 @@ select.tb-select:focus{border-color:var(--red-dark)}
         <!-- v1.5.149 — Vault drag-drop dropzone. Matches Mac's v1.5.142
              UI: golden dashed border, click-to-pick or drag-drop a
              folder. Drop routing is handled in JS (vault modal open +
-             unlocked → vault_add_paths). -->
+             unlocked → vault_add_paths).
+             v1.5.167 — Two visual forms via [data-vault-compact]:
+             absent → the big empty-state dropzone (first-time UX).
+             present → a slim one-liner pill so the photo grid gets
+             the real estate the user actually came for. _vaultRender
+             toggles the attribute based on whether the vault has any
+             photos at this scope. -->
         <div id="vaultDropzone" onclick="vaultPickFolderToAdd()"
-             style="border:2px dashed rgba(220,180,80,.55);border-radius:8px;padding:14px;text-align:center;cursor:pointer;color:var(--text2);font-size:12px;margin-bottom:8px;background:rgba(220,180,80,.04);transition:background .12s,border-color .12s"
+             style="border:2px dashed rgba(220,180,80,.55);border-radius:8px;padding:14px;text-align:center;cursor:pointer;color:var(--text2);font-size:12px;margin-bottom:8px;background:rgba(220,180,80,.04);transition:background .12s,border-color .12s,padding .15s"
              onmouseover="this.style.background='rgba(220,180,80,.1)'"
              onmouseout="this.style.background='rgba(220,180,80,.04)'"
              title="Drop a folder or files here, or click to pick a folder">
-          <div style="font-size:18px;line-height:1;margin-bottom:4px">📥</div>
-          <div><b style="color:rgba(255,210,120,.95)">Drop folders or files here</b> to add to vault</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:3px">or click to pick a folder</div>
+          <div data-vault-drop-full>
+            <div style="font-size:18px;line-height:1;margin-bottom:4px">📥</div>
+            <div><b style="color:rgba(255,210,120,.95)">Drop folders or files here</b> to add to vault</div>
+            <div style="font-size:10.5px;color:var(--text3);margin-top:3px">or click to pick a folder</div>
+          </div>
+          <div data-vault-drop-compact style="display:none">
+            <b style="color:rgba(255,210,120,.95)">+ Add</b>
+            <span style="color:var(--text3);margin-left:6px">— drop a folder or click</span>
+          </div>
         </div>
         <div id="vaultAddStatus" style="display:none;font-size:11.5px;color:var(--cream2);background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px"></div>
         <div id="vaultPhotos" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:12px;max-height:400px;overflow-y:auto;padding:4px"></div>
@@ -14046,6 +14058,32 @@ async function _vaultRelockFolder(f) {
 async function _vaultRender(list){
   const grid = document.getElementById('vaultPhotos');
   grid.innerHTML = '';
+
+  // v1.5.167 — Collapse the giant dropzone into a slim pill once the
+  // vault has any content. First-time / empty-vault UX gets the big
+  // golden invitation; everyone else gets the photo grid taking the
+  // full real estate. Toggle is per-render so search-filter-to-zero
+  // re-expands the dropzone (with a "no matches" feel that nudges
+  // toward adding something).
+  const dz = document.getElementById('vaultDropzone');
+  if (dz) {
+    const hasAny = Array.isArray(list) && list.length > 0;
+    const full = dz.querySelector('[data-vault-drop-full]');
+    const compact = dz.querySelector('[data-vault-drop-compact]');
+    if (full && compact) {
+      if (hasAny) {
+        full.style.display = 'none';
+        compact.style.display = 'block';
+        dz.style.padding = '6px 12px';
+        dz.style.fontSize = '11.5px';
+      } else {
+        full.style.display = '';
+        compact.style.display = 'none';
+        dz.style.padding = '14px';
+        dz.style.fontSize = '12px';
+      }
+    }
+  }
 
   // ── v1.5.161 folder tree ─────────────────────────────────────────────
   // Compute which folders to display as cards in THIS view:
