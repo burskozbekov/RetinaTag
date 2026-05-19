@@ -11536,21 +11536,119 @@ pub fn vault_reset_full(
 #[tauri::command]
 pub fn list_private_photos(
     state: tauri::State<'_, AppState>,
-) -> Result<Vec<PhotoSummary>, String> {
+) -> Result<Vec<serde_json::Value>, String> {
+    // v1.5.160 — CRITICAL BUG FIX.
+    //
+    // The pre-1.5.160 implementation called `db::get_photos_by_ids` to
+    // hydrate the result rows. That helper, by design, has
+    // `WHERE p.private = 0` baked in so it never leaks vault content into
+    // the default gallery — every search / tag / phash codepath funnels
+    // through it. So the sequence was:
+    //
+    //   step 1: SELECT id FROM photos WHERE private = 1   → 6 rows
+    //   step 2: get_photos_by_ids with WHERE private = 0  → 0 rows
+    //
+    // Net: `list_private_photos` ALWAYS returned an empty list, no matter
+    // how many photos the user had vaulted. The vault page showed
+    // "0 private photos" and a blank grid. The user noticed when they
+    // dropped a folder, saw "encrypted N files" in the toast, then opened
+    // the vault and saw nothing. They (correctly) thought we'd lost the
+    // files — we hadn't, but they had no way to know.
+    //
+    // Fix: dedicated single-query inline join, NO get_photos_by_ids call.
+    // We also return `vault_folder_id` so the FE can group entries by the
+    // folder rows v1.5.158/9 introduced (used by v1.5.161 tree-view).
+    //
+    // Return type is `Vec<serde_json::Value>` instead of
+    // `Vec<PhotoSummary>` so we can ship `vault_folder_id` without
+    // amending PhotoSummary (10 construction sites; out of scope for a
+    // bug-fix release). The FE only reads `id`, `filename`, `tags`, and
+    // now `vault_folder_id` — all preserved.
     let conn = state.db.lock().map_err(|_| "db lock")?;
-    let ids: Vec<i64> = {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM photos WHERE private = 1
-             ORDER BY COALESCE(date_taken, created_at) DESC LIMIT 5000"
-        ).map_err(|e| e.to_string())?;
-        let ids: Vec<i64> = stmt.query_map([], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        ids
-    };
-    if ids.is_empty() { return Ok(vec![]); }
-    db::get_photos_by_ids(&conn, &ids).map_err(|e| e.to_string())
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.path, p.filename, p.status, p.provider_used,
+                p.media_type, p.date_taken, p.duration_secs,
+                p.rating, p.favorite, p.vault_folder_id,
+                GROUP_CONCAT(t.tag, ',') AS tags,
+                COUNT(t.id) AS tag_count
+           FROM photos p
+           LEFT JOIN tags t ON t.photo_id = p.id
+          WHERE p.private = 1
+          GROUP BY p.id
+          ORDER BY COALESCE(p.date_taken, p.created_at) DESC
+          LIMIT 5000"
+    ).map_err(|e| e.to_string())?;
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map([], |r| {
+            let tags_str: Option<String> = r.get(11)?;
+            let tags: Vec<String> = tags_str
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            Ok(serde_json::json!({
+                "id":              r.get::<_, i64>(0)?,
+                "path":            r.get::<_, String>(1)?,
+                "filename":        r.get::<_, String>(2)?,
+                "status":          r.get::<_, String>(3)?,
+                "provider_used":   r.get::<_, Option<String>>(4)?,
+                "media_type":      r.get::<_, Option<String>>(5)?.unwrap_or_else(|| "image".to_string()),
+                "date_taken":      r.get::<_, Option<String>>(6)?,
+                "duration_secs":   r.get::<_, Option<i32>>(7)?,
+                "rating":          r.get::<_, Option<i32>>(8)?.unwrap_or(0),
+                "favorite":        r.get::<_, Option<i32>>(9)?.unwrap_or(0) != 0,
+                "vault_folder_id": r.get::<_, Option<i64>>(10)?,
+                "tags":            tags,
+                "tag_count":       r.get::<_, i64>(12)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// v1.5.160 — Folder-vault step 4/5. List every row in `vault_folders`
+/// so the FE can render the tree-view in the vault page. Includes a
+/// `photo_count` per folder (encrypted photos directly under that folder,
+/// NOT counting subfolders) so the UI can show "Vacation 2024 (42)".
+///
+/// Refuses to run when the vault is locked — folder names are leaky
+/// metadata even though the photo content stays encrypted, so we gate
+/// the lookup on having a KEK in memory. The user has to unlock first.
+#[tauri::command]
+pub fn list_vault_folders(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        if g.is_none() {
+            return Err("Vault is locked — unlock it first.".into());
+        }
+    }
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.name, f.parent_id, f.original_path, f.created_at,
+                (SELECT COUNT(*) FROM photos WHERE vault_folder_id = f.id AND private = 1) AS photo_count
+           FROM vault_folders f
+          ORDER BY f.parent_id IS NULL DESC, f.name COLLATE NOCASE"
+    ).map_err(|e| e.to_string())?;
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "id":            r.get::<_, i64>(0)?,
+                "name":          r.get::<_, String>(1)?,
+                "parent_id":     r.get::<_, Option<i64>>(2)?,
+                "original_path": r.get::<_, String>(3)?,
+                "created_at":    r.get::<_, String>(4)?,
+                "photo_count":   r.get::<_, i64>(5)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 
 // ── NSFW auto-hide (CLIP-based) ───────────────────────────────────────────
