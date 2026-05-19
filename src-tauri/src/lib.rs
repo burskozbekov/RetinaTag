@@ -358,6 +358,49 @@ pub fn run() {
                 .map(|s| s == "1")
                 .unwrap_or(false);
 
+            // v1.5.156 — Wipe leftover plaintext temp files from a previous
+            // session before any window can fire vault_unlock. `vault_decrypt_to_temp`
+            // materialises vault videos under `%LOCALAPPDATA%\com.retinatag.app\
+            // vault-temp\` so WebView2 can play them; `vault_lock` shreds those
+            // on manual lock and on the auto-lock timer. But a crash, a force-quit,
+            // a Task-Manager kill, or even closing the main window while the vault
+            // was unlocked all bypass `vault_lock` — meaning yesterday's plaintext
+            // videos would still be on disk on next launch and Explorer would
+            // happily open them without ever touching the PIN. We do the wipe
+            // here (right after we know we have a local data dir but before we
+            // expose any IPC) so there's no window where the new session's temp
+            // files mix with stale ones.
+            //
+            // Path mirrors `vault_decrypt_to_temp`: app_local_data_dir(), NOT
+            // the roaming `app_data_dir` we use for the DB. Vault videos must
+            // never end up in roaming because Enterprise / Folder Redirection
+            // setups sync %APPDATA% to the network, which would leak plaintext
+            // to a fileserver the user never opted into.
+            if let Ok(local_root) = app.path().app_local_data_dir() {
+                let temp_root = local_root.join("vault-temp");
+                if temp_root.exists() {
+                    match std::fs::read_dir(&temp_root) {
+                        Ok(rd) => {
+                            let mut wiped = 0usize;
+                            for entry in rd.flatten() {
+                                let p = entry.path();
+                                if p.is_file() {
+                                    if let Err(e) = std::fs::remove_file(&p) {
+                                        eprintln!("[vault-temp] remove {} failed: {}", p.display(), e);
+                                    } else {
+                                        wiped += 1;
+                                    }
+                                }
+                            }
+                            if wiped > 0 {
+                                eprintln!("[vault-temp] wiped {} stale plaintext file(s) from previous session", wiped);
+                            }
+                        }
+                        Err(e) => eprintln!("[vault-temp] read_dir {} failed: {}", temp_root.display(), e),
+                    }
+                }
+            }
+
             app.manage(AppState {
                 db: Arc::new(Mutex::new(conn)),
                 thumbnails_dir,
