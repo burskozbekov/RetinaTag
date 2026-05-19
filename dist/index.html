@@ -13463,6 +13463,14 @@ async function openVault() {
       _vaultPinStrength();
     } else if (_vaultUnlocked) {
       content.style.display = 'block';
+      // v1.5.166 — Auto-enter fullscreen so the vault feels like the
+      // gallery (full library surface), not a postage-stamp modal.
+      // User asked: "gallery nasıl ise vault da öyle olmalı" — first
+      // step is real estate. The ⛶ button still toggles back to the
+      // boxed view for users who want the modal layout.
+      if (!_vaultFullscreen) {
+        try { vaultEnterFullscreen(); } catch(_) {}
+      }
       await _vaultLoadIdleTimeout();
       await vaultRefresh();
       _vaultStartIdleTimer();
