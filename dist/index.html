@@ -2071,7 +2071,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
           <div style="font-size:10.5px;color:var(--text3);margin-top:3px">or click to pick a folder</div>
         </div>
         <div id="vaultAddStatus" style="display:none;font-size:11.5px;color:var(--cream2);background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px"></div>
-        <div id="vaultPhotos" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(140px, 1fr));gap:8px;max-height:400px;overflow-y:auto"></div>
+        <div id="vaultPhotos" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:12px;max-height:400px;overflow-y:auto;padding:4px"></div>
         <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)" id="vaultBioRow">
           <div style="font-size:12px;color:var(--text3);margin-bottom:6px">Windows Hello</div>
           <div style="display:flex;gap:8px;align-items:center;justify-content:space-between">
@@ -14135,61 +14135,99 @@ async function _vaultRender(list){
   // v1.5.66 — keep a stable list reference for the lightbox so ←/→
   // navigation and the index counter stay in sync with what's shown.
   const renderList = displayPhotos.slice();
-  // v1.5.163 — Render every card synchronously with a filename placeholder,
-  // then kick off thumb fetches in parallel (do NOT await inside the loop).
-  // Pre-1.5.163 this loop awaited invoke('get_private_thumbnail') once per
-  // photo serially — with 6 photos imperceptible, but at 100+ vault entries
-  // the grid took multiple seconds to populate because each thumb fetch
-  // blocked the next IPC round-trip. Now all N fetches launch concurrently
-  // and the grid is interactive immediately; thumbs swap in as they arrive.
-  // Each card also stays clickable as a filename-only fallback until its
-  // thumb lands, so the user can already open the lightbox while loads
-  // are still in flight.
+  // v1.5.165 — Vault cards now mirror the gallery photo-card visual
+  // language: same hover lift + shadow, same border-radius/border,
+  // same thumb-placeholder treatment, same .photo-info row with
+  // filename + tag count + media badges + favorite/rating indicators.
+  // The user explicitly asked for "gallery nasıl ise vault da öyle
+  // olmalı" — so each card here uses the gallery's CSS classes
+  // (.photo-card, .thumb-placeholder, .photo-info, .photo-name,
+  // .photo-meta, .media-badge, .fav-indicator, .rating-indicator)
+  // and overrides only the absolute-positioning that gallery's
+  // virtual scroller depends on. The CSS grid container places cards
+  // in rows; cards keep all the rich content from gallery.
+  //
+  // Parallel thumb fetch from v1.5.163 is preserved: cards render
+  // synchronously with the placeholder SVG, thumb swaps in async.
   for (let idx = 0; idx < renderList.length; idx++) {
     const ph = renderList[idx];
     const here = idx;
     const card = document.createElement('div');
-    card.style.cssText = 'position:relative;aspect-ratio:1;background:#111;border-radius:6px;overflow:hidden;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:11px;text-align:center;padding:8px';
-    card.title = ph.filename;
-    card.textContent = ph.filename;
-    // Lightbox open works as soon as the card exists — no need to wait
-    // for the thumb. List capture happens here so it stays stable even
-    // if the cache refreshes mid-fetch.
+    // Same photo-card class as gallery, but override the absolute
+    // positioning the virtual scroller depends on so it fits in our
+    // CSS grid layout. Aspect kept consistent so the grid stays tidy.
+    card.className = 'photo-card';
+    card.style.cssText = 'position:relative;width:auto;height:auto;left:auto;top:auto;display:flex;flex-direction:column';
+    // Tooltip mirrors gallery: filename, date, rating, tags.
+    const tt = [ph.filename];
+    if (ph.date_taken) tt.push('📅 ' + ph.date_taken.replace('T',' ').slice(0,16));
+    if (ph.rating > 0) tt.push('★'.repeat(ph.rating));
+    if (ph.tags && ph.tags.length) tt.push('🏷 ' + ph.tags.slice(0,6).join(', '));
+    card.title = tt.join('\n');
+    card.dataset.id = ph.id;
+
+    // Inner markup matches gallery's render in renderGrid:
+    //   .thumb-placeholder (SVG + badges)  → swapped to <img> when thumb lands
+    //   .photo-info        (.photo-name + .photo-meta)
+    //   .vault-actions     (Unhide + Show-folder hover overlay)
+    const mb = ph.media_type === 'video'
+      ? `<span class="media-badge video">▶ ${typeof formatDuration === 'function' ? formatDuration(ph.duration_secs) : ''}</span>`
+      : ph.media_type === 'raw' ? '<span class="media-badge raw">RAW</span>' : '';
+    const favBadge = ph.favorite ? '<span class="fav-indicator">&#10084;</span>' : '';
+    const ratingBadge = ph.rating > 0 ? '<span class="rating-indicator">' + '&#9733;'.repeat(ph.rating) + '</span>' : '';
+    const _fn = _esc(ph.filename || '');
+    const tagCount = typeof ph.tag_count === 'number' ? ph.tag_count : (Array.isArray(ph.tags) ? ph.tags.length : 0);
+    const status = ph.status || 'pending';
+    card.innerHTML =
+      `<div class="thumb-placeholder" style="aspect-ratio:1;height:auto;flex:1" data-vault-thumb>${mb}${favBadge}${ratingBadge}` +
+        `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>` +
+      `</div>` +
+      `<div class="photo-info"><div class="photo-name" title="${_fn}">${_fn}</div>` +
+        `<div class="photo-meta"><span class="status-dot ${status}"></span>${tagCount} tag${tagCount !== 1 ? 's' : ''}</div>` +
+      `</div>` +
+      `<button class="vault-unhide-btn" title="Unhide" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.7);border:none;color:#fff;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer;opacity:0;transition:opacity .15s;z-index:3">Unhide</button>`;
+
+    // Hover reveals the Unhide button (matches gallery pattern of
+    // chrome-on-hover) so the card looks clean while browsing but the
+    // action is one move away.
+    card.addEventListener('mouseenter', () => {
+      const b = card.querySelector('.vault-unhide-btn'); if (b) b.style.opacity = '1';
+    });
+    card.addEventListener('mouseleave', () => {
+      const b = card.querySelector('.vault-unhide-btn'); if (b) b.style.opacity = '0';
+    });
+    // Unhide click — same toggle_photo_private call as before.
+    card.querySelector('.vault-unhide-btn').onclick = async (ev) => {
+      ev.stopPropagation();
+      await invoke('toggle_photo_private', { photoId: ph.id });
+      vaultRefresh();
+    };
+    // Single click → open lightbox (gallery uses dblclick, but vault
+    // historically uses single-click and changing that breaks muscle
+    // memory for existing users).
     card.onclick = () => {
       _vaultLbList = renderList;
       vaultLbOpen(here);
     };
     grid.appendChild(card);
 
-    // Fire-and-forget thumb fetch. Errors are swallowed — the card
-    // stays in its filename-fallback state, which is honest about
-    // the missing thumb without breaking interaction.
+    // Parallel thumb fetch (v1.5.163 behaviour preserved).
     (async () => {
       let src = '';
-      try {
-        src = await invoke('get_private_thumbnail', { photoId: ph.id });
-      } catch(_) {
-        try { src = await invoke('get_thumbnail', { photoId: ph.id }); }
-        catch(__) { return; }
-      }
+      try { src = await invoke('get_private_thumbnail', { photoId: ph.id }); }
+      catch(_) { try { src = await invoke('get_thumbnail', { photoId: ph.id }); } catch(__) { return; } }
       if (!src) return;
-      // Replace card content with the thumb + Unhide button. Preserve
-      // the click handler we already attached by re-binding after the
-      // innerHTML wipe.
-      card.style.cssText = 'position:relative;aspect-ratio:1;background:#111;border-radius:6px;overflow:hidden;cursor:pointer';
-      card.textContent = '';
-      card.innerHTML = `<img src="${src}" style="width:100%;height:100%;object-fit:cover">` +
-                       `<button title="Unhide" style="position:absolute;top:4px;right:4px;background:rgba(0,0,0,.7);border:none;color:#fff;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer">Unhide</button>`;
-      card.querySelector('button').onclick = async (ev) => {
-        ev.stopPropagation();
-        await invoke('toggle_photo_private', { photoId: ph.id });
-        vaultRefresh();
-      };
-      // Re-attach the card click after innerHTML replaced the DOM.
-      card.onclick = () => {
-        _vaultLbList = renderList;
-        vaultLbOpen(here);
-      };
+      const thumbHost = card.querySelector('[data-vault-thumb]');
+      if (!thumbHost) return;
+      // Preserve the badges that live inside the placeholder by keeping
+      // them and just adding the <img> behind them. Cleanest way: swap
+      // the SVG for an <img>.
+      const svg = thumbHost.querySelector('svg');
+      if (svg) svg.remove();
+      const img = document.createElement('img');
+      img.src = src;
+      img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block';
+      thumbHost.insertBefore(img, thumbHost.firstChild);
     })();
   }
 }
