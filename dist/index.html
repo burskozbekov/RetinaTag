@@ -14077,6 +14077,66 @@ function _vaultUpdateSelectionBar(){
     if (lbl) lbl.textContent = `${n} selected`;
   }
 }
+// v1.5.172 — Vault keyboard shortcuts. Active only when the vault modal
+// is open AND the user isn't typing in an input/textarea/contenteditable
+// (so search box typing doesn't get hijacked). Mirrors gallery's pattern
+// of Ctrl+A / Esc but scoped to vault context.
+//
+//   Esc        clears the multi-selection if any; otherwise no-op
+//              (close button + lock button stay the primary exits)
+//   Ctrl+A     selects every photo currently visible in the grid
+//              (post-filter, post-sort, post-folder-drill).
+//   Ctrl+D     deselects all (same as Clear button)
+//   F          toggle favorite for the selected single photo
+//              (no-op if 0 or >1 selected — bulk fave is a separate
+//              release)
+function _vaultSelectAllVisible(){
+  // Reach into the cached + filtered render list rather than re-running
+  // the filter logic. We can derive it from the currently-rendered
+  // cards' dataset.id.
+  document.querySelectorAll('#vaultPhotos .photo-card').forEach(c => {
+    const id = parseInt(c.dataset.id, 10);
+    if (!isNaN(id)) {
+      _vaultSelectedIds.add(id);
+      c.classList.add('multi-selected');
+    }
+  });
+  _vaultUpdateSelectionBar();
+  _vaultBumpActivity();
+}
+window.addEventListener('keydown', (e) => {
+  const modal = document.getElementById('vaultModal');
+  if (!modal || !modal.classList.contains('open')) return;
+  // If the user is typing in a field, hand control back to the field.
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  // Don't fight the lightbox's own keyboard handler.
+  const lb = document.getElementById('vaultLightbox');
+  if (lb && lb.style.display === 'flex') return;
+  // Don't fight the unlock/setup screens — selection shortcuts only
+  // make sense once content is visible.
+  const content = document.getElementById('vaultContent');
+  if (!content || content.style.display === 'none') return;
+
+  if (e.key === 'Escape') {
+    if (_vaultSelectedIds.size > 0) {
+      e.preventDefault();
+      _vaultClearSelection();
+    }
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+    e.preventDefault();
+    _vaultSelectAllVisible();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+    e.preventDefault();
+    _vaultClearSelection();
+    return;
+  }
+});
+
 async function _vaultBulkUnhide(){
   if (_vaultSelectedIds.size === 0) return;
   const ids = Array.from(_vaultSelectedIds);
