@@ -14135,25 +14135,49 @@ async function _vaultRender(list){
   // v1.5.66 — keep a stable list reference for the lightbox so ←/→
   // navigation and the index counter stay in sync with what's shown.
   const renderList = displayPhotos.slice();
+  // v1.5.163 — Render every card synchronously with a filename placeholder,
+  // then kick off thumb fetches in parallel (do NOT await inside the loop).
+  // Pre-1.5.163 this loop awaited invoke('get_private_thumbnail') once per
+  // photo serially — with 6 photos imperceptible, but at 100+ vault entries
+  // the grid took multiple seconds to populate because each thumb fetch
+  // blocked the next IPC round-trip. Now all N fetches launch concurrently
+  // and the grid is interactive immediately; thumbs swap in as they arrive.
+  // Each card also stays clickable as a filename-only fallback until its
+  // thumb lands, so the user can already open the lightbox while loads
+  // are still in flight.
   for (let idx = 0; idx < renderList.length; idx++) {
     const ph = renderList[idx];
+    const here = idx;
     const card = document.createElement('div');
-    card.style.cssText = 'position:relative;aspect-ratio:1;background:#111;border-radius:6px;overflow:hidden;cursor:pointer';
+    card.style.cssText = 'position:relative;aspect-ratio:1;background:#111;border-radius:6px;overflow:hidden;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:11px;text-align:center;padding:8px';
     card.title = ph.filename;
-    let src = '';
-    // v1.5.64 — prefer the decrypted blob path for vaulted photos. If
-    // the photo was vaulted before the encryption migration ran (or is
-    // mid-migration), private_thumb_enc is NULL and we fall back to
-    // the legacy on-disk thumbnail — still gated by the unlocked vault
-    // because list_private_photos only returns rows the user can see.
-    try {
-      src = await invoke('get_private_thumbnail', { photoId: ph.id });
-    } catch(_) {
+    card.textContent = ph.filename;
+    // Lightbox open works as soon as the card exists — no need to wait
+    // for the thumb. List capture happens here so it stays stable even
+    // if the cache refreshes mid-fetch.
+    card.onclick = () => {
+      _vaultLbList = renderList;
+      vaultLbOpen(here);
+    };
+    grid.appendChild(card);
+
+    // Fire-and-forget thumb fetch. Errors are swallowed — the card
+    // stays in its filename-fallback state, which is honest about
+    // the missing thumb without breaking interaction.
+    (async () => {
+      let src = '';
       try {
-        src = await invoke('get_thumbnail', { photoId: ph.id });
-      } catch(__) { /* keep src empty, render filename below */ }
-    }
-    if (src) {
+        src = await invoke('get_private_thumbnail', { photoId: ph.id });
+      } catch(_) {
+        try { src = await invoke('get_thumbnail', { photoId: ph.id }); }
+        catch(__) { return; }
+      }
+      if (!src) return;
+      // Replace card content with the thumb + Unhide button. Preserve
+      // the click handler we already attached by re-binding after the
+      // innerHTML wipe.
+      card.style.cssText = 'position:relative;aspect-ratio:1;background:#111;border-radius:6px;overflow:hidden;cursor:pointer';
+      card.textContent = '';
       card.innerHTML = `<img src="${src}" style="width:100%;height:100%;object-fit:cover">` +
                        `<button title="Unhide" style="position:absolute;top:4px;right:4px;background:rgba(0,0,0,.7);border:none;color:#fff;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer">Unhide</button>`;
       card.querySelector('button').onclick = async (ev) => {
@@ -14161,18 +14185,12 @@ async function _vaultRender(list){
         await invoke('toggle_photo_private', { photoId: ph.id });
         vaultRefresh();
       };
-      // v1.5.66 — clicking the thumb (anywhere except the Unhide
-      // corner) opens the fullscreen lightbox with this photo as the
-      // current item. Capture `idx` so navigation knows where to go.
-      const here = idx;
-      card.onclick = ()=>{
+      // Re-attach the card click after innerHTML replaced the DOM.
+      card.onclick = () => {
         _vaultLbList = renderList;
         vaultLbOpen(here);
       };
-    } else {
-      card.textContent = ph.filename;
-    }
-    grid.appendChild(card);
+    })();
   }
 }
 function _vaultFilter(){
