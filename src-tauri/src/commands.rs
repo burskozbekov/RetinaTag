@@ -11242,12 +11242,67 @@ pub async fn vault_add_paths(
             }
         }
 
+        // v1.5.157 — Now that every media file inside the dropped folders
+        // is sealed as .rtenc and the plaintext copies are gone, the
+        // folders are usually empty shells sitting on the user's desktop.
+        // The user's complaint: "I encrypted my Vault folder but it's
+        // still on the desktop. The whole folder should disappear."
+        //
+        // We walk each dropped input that's a directory, deepest-first
+        // (so child dirs go before parents), and remove anything that
+        // has become empty. We DO NOT recursively force-delete:
+        //   * Files left behind (non-media, or .rtenc we just wrote — but
+        //     we never write .rtenc back into the dropped folder, only
+        //     next to the original which is gone now) → the directory
+        //     stays.
+        //   * remove_dir on a non-empty directory returns an error and
+        //     we just record it and move on. So extra content is always
+        //     safe.
+        //
+        // Result: a folder that contained ONLY media files becomes a
+        // ghost. A folder that mixed media + a Readme.txt loses the
+        // media but keeps the Readme + the folder. That matches user
+        // intent — the readme isn't private, no surprise deletions.
+        let mut folders_removed = 0usize;
+        for p_str in &paths {
+            let root = std::path::Path::new(p_str);
+            if !root.is_dir() { continue; }
+            // Collect every dir under (and including) root, deepest first.
+            let mut dirs: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
+                .max_depth(20)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_dir())
+                .map(|e| e.into_path())
+                .collect();
+            // Sort by depth desc so children are tried before parents.
+            dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+            for d in dirs {
+                // remove_dir only succeeds on an empty directory — exactly
+                // the semantics we want.
+                if let Err(e) = std::fs::remove_dir(&d) {
+                    // ENOTEMPTY / "directory not empty" is the common,
+                    // expected case when the user had other files there.
+                    // We only log other errors so a permissions issue
+                    // surfaces in the result.
+                    let msg = e.to_string();
+                    if !msg.contains("not empty") && !msg.contains("non-empty") {
+                        errors.push(format!("remove_dir {}: {}", d.display(), msg));
+                    }
+                } else {
+                    folders_removed += 1;
+                }
+            }
+        }
+
         let _ = ah.emit("vault-add-progress", serde_json::json!({
             "phase": "done",
             "total": total,
             "encrypted": encrypted,
             "already_in_vault": already_in_vault,
             "skipped": skipped,
+            "folders_removed": folders_removed,
             "errors": errors.len(),
         }));
 
@@ -11256,6 +11311,7 @@ pub async fn vault_add_paths(
             "encrypted": encrypted,
             "already_in_vault": already_in_vault,
             "skipped": skipped,
+            "folders_removed": folders_removed,
             "errors": errors,
         })
     })
