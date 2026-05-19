@@ -2600,6 +2600,42 @@ function activeFolderScope() {
   return (el && el.dataset && el.dataset.folder) ? el.dataset.folder : '';
 }
 
+// v1.5.179 — Returns the photo IDs currently visible in the active view
+// (gallery / timeline / calendar / search result / person filter / etc.).
+// Face tagging commands pass this to the backend so detection +
+// recognition run ONLY against what the user is looking at, not the
+// whole library. Empty array = caller falls back to folder scope.
+//
+// Source of truth is the global `photos` array — every view's load
+// path populates it (loadPhotos for gallery, the same fn for timeline
+// + calendar filters, person filter, search).
+function activePhotoIds() {
+  if (!Array.isArray(photos)) return [];
+  return photos.map(p => p && p.id).filter(id => Number.isInteger(id));
+}
+
+// v1.5.179 — Single source of truth for "what is face tagging allowed
+// to touch?" Decides per call based on the user's current view:
+//
+//   1. A folder is selected in the sidebar  → scope = that folder
+//      (user said "tag everything in this folder", we honour that even
+//       if only a paginated subset is loaded in `photos[]`).
+//   2. No folder, but `photos[]` has entries → scope = those IDs
+//      (user is in Timeline / Calendar / search / person filter; tag
+//       exactly what's on screen, nothing else).
+//   3. Empty array → no scoping (whole library — legacy behaviour).
+//
+// Returns the Tauri invoke arg object directly, ready to spread into
+// the call. Order matters: backend reads photo_ids first, falls back
+// to folder, then library.
+function activeFaceScope() {
+  const folder = activeFolderScope();
+  if (folder) return { folder };
+  const ids = activePhotoIds();
+  if (ids.length > 0) return { photoIds: ids };
+  return {};
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 let photos=[],totalPhotos=0,selectedId=null,selectedPath='';
 // v1.5.107 — STATE TYPING RULE (read before touching these):
@@ -4894,7 +4930,7 @@ listen('tag-complete',async({payload:p})=>{
     try{
       const hasModels=await invoke('check_face_models');
       if(hasModels){
-        const newFaces=await invoke('detect_faces_background', { folder: activeFolderScope() }).catch(()=>0);
+        const newFaces=await invoke('detect_faces_background', activeFaceScope()).catch(()=>0);
         if(newFaces>0){
           toast(`${newFaces} new face(s) found — click "👤 Identify Faces" to name them`,'info');
         }
@@ -5868,7 +5904,7 @@ $('btnScanFacesAll').onclick=async()=>{
         // can be surfaced via recognize_all_faces + get_unknown_faces.
         try {
           btn.textContent = '👤 Surfacing revived faces…';
-          try { await invoke('recognize_all_faces', { folder: activeFolderScope() }); } catch(_){}
+          try { await invoke('recognize_all_faces', activeFaceScope()); } catch(_){}
           let revived = [];
           try { revived = await invoke('get_unknown_faces', { folder: activeFolderScope() }); } catch(_){}
           refreshPersonsSidebar();
@@ -6072,7 +6108,7 @@ $('btnScanFacesAll').onclick=async()=>{
       });
 
       let result;
-      try { result = await invoke('detect_faces_background', { folder: activeFolderScope() }); }
+      try { result = await invoke('detect_faces_background', activeFaceScope()); }
       catch(e) { toast('Face detection: ' + e, 'warn'); unlisten(); break; }
       unlisten();
 
@@ -6113,7 +6149,7 @@ $('btnScanFacesAll').onclick=async()=>{
       if (facesFound > 0) {
         btn.textContent = '👤 Recognizing…';
         try {
-          const recognized = await invoke('recognize_all_faces', { folder: activeFolderScope() });
+          const recognized = await invoke('recognize_all_faces', activeFaceScope());
           if (recognized > 0) toast(`${recognized} face(s) auto-matched`, 'success');
         } catch(_) {}
         // recognize_all_faces just bumped known-person face_count totals —
@@ -11625,7 +11661,7 @@ function initFaceRecognition() {
     const btn = $('btnRecognizeAll');
     btn.textContent = 'Recognizing…'; btn.disabled = true;
     try {
-      const count = await invoke('recognize_all_faces', { folder: activeFolderScope() });
+      const count = await invoke('recognize_all_faces', activeFaceScope());
       toast(`${count} faces recognized and tagged`, 'success');
       if (selectedId) loadFacesForPhoto(selectedId);
       refreshPersonsSidebar();
@@ -12031,7 +12067,7 @@ async function refreshFaceQueueStatus() {
     uLine.onclick = async () => {
       // Route through the normal popup flow — same codepath as end-of-scan.
       try {
-        const faces = await invoke('get_unknown_faces', { folder: activeFolderScope() });
+        const faces = await invoke('get_unknown_faces', activeFaceScope());
         refreshPersonsSidebar();
         if (faces && faces.length > 0) {
           showFacePopup(faces, 0);
@@ -12055,9 +12091,9 @@ async function refreshFaceQueueStatus() {
         const reverted = await invoke('reset_all_skipped_faces');
         toast(`${reverted} skipped face(s) brought back`, 'success');
         // Immediately try to show the popup for the revived faces.
-        try { await invoke('recognize_all_faces', { folder: activeFolderScope() }); } catch(_){}
+        try { await invoke('recognize_all_faces', activeFaceScope()); } catch(_){}
         let faces = [];
-        try { faces = await invoke('get_unknown_faces', { folder: activeFolderScope() }); } catch(_){}
+        try { faces = await invoke('get_unknown_faces', activeFaceScope()); } catch(_){}
         refreshPersonsSidebar();
         if (faces && faces.length > 0) showFacePopup(faces, 0);
       } catch(e) { toast('Reset failed: ' + e, 'error'); }
@@ -12300,7 +12336,7 @@ function renderPersonsSidebar(persons) {
 
 async function checkUnknownFaces(showEmptyToast=true){
   try{
-    const faces=await invoke('get_unknown_faces', { folder: activeFolderScope() });
+    const faces=await invoke('get_unknown_faces', activeFaceScope());
     // get_unknown_faces silently auto-assigns faces to known persons via
     // centroid matching — refresh so those count bumps are visible to the
     // user before/after the popup flow.

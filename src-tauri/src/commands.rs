@@ -6740,6 +6740,13 @@ pub async fn get_person_timeline(
 #[tauri::command]
 pub async fn recognize_all_faces(
     folder: Option<String>,
+    // v1.5.179 — Same scoping rationale as detect_faces_background.
+    // FE passes the IDs of photos currently visible in the active view
+    // (Timeline range, Calendar day, search result, person filter).
+    // When present, takes precedence over `folder` and constrains
+    // recognition to face rows whose photo_id is in this set. None /
+    // empty = fall back to folder filter or whole library.
+    photo_ids: Option<Vec<i64>>,
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<usize, String> {
@@ -6753,6 +6760,11 @@ pub async fn recognize_all_faces(
     let folder_filter: Option<String> = folder
         .as_ref()
         .and_then(|s| if s.trim().is_empty() { None } else { Some(s.clone()) });
+    // v1.5.179 — scope ID set, takes precedence over folder when present.
+    let ids_filter: Option<std::collections::HashSet<i64>> = photo_ids
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.iter().copied().collect());
     let db_arc = state.db.clone();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
@@ -6788,11 +6800,28 @@ pub async fn recognize_all_faces(
 
         let unassigned = {
             let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
-            match &folder_filter {
-                Some(f) => db::get_unassigned_faces_with_embeddings_in_folder(&conn, f)
+            // v1.5.179 — when ids_filter is set, fetch the whole library
+            // and filter by photo_id in Rust. Adding an `id IN (...)`
+            // SQL path would need a new db helper; doing the filter
+            // post-fetch is one HashSet lookup per row and matches the
+            // existing scoping idiom for "this view only" semantics.
+            // The folder branch keeps its dedicated DB helper because
+            // that index-friendly path predates v1.5.179.
+            let base: Vec<_> = match &folder_filter {
+                Some(f) if ids_filter.is_none() =>
+                    db::get_unassigned_faces_with_embeddings_in_folder(&conn, f)
+                        .map_err(|e| e.to_string())?,
+                _ => db::get_unassigned_faces_with_embeddings(&conn)
                     .map_err(|e| e.to_string())?,
-                None => db::get_unassigned_faces_with_embeddings(&conn)
-                    .map_err(|e| e.to_string())?,
+            };
+            if let Some(ids) = &ids_filter {
+                // Each row in the unassigned set carries the source
+                // photo_id; tuple shape is (face_id, photo_id, embedding).
+                base.into_iter()
+                    .filter(|t| ids.contains(&t.1))
+                    .collect()
+            } else {
+                base
             }
         };
 
@@ -7256,6 +7285,14 @@ pub async fn count_unscanned_faces(
 #[tauri::command]
 pub async fn detect_faces_background(
     folder: Option<String>,
+    // v1.5.179 — Optional ID set scoping. When the user triggers face
+    // detection from a view other than the folder sidebar (Timeline,
+    // Calendar, search results, person filter), the FE passes the IDs
+    // currently visible in `photos[]`. If present, this list takes
+    // precedence over `folder` and constrains scanning to exactly
+    // those rows. None / empty = fall back to folder filter or whole
+    // library, same as pre-v1.5.179.
+    photo_ids: Option<Vec<i64>>,
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(usize, usize), String> { // (photos_processed, faces_found)
@@ -7300,9 +7337,40 @@ pub async fn detect_faces_background(
     // hits the content-rich end of the library, users see faces show up
     // quickly, and nobody bails out early. No data semantics change — the
     // loop still eventually scans everything — just the order.
+    // v1.5.179 — photo_ids takes precedence over folder. Allows the FE
+    // to scope face detection to whatever the user is currently looking
+    // at — a Timeline range, a Calendar day, a person filter, a search
+    // result — not just the legacy folder sidebar selection.
+    let ids_filter: Option<Vec<i64>> = photo_ids
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .cloned();
+
     let photos: Vec<(i64, String)> = {
         let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(f) = &folder_filter {
+        if let Some(ids) = &ids_filter {
+            // IDs are i64s we just read from the DB — safe to inline
+            // into the IN list. Using a literal list avoids SQLite's
+            // 999-host-parameter limit which a typical Calendar day
+            // (hundreds of photos) would still fit under, but a
+            // Timeline range could blow.
+            let id_list: String = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT id, path FROM photos
+                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                   AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
+                   AND id IN ({})
+                 ORDER BY CASE WHEN LOWER(filename) LIKE '%.jpg' OR LOWER(filename) LIKE '%.jpeg' OR LOWER(filename) LIKE '%.png' THEN 0 ELSE 1 END, id ASC
+                 LIMIT 500",
+                art_sql, id_list
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows: Vec<(i64, String)> = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        } else if let Some(f) = &folder_filter {
             // v1.5.45 — STRICT folder match (see count_unscanned_faces note).
             let sql = format!(
                 "SELECT id, path FROM photos
