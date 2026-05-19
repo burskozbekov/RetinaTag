@@ -6747,6 +6747,12 @@ pub async fn recognize_all_faces(
     // recognition to face rows whose photo_id is in this set. None /
     // empty = fall back to folder filter or whole library.
     photo_ids: Option<Vec<i64>>,
+    // v1.5.180 — Year-month scope for Timeline / Calendar views. Same
+    // contract as detect_faces_background. Implemented via a per-row
+    // photo_id lookup after fetch because the existing
+    // get_unassigned_faces_with_embeddings helpers don't take date
+    // filters — we'd be adding a third helper variant per filter axis.
+    year_month: Option<String>,
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<usize, String> {
@@ -6765,6 +6771,18 @@ pub async fn recognize_all_faces(
         .as_ref()
         .filter(|v| !v.is_empty())
         .map(|v| v.iter().copied().collect());
+    // v1.5.180 — year-month scope (e.g. "2019-01"). Resolved to a
+    // HashSet<i64> of qualifying photo_ids up-front, then filtered the
+    // same way as ids_filter so the unassigned-face loop downstream
+    // stays unchanged.
+    let ym_filter: Option<String> = year_month.as_ref().and_then(|s| {
+        let s = s.trim();
+        if s.len() == 7
+            && s.chars().nth(4) == Some('-')
+            && s[..4].chars().all(|c| c.is_ascii_digit())
+            && s[5..].chars().all(|c| c.is_ascii_digit())
+        { Some(s.to_string()) } else { None }
+    });
     let db_arc = state.db.clone();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
@@ -6807,22 +6825,44 @@ pub async fn recognize_all_faces(
             // existing scoping idiom for "this view only" semantics.
             // The folder branch keeps its dedicated DB helper because
             // that index-friendly path predates v1.5.179.
+            // v1.5.180 — year_month resolves to its own photo_id set
+            // up-front, then composes with ids_filter (intersection).
+            // When only year_month is supplied we still take the
+            // whole-library helper and intersect after.
+            let ym_ids: Option<std::collections::HashSet<i64>> = if let Some(ym) = &ym_filter {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM photos
+                       WHERE strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?1
+                         AND private = 0"
+                ).map_err(|e| e.to_string())?;
+                let rows: std::collections::HashSet<i64> = stmt
+                    .query_map(rusqlite::params![ym], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                Some(rows)
+            } else { None };
             let base: Vec<_> = match &folder_filter {
-                Some(f) if ids_filter.is_none() =>
+                Some(f) if ids_filter.is_none() && ym_filter.is_none() =>
                     db::get_unassigned_faces_with_embeddings_in_folder(&conn, f)
                         .map_err(|e| e.to_string())?,
                 _ => db::get_unassigned_faces_with_embeddings(&conn)
                     .map_err(|e| e.to_string())?,
             };
-            if let Some(ids) = &ids_filter {
-                // Each row in the unassigned set carries the source
-                // photo_id; tuple shape is (face_id, photo_id, embedding).
-                base.into_iter()
-                    .filter(|t| ids.contains(&t.1))
-                    .collect()
-            } else {
-                base
-            }
+            let filtered: Vec<_> = base.into_iter()
+                .filter(|t| {
+                    // Each row: (face_id, photo_id, embedding_bytes).
+                    let pid = t.1;
+                    if let Some(s) = &ids_filter {
+                        if !s.contains(&pid) { return false; }
+                    }
+                    if let Some(s) = &ym_ids {
+                        if !s.contains(&pid) { return false; }
+                    }
+                    true
+                })
+                .collect();
+            filtered
         };
 
         // Recognition thresholds — calibrated for the max-sim-to-any-named-
@@ -7293,6 +7333,13 @@ pub async fn detect_faces_background(
     // those rows. None / empty = fall back to folder filter or whole
     // library, same as pre-v1.5.179.
     photo_ids: Option<Vec<i64>>,
+    // v1.5.180 — Optional "YYYY-MM" scope. When the user is in
+    // Timeline or Calendar view, the FE sends the currently-selected
+    // year+month here; the backend then filters by
+    // strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?. Cheaper
+    // than emitting a 65k-element photo_ids list across IPC for the
+    // common "All Photos → Timeline → Jan 2019" scenario.
+    year_month: Option<String>,
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(usize, usize), String> { // (photos_processed, faces_found)
@@ -7345,10 +7392,41 @@ pub async fn detect_faces_background(
         .as_ref()
         .filter(|v| !v.is_empty())
         .cloned();
+    // v1.5.180 — year_month filter for Timeline / Calendar scoping.
+    // Validated lightly (must look like YYYY-MM) so the format string
+    // we splice into SQL can't be turned into anything weird.
+    let ym_filter: Option<String> = year_month.as_ref().and_then(|s| {
+        let s = s.trim();
+        if s.len() == 7
+            && s.chars().nth(4) == Some('-')
+            && s[..4].chars().all(|c| c.is_ascii_digit())
+            && s[5..].chars().all(|c| c.is_ascii_digit())
+        { Some(s.to_string()) } else { None }
+    });
 
     let photos: Vec<(i64, String)> = {
         let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ids) = &ids_filter {
+        if let Some(ym) = &ym_filter {
+            // Year-month scope: rows whose capture date (falling back to
+            // import date) lands in the requested month. Uses strftime
+            // so SQLite's date function handles both 'YYYY-MM-DD…' and
+            // 'YYYY-MM-DDTHH:MM:SSZ' shapes correctly.
+            let sql = format!(
+                "SELECT id, path FROM photos
+                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                   AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
+                   AND strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?1
+                 ORDER BY CASE WHEN LOWER(filename) LIKE '%.jpg' OR LOWER(filename) LIKE '%.jpeg' OR LOWER(filename) LIKE '%.png' THEN 0 ELSE 1 END, id ASC
+                 LIMIT 500",
+                art_sql
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows: Vec<(i64, String)> = stmt.query_map(rusqlite::params![ym], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        } else if let Some(ids) = &ids_filter {
             // IDs are i64s we just read from the DB — safe to inline
             // into the IN list. Using a literal list avoids SQLite's
             // 999-host-parameter limit which a typical Calendar day

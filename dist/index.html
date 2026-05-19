@@ -2614,25 +2614,47 @@ function activePhotoIds() {
   return photos.map(p => p && p.id).filter(id => Number.isInteger(id));
 }
 
-// v1.5.179 — Single source of truth for "what is face tagging allowed
+// v1.5.180 — Single source of truth for "what is face tagging allowed
 // to touch?" Decides per call based on the user's current view:
 //
-//   1. A folder is selected in the sidebar  → scope = that folder
-//      (user said "tag everything in this folder", we honour that even
-//       if only a paginated subset is loaded in `photos[]`).
-//   2. No folder, but `photos[]` has entries → scope = those IDs
-//      (user is in Timeline / Calendar / search / person filter; tag
-//       exactly what's on screen, nothing else).
-//   3. Empty array → no scoping (whole library — legacy behaviour).
+//   1. Folder is selected in the sidebar → { folder }
+//   2. Timeline view with year+month   → { yearMonth: "YYYY-MM" }
+//      (cheaper than emitting a 65k photo_ids list; SQL filters via
+//       strftime on date_taken/created_at — index-friendly.)
+//   3. Calendar view with year+month   → { yearMonth: "YYYY-MM" }
+//   4. Otherwise (gallery, all photos)  → {} (whole library — legacy)
 //
-// Returns the Tauri invoke arg object directly, ready to spread into
-// the call. Order matters: backend reads photo_ids first, falls back
-// to folder, then library.
+// v1.5.179 also wired up { photoIds } scope; it's still accepted by
+// the backend for cases where the FE has a curated id list (search
+// results, person filter), but the Timeline/Calendar paths route
+// through year_month now because Timeline paginates separately —
+// global `photos[]` doesn't reflect the selected year+month, so
+// activePhotoIds() would have returned the whole library (or a
+// stale gallery snapshot) and the backend would have scanned all
+// 65k photos again, exactly the bug the user reported on v1.5.179.
 function activeFaceScope() {
   const folder = activeFolderScope();
   if (folder) return { folder };
+  // Timeline view with both year + month picked.
+  if (typeof curView === 'string' && curView === 'timeline'
+      && typeof _tlYear === 'number' && typeof _tlMonth === 'number') {
+    const ym = `${_tlYear}-${String(_tlMonth).padStart(2,'0')}`;
+    return { yearMonth: ym };
+  }
+  // Calendar view: same shape, different globals.
+  if (typeof curView === 'string' && curView === 'calendar'
+      && typeof _calYear === 'number' && typeof _calMonth === 'number') {
+    const ym = `${_calYear}-${String(_calMonth).padStart(2,'0')}`;
+    return { yearMonth: ym };
+  }
+  // Fallback: curated id list when the FE has one (search, person).
   const ids = activePhotoIds();
-  if (ids.length > 0) return { photoIds: ids };
+  if (ids.length > 0 && ids.length < 2000) {
+    // Cap at 2000 to keep IPC payload sane. Beyond that the user is
+    // effectively in "whole library" territory and the legacy
+    // whole-library fallback is the right answer anyway.
+    return { photoIds: ids };
+  }
   return {};
 }
 
@@ -4921,8 +4943,16 @@ listen('tag-complete',async({payload:p})=>{
   if(p.tagged>0){
     // Auto-run face recognition on EXISTING face data first (instant)
     try{
-      const _scope = activeFolderScope();
-      const recognized=await invoke('recognize_all_faces', { folder: _scope }).catch(()=>0);
+      // v1.5.180 — Use activeFaceScope so the post-Tag-with-AI auto
+      // recognize follows the same Timeline/Calendar/folder scoping
+      // as the manual Identify Faces button. Pre-1.5.180 this branch
+      // sent only `folder: activeFolderScope()` which is empty on
+      // Timeline / Calendar / All Photos views, so the backend fell
+      // back to scanning the whole 65k library every time the user
+      // tagged anything. User's screenshot showed exactly that
+      // "Face scan — 40 / 64,432 unscanned" while sitting in
+      // Timeline / Jan 2019.
+      const recognized=await invoke('recognize_all_faces', activeFaceScope()).catch(()=>0);
       if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
       await checkUnknownFaces(false);
     }catch(e){console.error('Face recognition error:',e);}
