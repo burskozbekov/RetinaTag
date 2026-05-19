@@ -11288,17 +11288,80 @@ pub fn get_private_thumbnail(
             None => return Err("Vault is locked".into()),
         }
     };
-    let blob_opt: Option<Vec<u8>> = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::get_encrypted_thumb(&conn, photo_id).map_err(|e| e.to_string())?
-    };
-    let blob = match blob_opt {
-        Some(b) => b,
-        None => return Err("No encrypted thumbnail".into()),
-    };
-    let plain = crate::vault_crypto::open(&kek, &blob).map_err(|e| e.to_string())?;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(&plain)))
+
+    // Fast path: row has a pre-encrypted thumbnail blob (created at
+    // encrypt-time for vault entries added in v1.5.66+ via the proper
+    // flow). Decrypt and ship as base64.
+    let (blob_opt, enc_path_opt): (Option<Vec<u8>>, Option<String>) = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let blob = db::get_encrypted_thumb(&conn, photo_id).map_err(|e| e.to_string())?;
+        let path: Option<String> = conn
+            .query_row(
+                "SELECT path FROM photos WHERE id = ?1",
+                rusqlite::params![photo_id],
+                |r| r.get(0),
+            )
+            .ok();
+        (blob, path)
+    };
+    if let Some(b) = blob_opt {
+        let plain = crate::vault_crypto::open(&kek, &b).map_err(|e| e.to_string())?;
+        return Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(&plain)));
+    }
+
+    // v1.5.168 — Slow-path fallback for legacy vault entries that
+    // don't have a private_thumb_enc blob in the DB. Pre-v1.5.168 the
+    // FE saw "No encrypted thumbnail" and tried `get_thumbnail`, but
+    // that one reads from photos.path which for vaulted rows is the
+    // `.rtenc` blob — image decoders can't read sealed bytes, so the
+    // fallback failed too and the user saw a blank placeholder for
+    // every legacy vault photo. The 6 photos already in the user's
+    // vault from before v1.5.158 hit this path 100% of the time.
+    //
+    // Fix: if there's no DB-stored encrypted thumb, decrypt the
+    // `.rtenc` blob in memory, resize it down to ~320px on the long
+    // edge, re-encode as JPEG, and return that as the data URL. The
+    // plaintext never touches disk. We don't backfill the DB cache
+    // here — that would race with vault_lock; a future migration can
+    // do it offline.
+    let enc_path = match enc_path_opt {
+        Some(p) => std::path::PathBuf::from(p),
+        None => return Err(format!("photo {} not found", photo_id)),
+    };
+    if !crate::vault_files::is_encrypted_path(&enc_path) {
+        return Err(format!(
+            "photo {} has no encrypted thumb and path is not a .rtenc",
+            photo_id
+        ));
+    }
+    let plaintext = crate::vault_files::decrypt_to_bytes(&enc_path, &kek)?;
+    // Detect video vs image by the underlying file extension stashed
+    // inside the .rtenc name (`<orig>.<ext>.rtenc`). For videos we
+    // can't produce a thumb here without ffmpeg, so return a clean
+    // error the FE already swallows into the filename placeholder.
+    let inner_ext = crate::vault_files::original_path_for(&enc_path)
+        .as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    let is_video = matches!(inner_ext.as_str(),
+        "mp4" | "mov" | "m4v" | "3gp" | "avi" | "mkv" | "webm" | "wmv");
+    if is_video {
+        return Err("video thumbnail not available for legacy vault entry".into());
+    }
+    // Decode → resize → JPEG. image::load_from_memory autodetects
+    // PNG/JPEG/WEBP/HEIC (via features) so most photo formats are fine.
+    let img = image::load_from_memory(&plaintext)
+        .map_err(|e| format!("decode {}: {}", enc_path.display(), e))?;
+    let thumb = img.thumbnail(320, 320);
+    let mut buf: Vec<u8> = Vec::with_capacity(32 * 1024);
+    thumb
+        .to_rgb8()
+        .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80))
+        .map_err(|e| format!("encode thumb: {}", e))?;
+    Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(&buf)))
 }
 
 /// Drop the stored PIN. Used by the BIP39 recovery flow (Faz 2) and by
