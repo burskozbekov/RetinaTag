@@ -10634,26 +10634,42 @@ pub async fn vault_migrate_to_store(
         // IIFE so the conn lock guard and stmt drop cleanly before the
         // outer `?` would push the early-return into the outer fn —
         // without it the inner stmt borrows conn beyond the block.
-        let candidates: Vec<(i64, String, String)> = (|| -> Result<Vec<(i64, String, String)>, String> {
+        // v1.5.175 — also pull original_path + vault_folder_id so we can
+        // rebuild the folder hierarchy for legacy rows.
+        let candidates: Vec<(i64, String, String, Option<String>, Option<i64>)> =
+            (|| -> Result<Vec<_>, String> {
             let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
             let mut stmt = conn.prepare(
-                "SELECT id, path, hash FROM photos
+                "SELECT id, path, hash, original_path, vault_folder_id FROM photos
                   WHERE private = 1
                     AND path LIKE '%.rtenc'
                     AND instr(path, ?1) = 0"
             ).map_err(|e| e.to_string())?;
             let iter = stmt.query_map(rusqlite::params![&store_dir_str], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
             }).map_err(|e| e.to_string())?;
             Ok(iter.filter_map(|r| r.ok()).collect())
         })()?;
 
         let mut migrated = 0usize;
+        let mut folders_reconstructed = 0usize;
         let mut errors: Vec<String> = Vec::new();
         let mut source_dirs: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
+        // v1.5.175 — Maps a directory path back to its vault_folders.id
+        // so multiple photos under the same legacy folder share one row.
+        // Populated lazily as we encounter parents during the migration.
+        let mut folder_map: std::collections::HashMap<std::path::PathBuf, i64> =
+            std::collections::HashMap::new();
+        let now_iso = chrono::Utc::now().to_rfc3339();
 
-        for (pid, src_str, hash) in &candidates {
+        for (pid, src_str, hash, orig_path_opt, existing_folder_id) in &candidates {
             let src = std::path::PathBuf::from(src_str);
             if !src.exists() {
                 // Source file missing — likely a manual delete, surface
@@ -10671,11 +10687,63 @@ pub async fn vault_migrate_to_store(
                 errors.push(format!("move {}: {}", src.display(), e));
                 continue;
             }
-            // DB update. If this fails AFTER the move succeeded the row
-            // still points at the old path which now doesn't exist —
-            // ugly but recoverable (rerun migration after fixing perms).
-            // We do NOT undo the FS move on DB failure: the .rtenc is
-            // safe in the store, the orphan row tells us where it went.
+
+            // v1.5.175 — Rebuild folder hierarchy for legacy rows that
+            // have no vault_folder_id yet. Use original_path's parent
+            // directory as the canonical folder for this photo. Multiple
+            // photos that came from the same parent share one row via
+            // folder_map. Only writes if existing_folder_id is NULL —
+            // pre-existing folder bindings (drops after v1.5.158)
+            // shouldn't be clobbered.
+            let mut new_folder_id: Option<i64> = *existing_folder_id;
+            if existing_folder_id.is_none() {
+                if let Some(orig_str) = orig_path_opt {
+                    let orig_pb = std::path::PathBuf::from(orig_str);
+                    if let Some(parent) = orig_pb.parent() {
+                        let parent_pb = parent.to_path_buf();
+                        let folder_id = match folder_map.get(&parent_pb) {
+                            Some(id) => Some(*id),
+                            None => {
+                                let name = parent.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("Vault")
+                                    .to_string();
+                                let orig_dir_str = parent.to_string_lossy().to_string();
+                                let inserted = {
+                                    let conn = match db_arc.lock() {
+                                        Ok(c) => c,
+                                        Err(_) => { errors.push(format!("db lock for folder row {}", pid)); continue; }
+                                    };
+                                    conn.execute(
+                                        "INSERT INTO vault_folders (name, parent_id, original_path, created_at)
+                                         VALUES (?1, NULL, ?2, ?3)",
+                                        rusqlite::params![&name, &orig_dir_str, &now_iso],
+                                    ).map(|_| conn.last_insert_rowid())
+                                };
+                                match inserted {
+                                    Ok(id) => {
+                                        folder_map.insert(parent_pb, id);
+                                        folders_reconstructed += 1;
+                                        Some(id)
+                                    }
+                                    Err(e) => {
+                                        errors.push(format!("INSERT vault_folders for {}: {}", parent.display(), e));
+                                        None
+                                    }
+                                }
+                            }
+                        };
+                        new_folder_id = folder_id;
+                    }
+                }
+            }
+
+            // DB update — path AND (optionally) vault_folder_id. If this
+            // fails AFTER the move succeeded the row still points at the
+            // old path which now doesn't exist — recoverable, rerun
+            // migration after fixing perms. We do NOT undo the FS move
+            // on DB failure: the .rtenc is safe in the store, the orphan
+            // row tells us where it went.
             let dst_str = dst.to_string_lossy().to_string();
             let upd = {
                 let conn = match db_arc.lock() {
@@ -10683,8 +10751,8 @@ pub async fn vault_migrate_to_store(
                     Err(_) => { errors.push(format!("db lock for {}", pid)); continue; }
                 };
                 conn.execute(
-                    "UPDATE photos SET path = ?1 WHERE id = ?2",
-                    rusqlite::params![&dst_str, pid],
+                    "UPDATE photos SET path = ?1, vault_folder_id = ?2 WHERE id = ?3",
+                    rusqlite::params![&dst_str, new_folder_id, pid],
                 )
             };
             if let Err(e) = upd {
@@ -10742,6 +10810,7 @@ pub async fn vault_migrate_to_store(
         Ok(serde_json::json!({
             "candidates": candidates.len(),
             "migrated":   migrated,
+            "folders_reconstructed": folders_reconstructed,
             "removed_dirs": removed_dirs,
             "errors":     errors,
         }))
