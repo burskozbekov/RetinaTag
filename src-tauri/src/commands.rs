@@ -10428,6 +10428,13 @@ pub async fn vault_unlock(
 /// v1.5.64 — Faz 2.1: clear the in-memory KEK. Called from the FE
 /// auto-lock timer, the manual Lock button, and on app shutdown via
 /// the tray menu. Idempotent.
+///
+/// v1.5.155 — Also wipes every plaintext temp file we materialised for
+/// the video lightbox. Without this an unlock-watch-relock cycle would
+/// leave plaintext .mp4 / .mov copies sitting in the temp dir until the
+/// OS got around to clearing it, which defeats the vault entirely. We
+/// drop the lock before touching the filesystem so a slow `remove_file`
+/// doesn't hold off other vault calls.
 #[tauri::command]
 pub fn vault_lock(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut g = state.vault_kek.lock().map_err(|_| "kek lock")?;
@@ -10436,6 +10443,16 @@ pub fn vault_lock(state: tauri::State<'_, AppState>) -> Result<(), String> {
         // this away without a real `zeroize` crate, but the volatile
         // overwrite is cheap and more careful than nothing.
         for byte in k.iter_mut() { *byte = 0; }
+    }
+    drop(g);
+    let to_wipe: Vec<std::path::PathBuf> = {
+        let mut tf = state.vault_temp_files.lock().map_err(|_| "temp lock")?;
+        std::mem::take(&mut *tf)
+    };
+    for p in to_wipe {
+        if let Err(e) = crate::vault_files::remove_file_with_fallback(&p) {
+            eprintln!("[vault_lock] could not remove temp {}: {}", p.display(), e);
+        }
     }
     Ok(())
 }
@@ -10447,6 +10464,117 @@ pub fn vault_lock(state: tauri::State<'_, AppState>) -> Result<(), String> {
 pub fn vault_kek_loaded(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
     Ok(g.is_some())
+}
+
+/// v1.5.155 — Materialise a vault video so the WebView2 lightbox can
+/// play it. WebView2's `convertFileSrc` only points at real files on
+/// disk; it can't stream from a `.rtenc` blob, and the IPC base64 path
+/// we use for vault images is unworkable for video (a 200 MB clip
+/// would blow up the IPC channel and the JS heap).
+///
+/// We decrypt the row's `.rtenc` to a plaintext file inside
+/// `%LOCALAPPDATA%\com.retinatag.app\vault-temp\` and return the path.
+/// The file lives only as long as the vault is unlocked: `vault_lock`
+/// walks `AppState.vault_temp_files` and shreds every entry. Re-opening
+/// the same video re-decrypts — that's intentional, the temp file is
+/// cheap to write and we'd rather not race with `vault_lock` running on
+/// the lock timer.
+///
+/// Filename shape: `rt_vault_<photo_id>_<rand>.<orig_ext>`. The random
+/// segment keeps two concurrent decrypts from colliding; the extension
+/// is preserved so WebView2 / mpv pick the right demuxer.
+///
+/// Errors: vault locked, row not found, row's `path` isn't a `.rtenc`,
+/// I/O failure, or the auth-tag mismatch surfaced by `decrypt_to_file`.
+#[tauri::command]
+pub async fn vault_decrypt_to_temp(
+    photo_id: i64,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let kek: [u8; 32] = {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        match *g {
+            Some(k) => k,
+            None => return Err("Vault is locked".into()),
+        }
+    };
+
+    let enc_path: std::path::PathBuf = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let p: String = conn
+            .query_row(
+                "SELECT path FROM photos WHERE id = ?1",
+                rusqlite::params![photo_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("photo {} not found: {}", photo_id, e))?;
+        std::path::PathBuf::from(p)
+    };
+
+    if !crate::vault_files::is_encrypted_path(&enc_path) {
+        return Err(format!(
+            "photo {} is not in the vault (path: {})",
+            photo_id,
+            enc_path.display()
+        ));
+    }
+    if !enc_path.is_file() {
+        return Err(format!(
+            "encrypted file missing on disk: {}",
+            enc_path.display()
+        ));
+    }
+
+    // Derive the original extension from `<name>.<ext>.rtenc` so the
+    // temp file has the right extension. `original_path_for` strips
+    // only the `.rtenc` suffix, leaving `<name>.<ext>`.
+    let ext = crate::vault_files::original_path_for(&enc_path)
+        .as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin")
+        .to_string();
+
+    let temp_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_local_data_dir: {}", e))?
+        .join("vault-temp");
+    std::fs::create_dir_all(&temp_root)
+        .map_err(|e| format!("create vault-temp: {}", e))?;
+
+    // Cheap unique suffix without pulling in `rand`: ns timestamp xor'd
+    // with photo_id. Collisions would require two decrypts in the same
+    // nanosecond for the same photo, which doesn't happen.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let suffix = format!("{:016x}", (nanos as u64) ^ (photo_id as u64));
+    let dest = temp_root.join(format!("rt_vault_{}_{}.{}", photo_id, suffix, ext));
+
+    // `decrypt_to_file` refuses to overwrite an existing dest, so the
+    // suffix above guarantees a clean target.
+    let dest_clone = dest.clone();
+    let enc_clone = enc_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::vault_files::decrypt_to_file(&enc_clone, &dest_clone, &kek)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // Track for vault_lock shred. We do this AFTER the file is on disk
+    // so a failed decrypt doesn't leave a phantom path in the list.
+    {
+        let mut tf = state
+            .vault_temp_files
+            .lock()
+            .map_err(|_| "temp lock")?;
+        tf.push(dest.clone());
+    }
+
+    Ok(dest.to_string_lossy().into_owned())
 }
 
 /// v1.5.64 — Faz 2.3: True if Windows Hello is set up AND the vault

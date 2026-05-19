@@ -229,6 +229,15 @@ pub struct AppState {
     /// Mutex<Option> means it never lands on disk and is zero-padded on
     /// drop. Thumbnails are only decryptable while this is `Some(_)`.
     pub vault_kek: Mutex<Option<[u8; 32]>>,
+    /// v1.5.155 — Plaintext temp files we wrote so the lightbox could play
+    /// vault videos via WebView2's blob/file source. WebView2 can't stream
+    /// from a `.rtenc` directly, so `vault_decrypt_to_temp` materialises
+    /// each requested video at `%LOCALAPPDATA%\com.retinatag.app\vault-temp\
+    /// rt_vault_<id>_<rand>.<ext>` and returns the path. We keep the paths
+    /// here so `vault_lock` can shred them — otherwise an unlocked-and-then-
+    /// locked vault would leave plaintext videos on disk until the next
+    /// vacuum run, defeating the whole point of the vault.
+    pub vault_temp_files: Arc<Mutex<Vec<std::path::PathBuf>>>,
 }
 
 /// Suppress Windows "The application was unable to start correctly (0xc0000142)"
@@ -362,6 +371,7 @@ pub fn run() {
                 device_monitor: Mutex::new(None),
                 last_shown_face_ids: Mutex::new(Vec::new()),
                 vault_kek: Mutex::new(None),
+                vault_temp_files: Arc::new(Mutex::new(Vec::new())),
             });
 
             // Install the system tray icon + menu. Non-fatal on failure.
@@ -879,6 +889,7 @@ pub fn run() {
             commands::vault_restore_from_mnemonic,
             commands::vault_lock,
             commands::vault_kek_loaded,
+            commands::vault_decrypt_to_temp,
             commands::get_private_thumbnail,
             commands::get_private_photo_data,
             commands::vault_pending_file_migration_count,

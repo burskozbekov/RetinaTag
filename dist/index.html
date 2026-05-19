@@ -13067,7 +13067,15 @@ async function openLightbox(photoId) {
     // `convertFileSrc` and hand it to a <video> element so users don't have
     // to leave RetinaTag just to preview a clip.
     try {
-      const assetUrl = convertFileSrc(photo.path);
+      // v1.5.155 — Vault videos live as `.rtenc` blobs on disk; WebView2
+      // can't stream those directly. Ask the backend to decrypt the row
+      // into a temp file under %LOCALAPPDATA%\com.retinatag.app\vault-temp\
+      // and play THAT path instead. The temp file is wiped on vault_lock.
+      let playablePath = photo.path;
+      if (typeof photo.path === 'string' && photo.path.toLowerCase().endsWith('.rtenc')) {
+        playablePath = await invoke('vault_decrypt_to_temp', { photoId: id });
+      }
+      const assetUrl = convertFileSrc(playablePath);
       img.style.display = 'none';
       videoEl.style.display = 'block';
       videoEl.src = assetUrl;
@@ -13117,7 +13125,11 @@ async function openLightbox(photoId) {
       });
       spinner.style.display = 'none';
       playBtn.style.display = 'block';
-      playBtn.onclick = () => { if (photo) invoke('open_file', {path: photo.path}); };
+      // v1.5.155 — Open externally uses the playable (possibly decrypted)
+      // path. For non-vault rows this is identical to photo.path; for
+      // vault rows we point Windows Movies & TV / mpv at the plaintext
+      // temp file instead of the .rtenc the system can't decode.
+      playBtn.onclick = () => { invoke('open_file', {path: playablePath}); };
     } catch(err) {
       // Fall back to thumbnail + external-open if asset URL can't be built
       const cached = thumbCache.get(id);
@@ -13125,8 +13137,16 @@ async function openLightbox(photoId) {
       img.style.display = '';
       videoEl.style.display = 'none';
       spinner.style.display = 'none';
-      playBtn.style.display = 'block';
-      playBtn.onclick = () => { if (photo) invoke('open_file', {path: photo.path}); };
+      // For vault videos the .rtenc has no decoder anywhere on the
+      // system, so hiding the button is more honest than handing the
+      // user a click that fails silently.
+      const isVaultBlob = typeof photo.path === 'string' && photo.path.toLowerCase().endsWith('.rtenc');
+      if (isVaultBlob) {
+        playBtn.style.display = 'none';
+      } else {
+        playBtn.style.display = 'block';
+        playBtn.onclick = () => { if (photo) invoke('open_file', {path: photo.path}); };
+      }
     }
   } else {
     // Images & RAW: full-resolution loading. Make sure the video element is
