@@ -6751,24 +6751,18 @@ pub async fn get_person_timeline(
 /// seeds). Using it here closes the asymmetry where naming works great but
 /// subsequent scans re-ask about already-named people.
 #[tauri::command]
+#[allow(non_snake_case)]
 pub async fn recognize_all_faces(
     folder: Option<String>,
-    // v1.5.179 — Same scoping rationale as detect_faces_background.
-    // FE passes the IDs of photos currently visible in the active view
-    // (Timeline range, Calendar day, search result, person filter).
-    // When present, takes precedence over `folder` and constrains
-    // recognition to face rows whose photo_id is in this set. None /
-    // empty = fall back to folder filter or whole library.
-    photo_ids: Option<Vec<i64>>,
-    // v1.5.180 — Year-month scope for Timeline / Calendar views. Same
-    // contract as detect_faces_background. Implemented via a per-row
-    // photo_id lookup after fetch because the existing
-    // get_unassigned_faces_with_embeddings helpers don't take date
-    // filters — we'd be adding a third helper variant per filter axis.
-    year_month: Option<String>,
+    // v1.5.192 — camelCase param names. See count_unscanned_faces for
+    // the rename-rationale.
+    photoIds: Option<Vec<i64>>,
+    yearMonth: Option<String>,
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<usize, String> {
+    let photo_ids = photoIds;
+    let year_month = yearMonth;
     // v1.5.74 — Was a P1 freeze: this fan-out (cosine sim across all faces
     // × all persons, plus per-match db.lock() + insert_tags + emit) ran
     // inline on the async-runtime worker thread. On a 50K-photo / 5K-face
@@ -7290,19 +7284,24 @@ pub async fn scan_and_cluster_faces(
 /// Same WHERE clause as `detect_faces_background` so the count matches the
 /// set the scanner will actually walk — no stale numbers, no drift.
 #[tauri::command]
+#[allow(non_snake_case)]
 pub async fn count_unscanned_faces(
     folder: Option<String>,
-    // v1.5.190 — Scope the count the same way detect_faces_background
-    // is scoped (v1.5.179/180). Without this the "X unscanned" label
-    // in the FE always reflected the whole library — so even when
-    // the user was in Timeline / Calendar and the actual scan would
-    // touch only the visible month, the label said "X / 64,428".
-    // That looked exactly like the scope wasn't applied and the user
-    // (correctly) reported it as a bug.
-    year_month: Option<String>,
-    photo_ids: Option<Vec<i64>>,
+    // v1.5.192 — Parameter names match the JSON keys the FE sends
+    // verbatim (yearMonth / photoIds). Pre-1.5.192 relied on Tauri's
+    // auto camelCase→snake_case conversion to map FE `yearMonth` onto
+    // backend `year_month`. That conversion was either disabled, off
+    // by default on the user's Tauri build, or silently dropping the
+    // arg — backend always saw None and the count fell through to the
+    // whole-library branch. Naming the Rust params with the JS
+    // identifiers directly removes the rename layer and the bug it
+    // hid behind.
+    yearMonth: Option<String>,
+    photoIds: Option<Vec<i64>>,
     state: tauri::State<'_, AppState>,
 ) -> Result<usize, String> {
+    let year_month = yearMonth;
+    let photo_ids = photoIds;
     let art_sql = art_tag_sql_list();
     let folder_filter: Option<String> = folder
         .as_ref()
@@ -7379,26 +7378,21 @@ pub async fn count_unscanned_faces(
 /// Called automatically after tagging completes (if face models are present).
 /// Returns the number of NEW faces detected.
 #[tauri::command]
+#[allow(non_snake_case)]
 pub async fn detect_faces_background(
     folder: Option<String>,
-    // v1.5.179 — Optional ID set scoping. When the user triggers face
-    // detection from a view other than the folder sidebar (Timeline,
-    // Calendar, search results, person filter), the FE passes the IDs
-    // currently visible in `photos[]`. If present, this list takes
-    // precedence over `folder` and constrains scanning to exactly
-    // those rows. None / empty = fall back to folder filter or whole
-    // library, same as pre-v1.5.179.
-    photo_ids: Option<Vec<i64>>,
-    // v1.5.180 — Optional "YYYY-MM" scope. When the user is in
-    // Timeline or Calendar view, the FE sends the currently-selected
-    // year+month here; the backend then filters by
-    // strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?. Cheaper
-    // than emitting a 65k-element photo_ids list across IPC for the
-    // common "All Photos → Timeline → Jan 2019" scenario.
-    year_month: Option<String>,
+    // v1.5.192 — camelCase param names (photoIds / yearMonth) match
+    // the JSON keys the FE sends. See count_unscanned_faces for the
+    // detailed rationale; tl;dr Tauri's auto-rename wasn't doing the
+    // conversion we expected, so the scope arrived as None and every
+    // scan walked the whole library.
+    photoIds: Option<Vec<i64>>,
+    yearMonth: Option<String>,
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(usize, usize), String> { // (photos_processed, faces_found)
+    let photo_ids = photoIds;
+    let year_month = yearMonth;
     let models_dir = models_dir_for(&app);
 
     // Silently skip if face models are missing — not an error.
