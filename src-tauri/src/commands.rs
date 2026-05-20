@@ -11850,13 +11850,44 @@ pub fn get_private_thumbnail(
         .unwrap_or_default();
     let is_video = matches!(inner_ext.as_str(),
         "mp4" | "mov" | "m4v" | "3gp" | "avi" | "mkv" | "webm" | "wmv");
-    if is_video {
-        return Err("video thumbnail not available for legacy vault entry".into());
-    }
-    // Decode → resize → JPEG. image::load_from_memory autodetects
-    // PNG/JPEG/WEBP/HEIC (via features) so most photo formats are fine.
-    let img = image::load_from_memory(&plaintext)
-        .map_err(|e| format!("decode {}: {}", enc_path.display(), e))?;
+    let img = if is_video {
+        // v1.5.188 — Video thumbnail path. ffmpeg can't read a `.rtenc`
+        // directly; write the plaintext to a short-lived temp file with
+        // the right extension, run extract_video_frame against it,
+        // delete the temp. Same caveat as vault_decrypt_to_temp: the
+        // plaintext briefly hits disk, so we keep it under the central
+        // vault-thumb-tmp/ dir (NOT next to the user's library) and
+        // remove it before this function returns.
+        let tmp_root = state.vault_store_dir
+            .parent()
+            .map(|p| p.join("vault-thumb-tmp"))
+            .unwrap_or_else(|| std::env::temp_dir().join("retinatag-vault-thumb-tmp"));
+        if let Err(e) = std::fs::create_dir_all(&tmp_root) {
+            return Err(format!("create vault-thumb-tmp: {}", e));
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_path = tmp_root.join(format!("rt_vthumb_{}_{}.{}", photo_id, nanos, inner_ext));
+        if let Err(e) = std::fs::write(&tmp_path, &plaintext) {
+            return Err(format!("write temp video: {}", e));
+        }
+        let frame_result = thumbnail::extract_video_frame(&tmp_path.to_string_lossy());
+        // Best-effort cleanup; if it fails the next get_private_thumbnail
+        // call will overwrite by writing to a fresh nanos-suffixed name
+        // and the orphan stays until app restart's vault-temp wipe.
+        let _ = std::fs::remove_file(&tmp_path);
+        match frame_result {
+            Ok(f) => f,
+            Err(e) => return Err(format!("ffmpeg frame: {}", e)),
+        }
+    } else {
+        // Decode → resize → JPEG. image::load_from_memory autodetects
+        // PNG/JPEG/WEBP/HEIC (via features) so most photo formats are fine.
+        image::load_from_memory(&plaintext)
+            .map_err(|e| format!("decode {}: {}", enc_path.display(), e))?
+    };
     let thumb = img.thumbnail(320, 320);
     let mut buf: Vec<u8> = Vec::with_capacity(32 * 1024);
     thumb

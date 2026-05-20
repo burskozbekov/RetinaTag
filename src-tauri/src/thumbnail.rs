@@ -190,7 +190,7 @@ fn run_ffmpeg_capture(args: &[&str]) -> Result<Vec<u8>> {
 /// round-trip through a temp file. Avoids the separate ffprobe call by
 /// picking a fixed safe seek (most videos are > 2s; a fallback at 0s handles
 /// shorter clips).
-fn extract_video_frame(video_path: &str) -> Result<DynamicImage> {
+pub fn extract_video_frame(video_path: &str) -> Result<DynamicImage> {
     // `-ss` BEFORE `-i` is the "fast seek": ffmpeg jumps to the nearest
     // keyframe without decoding everything before it. Much faster on long
     // videos. `-frames:v 1 -f mjpeg pipe:1` is the in-memory equivalent of

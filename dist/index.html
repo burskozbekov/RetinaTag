@@ -2052,6 +2052,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
           </div>
           <div style="display:flex;gap:6px;align-items:center">
             <button class="btn-sm btn-secondary" onclick="_vaultUnhideAllVisible()" title="Unlock every photo currently visible (respects active filter + folder)">↩ Unlock visible</button>
+            <button class="btn-sm btn-secondary" onclick="_vaultVerifyIntegrity()" title="Check that every encrypted blob on disk has a matching DB row, and vice versa">🔍 Verify</button>
             <button class="btn-sm btn-secondary" onclick="vaultEnterFullscreen()" title="Full-screen vault view">⛶</button>
             <label style="font-size:11px;color:var(--text3);display:flex;align-items:center;gap:4px" title="Auto-lock the vault after this many minutes of inactivity">
               <span>Auto-lock:</span>
@@ -14394,6 +14395,31 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 });
+
+// v1.5.187 — Triggers the backend vault_verify_integrity command and
+// surfaces the result as a toast (or a more detailed modal if anything
+// is broken). Read-only; never mutates DB or filesystem.
+async function _vaultVerifyIntegrity() {
+  _vaultBumpActivity();
+  try {
+    const r = await invoke('vault_verify_integrity');
+    const total = r.total || 0;
+    const missing = r.missing_files || 0;
+    const bad = r.bad_headers || 0;
+    const orphans = r.orphan_blobs || 0;
+    if (missing === 0 && bad === 0 && orphans === 0) {
+      toast(`Vault clean: ${total} entries verified`, 'success');
+      return;
+    }
+    const lines = [];
+    if (missing) lines.push(`• ${missing} DB row(s) point at a .rtenc that is NOT on disk`);
+    if (bad)     lines.push(`• ${bad} .rtenc file(s) have an unexpected header (corrupt or non-RetinaTag)`);
+    if (orphans) lines.push(`• ${orphans} .rtenc file(s) in the store dir have NO DB row pointing at them`);
+    alert(`Vault integrity check — ${total} entries scanned\n\nIssues:\n` + lines.join('\n') + `\n\nStore dir:\n${r.store_dir}\n\nNo changes were made. Contact support before manual cleanup if you're unsure what these mean.`);
+  } catch (e) {
+    toast('Verify failed: ' + e, 'error');
+  }
+}
 
 // v1.5.185 — Unlock every photo currently rendered in the grid
 // (respects the active folder drill, search, filter chip, sort). Same

@@ -398,8 +398,15 @@ pub fn run() {
             // setups sync %APPDATA% to the network, which would leak plaintext
             // to a fileserver the user never opted into.
             if let Ok(local_root) = app.path().app_local_data_dir() {
-                let temp_root = local_root.join("vault-temp");
-                if temp_root.exists() {
+                // v1.5.188 — vault-thumb-tmp also gets the startup wipe.
+                // get_private_thumbnail writes plaintext video bytes
+                // here briefly to feed ffmpeg, then removes them; a
+                // crash mid-thumbnail would leave a stray plaintext
+                // clip on disk until app restart. Same security
+                // contract as vault-temp.
+                for sub in &["vault-temp", "vault-thumb-tmp"] {
+                    let temp_root = local_root.join(sub);
+                    if !temp_root.exists() { continue; }
                     match std::fs::read_dir(&temp_root) {
                         Ok(rd) => {
                             let mut wiped = 0usize;
@@ -407,17 +414,17 @@ pub fn run() {
                                 let p = entry.path();
                                 if p.is_file() {
                                     if let Err(e) = std::fs::remove_file(&p) {
-                                        eprintln!("[vault-temp] remove {} failed: {}", p.display(), e);
+                                        eprintln!("[{}] remove {} failed: {}", sub, p.display(), e);
                                     } else {
                                         wiped += 1;
                                     }
                                 }
                             }
                             if wiped > 0 {
-                                eprintln!("[vault-temp] wiped {} stale plaintext file(s) from previous session", wiped);
+                                eprintln!("[{}] wiped {} stale plaintext file(s) from previous session", sub, wiped);
                             }
                         }
-                        Err(e) => eprintln!("[vault-temp] read_dir {} failed: {}", temp_root.display(), e),
+                        Err(e) => eprintln!("[{}] read_dir {} failed: {}", sub, temp_root.display(), e),
                     }
                 }
             }
