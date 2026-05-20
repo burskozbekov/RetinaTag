@@ -2646,27 +2646,40 @@ function activePhotoIds() {
 // 65k photos again, exactly the bug the user reported on v1.5.179.
 function activeFaceScope() {
   const folder = activeFolderScope();
-  if (folder) return { folder };
+  if (folder) {
+    const s = { folder, year_month: null, photo_ids: null };
+    console.log('[face-scope] folder:', s);
+    return s;
+  }
   // Timeline view with both year + month picked.
   if (typeof curView === 'string' && curView === 'timeline'
       && typeof _tlYear === 'number' && typeof _tlMonth === 'number') {
     const ym = `${_tlYear}-${String(_tlMonth).padStart(2,'0')}`;
-    return { yearMonth: ym };
+    // v1.5.191 — Explicit snake_case keys (year_month / photo_ids) so
+    // the Rust command sees the names directly instead of relying on
+    // Tauri's serde-rename. Also pass camelCase aliases as a belt-and-
+    // braces in case a future Tauri rename convention shifts. The
+    // command signature has its own filter; extras are ignored.
+    const s = { year_month: ym, yearMonth: ym, folder: null, photo_ids: null };
+    console.log('[face-scope] timeline:', s);
+    return s;
   }
   // Calendar view: same shape, different globals.
   if (typeof curView === 'string' && curView === 'calendar'
       && typeof _calYear === 'number' && typeof _calMonth === 'number') {
     const ym = `${_calYear}-${String(_calMonth).padStart(2,'0')}`;
-    return { yearMonth: ym };
+    const s = { year_month: ym, yearMonth: ym, folder: null, photo_ids: null };
+    console.log('[face-scope] calendar:', s);
+    return s;
   }
   // Fallback: curated id list when the FE has one (search, person).
   const ids = activePhotoIds();
   if (ids.length > 0 && ids.length < 2000) {
-    // Cap at 2000 to keep IPC payload sane. Beyond that the user is
-    // effectively in "whole library" territory and the legacy
-    // whole-library fallback is the right answer anyway.
-    return { photoIds: ids };
+    const s = { photo_ids: ids, photoIds: ids, folder: null, year_month: null };
+    console.log('[face-scope] photo_ids (' + ids.length + '):', s);
+    return s;
   }
+  console.log('[face-scope] WHOLE LIBRARY (no scope)');
   return {};
 }
 
@@ -6027,12 +6040,21 @@ $('btnScanFacesAll').onclick=async()=>{
     // keep the old behaviour — no denominator, no ETA. The scan proceeds
     // either way; this is purely UI metadata.
     let totalUnscanned = 0;
+    // v1.5.191 — Capture the scope being sent so we can show it next
+    // to the count for debugging. User reported the count stayed at
+    // whole-library no matter the view.
+    const _scopeForCount = activeFaceScope();
+    const _scopeLabel = _scopeForCount.folder ? `folder=${(_scopeForCount.folder.split(/[\\\/]/).pop()||'?')}`
+                       : _scopeForCount.year_month ? `month=${_scopeForCount.year_month}`
+                       : _scopeForCount.photo_ids ? `ids=${_scopeForCount.photo_ids.length}`
+                       : 'library';
     try{
-      totalUnscanned = await invoke('count_unscanned_faces', activeFaceScope());
+      totalUnscanned = await invoke('count_unscanned_faces', _scopeForCount);
       if(!Number.isFinite(totalUnscanned) || totalUnscanned < 0) totalUnscanned = 0;
+      toast(`Face scan scope: ${_scopeLabel} · ${totalUnscanned.toLocaleString()} unscanned`, 'info');
     }catch(_){ totalUnscanned = 0; }
     if(totalUnscanned > 0){
-      $('progressSub').textContent = `0 / ${totalUnscanned.toLocaleString()} unscanned · starting…`;
+      $('progressSub').textContent = `0 / ${totalUnscanned.toLocaleString()} unscanned · ${_scopeLabel} · starting…`;
     }
 
     while(true) {
