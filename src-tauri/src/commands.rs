@@ -7292,15 +7292,58 @@ pub async fn scan_and_cluster_faces(
 #[tauri::command]
 pub async fn count_unscanned_faces(
     folder: Option<String>,
+    // v1.5.190 — Scope the count the same way detect_faces_background
+    // is scoped (v1.5.179/180). Without this the "X unscanned" label
+    // in the FE always reflected the whole library — so even when
+    // the user was in Timeline / Calendar and the actual scan would
+    // touch only the visible month, the label said "X / 64,428".
+    // That looked exactly like the scope wasn't applied and the user
+    // (correctly) reported it as a bug.
+    year_month: Option<String>,
+    photo_ids: Option<Vec<i64>>,
     state: tauri::State<'_, AppState>,
 ) -> Result<usize, String> {
     let art_sql = art_tag_sql_list();
     let folder_filter: Option<String> = folder
         .as_ref()
         .and_then(|s| if s.trim().is_empty() { None } else { Some(s.clone()) });
+    let ym_filter: Option<String> = year_month.as_ref().and_then(|s| {
+        let s = s.trim();
+        if s.len() == 7
+            && s.chars().nth(4) == Some('-')
+            && s[..4].chars().all(|c| c.is_ascii_digit())
+            && s[5..].chars().all(|c| c.is_ascii_digit())
+        { Some(s.to_string()) } else { None }
+    });
+    let ids_filter: Option<Vec<i64>> = photo_ids
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .cloned();
 
     let conn = state.db.lock().map_err(|_| "db lock")?;
-    let n: i64 = if let Some(f) = &folder_filter {
+    // year_month / ids take precedence over folder, matching detect.
+    let n: i64 = if let Some(ym) = &ym_filter {
+        let sql = format!(
+            "SELECT COUNT(*) FROM photos
+             WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+               AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
+               AND strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?1",
+            art_sql
+        );
+        conn.query_row(&sql, rusqlite::params![ym], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+    } else if let Some(ids) = &ids_filter {
+        let id_list: String = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT COUNT(*) FROM photos
+             WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+               AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
+               AND id IN ({})",
+            art_sql, id_list
+        );
+        conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+    } else if let Some(f) = &folder_filter {
         // v1.5.45 — STRICT folder match (no substring/prefix). The previous
         // `OR substr(path, 1, length(?1)) = ?1` clause was scooping up
         // subfolders AND any folder that happened to share a prefix

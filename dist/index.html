@@ -4953,31 +4953,21 @@ listen('tag-complete',async({payload:p})=>{
   }
   _setIdleTrayTooltip();
   if(p.tagged>0){
-    // Auto-run face recognition on EXISTING face data first (instant)
-    try{
-      // v1.5.180 — Use activeFaceScope so the post-Tag-with-AI auto
-      // recognize follows the same Timeline/Calendar/folder scoping
-      // as the manual Identify Faces button. Pre-1.5.180 this branch
-      // sent only `folder: activeFolderScope()` which is empty on
-      // Timeline / Calendar / All Photos views, so the backend fell
-      // back to scanning the whole 65k library every time the user
-      // tagged anything. User's screenshot showed exactly that
-      // "Face scan — 40 / 64,432 unscanned" while sitting in
-      // Timeline / Jan 2019.
-      const recognized=await invoke('recognize_all_faces', activeFaceScope()).catch(()=>0);
-      if(recognized>0) toast(`${recognized} face(s) matched to known people`,'success');
-      await checkUnknownFaces(false);
-    }catch(e){console.error('Face recognition error:',e);}
-    // Then detect faces in NEW photos (slow, runs in background)
-    try{
-      const hasModels=await invoke('check_face_models');
-      if(hasModels){
-        const newFaces=await invoke('detect_faces_background', activeFaceScope()).catch(()=>0);
-        if(newFaces>0){
-          toast(`${newFaces} new face(s) found — click "👤 Identify Faces" to name them`,'info');
-        }
-      }
-    }catch(e){console.error('Face detection error:',e);}
+    // v1.5.190 — REMOVED post-Tag-with-AI auto-face-scan. User report
+    // (screenshot of Timeline / Jan 2026 with "20 / 64,428 unscanned"):
+    // every time the user kicked off Tag with AI, the scan that
+    // followed walked the whole library no matter which view they
+    // were in. Auto-trigger picked up the wrong scope state because
+    // activeFaceScope() relied on _tlYear/_tlMonth being numbers
+    // (defaults to null until the user actually clicks into a
+    // specific Timeline month) AND because the auto-trigger fires
+    // before the user has a chance to switch contexts.
+    //
+    // Face scanning is now ONLY started by an explicit "👤 Identify
+    // Faces" button press. At that moment activeFaceScope() reads
+    // exactly the current view (whatever year/month/folder/calendar
+    // day the user is on) and the scope is honoured.
+    //
     // Auto-run semantic indexing if CLIP is available
     try{
       const clipStatus=await invoke('get_clip_status');
@@ -6038,7 +6028,7 @@ $('btnScanFacesAll').onclick=async()=>{
     // either way; this is purely UI metadata.
     let totalUnscanned = 0;
     try{
-      totalUnscanned = await invoke('count_unscanned_faces', { folder: activeFolderScope() });
+      totalUnscanned = await invoke('count_unscanned_faces', activeFaceScope());
       if(!Number.isFinite(totalUnscanned) || totalUnscanned < 0) totalUnscanned = 0;
     }catch(_){ totalUnscanned = 0; }
     if(totalUnscanned > 0){
