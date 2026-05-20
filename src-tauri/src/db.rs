@@ -1105,6 +1105,13 @@ pub fn get_photos(
     folder: Option<&str>,
     tag_filter: Option<&str>,
     status_filter: Option<&str>,
+    // v1.5.189 — Mac sprint #3: when Some(true), invert the privacy
+    // filter so the result set is the vault contents instead of the
+    // default gallery. Lets the FE drive the main grid into "vault
+    // mode" (Mac brief: "main grid vault_only=true") without forking
+    // a parallel query. None or Some(false) keeps the legacy
+    // private = 0 default.
+    vault_only: Option<bool>,
 ) -> Result<(Vec<PhotoSummary>, i64)> {
     let mut conditions: Vec<String> = vec![];
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![];
@@ -1124,8 +1131,14 @@ pub fn get_photos(
             args.len()
         ));
     }
-    // Private photos only show up in the unlocked Private Vault view.
-    conditions.push("p.private = 0".to_string());
+    // v1.5.189 — vault_only flips the visibility filter; default stays
+    // at "no vault leaks into the gallery" so existing call sites that
+    // pass None keep their old behaviour.
+    if vault_only == Some(true) {
+        conditions.push("p.private = 1".to_string());
+    } else {
+        conditions.push("p.private = 0".to_string());
+    }
 
     let where_clause = if conditions.is_empty() {
         String::new()

@@ -14421,6 +14421,68 @@ async function _vaultVerifyIntegrity() {
   }
 }
 
+// v1.5.189 — In-app confirmation modal (replaces native prompt/confirm
+// for destructive vault actions). Mac brief #3: "Unhide All: native
+// browser dialog yerine in-app modal + typed count confirmation".
+// Returns a Promise<boolean>: true if the user typed the matching count
+// (or hit OK on a non-typed dialog), false on Cancel / Esc / mismatch.
+function _vaultConfirmModal(opts) {
+  return new Promise((resolve) => {
+    const need = opts.typedCount || null;  // null = simple yes/no
+    // Build the modal once per call; remove on close.
+    const root = document.createElement('div');
+    root.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:linear-gradient(135deg,#2a2418 0%,#1a1612 100%);border:1px solid rgba(212,175,55,.4);border-radius:10px;padding:22px 26px;max-width:440px;width:88%;color:var(--cream);box-shadow:0 18px 48px rgba(0,0,0,.6)';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-size:15px;font-weight:700;margin-bottom:10px;color:rgba(255,210,120,.95)';
+    title.textContent = opts.title || 'Confirm';
+    box.appendChild(title);
+    const body = document.createElement('div');
+    body.style.cssText = 'font-size:13px;line-height:1.55;color:var(--text2);margin-bottom:14px;white-space:pre-wrap';
+    body.textContent = opts.body || '';
+    box.appendChild(body);
+    let input = null;
+    if (need) {
+      const hint = document.createElement('div');
+      hint.style.cssText = 'font-size:11.5px;color:var(--text3);margin-bottom:6px';
+      hint.textContent = `Type ${need} below to confirm.`;
+      box.appendChild(hint);
+      input = document.createElement('input');
+      input.type = 'text';
+      input.style.cssText = 'width:100%;padding:7px 10px;background:var(--bg);color:var(--cream);border:1px solid var(--border2);border-radius:5px;font-size:13px;font-family:monospace;margin-bottom:14px;box-sizing:border-box';
+      box.appendChild(input);
+    }
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    cancel.style.cssText = 'padding:6px 14px;border-radius:6px;background:rgba(255,255,255,.08);color:var(--cream);border:1px solid var(--border2);font-size:12px;cursor:pointer';
+    const ok = document.createElement('button');
+    ok.textContent = opts.okLabel || 'Confirm';
+    ok.style.cssText = 'padding:6px 16px;border-radius:6px;background:rgba(212,175,55,.85);color:#1a1612;border:none;font-size:12px;font-weight:700;cursor:pointer';
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    box.appendChild(actions);
+    root.appendChild(box);
+    document.body.appendChild(root);
+    const close = (val) => { try { document.body.removeChild(root); } catch(_) {} resolve(val); };
+    cancel.onclick = () => close(false);
+    ok.onclick = () => {
+      if (need && (!input || input.value.trim() !== String(need))) {
+        toast('Typed count does not match', 'warn');
+        return;
+      }
+      close(true);
+    };
+    root.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(false); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ok.click(); }
+    });
+    setTimeout(() => { if (input) input.focus(); else ok.focus(); }, 30);
+  });
+}
+
 // v1.5.185 — Unlock every photo currently rendered in the grid
 // (respects the active folder drill, search, filter chip, sort). Same
 // loop as _vaultBulkUnhide but pulls IDs from the DOM instead of the
@@ -14438,17 +14500,14 @@ async function _vaultUnhideAllVisible(){
     return;
   }
   _vaultBumpActivity();
-  // For >20 photos require typed confirmation. A misclick on a large
-  // vault should not silently dump everything.
-  let confirmed = false;
-  if (ids.length > 20) {
-    const typed = prompt(`Unlock ${ids.length} photos from the vault?\n\nThis decrypts every visible photo back to its original location.\n\nType the count (${ids.length}) to confirm:`);
-    if (typed === null) return;
-    confirmed = (typed.trim() === String(ids.length));
-    if (!confirmed) { toast('Cancelled — typed count did not match', 'info'); return; }
-  } else {
-    confirmed = confirm(`Unlock ${ids.length} photo${ids.length === 1 ? '' : 's'} from the vault?\n\nThe encrypted files will be decrypted back to their original locations.`);
-  }
+  // v1.5.189 — In-app modal instead of native prompt/confirm. For
+  // > 20 photos require typed count to match.
+  const confirmed = await _vaultConfirmModal({
+    title: `Unlock ${ids.length} photo${ids.length === 1 ? '' : 's'}?`,
+    body: `This will decrypt every visible photo back to its original location and remove it from the vault.\n\nVault stays unlocked; you can cancel any individual file before it finishes.`,
+    typedCount: ids.length > 20 ? ids.length : null,
+    okLabel: 'Unlock',
+  });
   if (!confirmed) return;
   let ok = 0, errs = 0;
   for (const id of ids) {

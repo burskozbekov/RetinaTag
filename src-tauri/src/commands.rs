@@ -261,8 +261,20 @@ pub async fn get_photos(
     folder: Option<String>,
     tag_filter: Option<String>,
     status_filter: Option<String>,
+    // v1.5.189 — Mac sprint #3: opt-in vault mode.
+    vault_only: Option<bool>,
     state: tauri::State<'_, AppState>,
 ) -> Result<PhotosResponse, String> {
+    // When vault_only is set we MUST also confirm the vault is unlocked
+    // — otherwise an attacker who can run Tauri commands (e.g. via a
+    // malicious page) could query the vault contents while it's
+    // supposedly locked.
+    if vault_only == Some(true) {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        if g.is_none() {
+            return Err("Vault is locked — unlock it first.".into());
+        }
+    }
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.lock().map_err(|_| "db lock".to_string())?;
@@ -273,6 +285,7 @@ pub async fn get_photos(
             folder.as_deref(),
             tag_filter.as_deref(),
             status_filter.as_deref(),
+            vault_only,
         )
         .map(|(photos, total)| PhotosResponse { photos, total })
         .map_err(|e| e.to_string())
@@ -356,7 +369,7 @@ pub async fn search_photos(
     // pull a wide pool and filter server-side.
     if has_advanced_syntax && parsed.must_terms.is_empty() && parsed.phrases.is_empty() {
         let conn = state.db.lock().map_err(|_| "db lock")?;
-        let (rows, _) = db::get_photos(&conn, 0, 5000, None, None, None)
+        let (rows, _) = db::get_photos(&conn, 0, 5000, None, None, None, None)
             .map_err(|e| e.to_string())?;
         // Apply person filter via DB if present (joins face_regions).
         // v1.5.53 — comma in value = OR (`person:Lara,Buğra`).
