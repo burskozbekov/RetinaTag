@@ -1075,15 +1075,16 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <option value="">All status</option><option value="pending">Pending</option>
       <option value="tagged">Tagged</option><option value="error">Errors</option>
     </select>
-    <select id="ratingFilter" class="tb-select">
-      <option value="">All Ratings</option>
-      <option value="1">&#9733;+</option>
-      <option value="2">&#9733;&#9733;+</option>
-      <option value="3">&#9733;&#9733;&#9733;+</option>
-      <option value="4">&#9733;&#9733;&#9733;&#9733;+</option>
-      <option value="5">&#9733;&#9733;&#9733;&#9733;&#9733;</option>
-      <option value="-1">&#10005; Rejected</option>
+    <!-- v1.5.197 — Toolbar de-clutter. Star ratings dropped from the
+         visible UI per Mac sprint. Select kept (hidden) because a
+         handful of code paths do `ratingFilter.value = '...'` to drive
+         the underlying filter state; removing the element would
+         crash those. The empty/fav/rejected options are the only
+         values code ever assigns. -->
+    <select id="ratingFilter" class="tb-select" style="display:none">
+      <option value=""></option>
       <option value="fav">&#10084; Favorites</option>
+      <option value="-1">&#10005; Rejected</option>
     </select>
     <select id="sortSelect" class="tb-select" title="Sort">
       <option value="">Default</option>
@@ -1102,15 +1103,31 @@ select.tb-select:focus{border-color:var(--red-dark)}
       ■ Stop
     </button>
     <!-- Re-tag All removed to prevent accidental tag deletion -->
-    <button class="btn btn-secondary btn-sm" id="btnScanFacesAll" title="Scan all faces and identify unknown people" style="font-size:10px">
-      👤 Identify Faces
+    <!-- v1.5.197 — Compact Faces button (icon + short label). The
+         previous "👤 Identify Faces" string was eating two slots in
+         the toolbar. -->
+    <button class="btn btn-secondary btn-sm" id="btnScanFacesAll"
+            title="Identify Faces — scan and name unknown people"
+            style="font-size:11px;padding:5px 9px">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/>
+        <circle cx="12" cy="7" r="4"/>
+      </svg>
+      Faces
     </button>
-    <button class="btn btn-danger btn-sm" id="btnStopFaceScan" title="Stop face scan" style="font-size:10px;display:none">
-      ■ Stop Face Scan
+    <button class="btn btn-danger btn-sm" id="btnStopFaceScan" title="Stop face scan" style="font-size:11px;padding:5px 9px;display:none">
+      ■ Stop
     </button>
-    <button class="btn btn-secondary btn-sm" id="btnExport" title="Export data">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      Export
+    <!-- v1.5.197 — Export shrunk to icon-only. Tooltip + aria-label
+         carry the meaning; the toolbar gets a slot back. -->
+    <button class="btn btn-secondary btn-sm" id="btnExport"
+            title="Export data (CSV / XMP / JSON)"
+            style="padding:5px 8px" aria-label="Export">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
     </button>
     <span class="tb-count" id="photoCount">0 photos</span>
     <span id="dashFilterPill" style="display:none;margin-left:8px;padding:4px 10px;background:var(--red);color:var(--cream);border-radius:12px;font-size:11px;font-weight:600;cursor:pointer;align-items:center;gap:6px" title="Click to clear and return to Dashboard" onclick="clearDashFilter()"></span>
@@ -1121,11 +1138,12 @@ select.tb-select:focus{border-color:var(--red-dark)}
          surprised. Kept in the toolbar row so it's discoverable without
          opening the command palette. -->
     <span id="undoPill" style="display:none;position:relative;margin-left:8px;padding:4px 10px;background:var(--card2);color:var(--cream2);border:1px solid var(--border2);border-radius:12px;font-size:11px;font-weight:600;cursor:pointer;gap:6px;user-select:none;white-space:nowrap" title="Click: undo (Ctrl+Z) · Right-click: show recent actions" onclick="if(typeof doUndo==='function') doUndo()" oncontextmenu="event.preventDefault(); if(typeof _showUndoMenu==='function') _showUndoMenu(); return false;">↶ <span id="undoPillCount" style="opacity:.75;font-variant-numeric:tabular-nums">0</span></span>
+    <!-- v1.5.197 — Star chips dropped; only ❤ and ✕ stay. Mac sprint
+         feedback: ratings UI was unused clutter. The 5/4+/3+ chips
+         and their values still work through the hidden ratingFilter
+         select if any code path needs them. -->
     <div id="quickFilterChips" class="quick-filter-chips">
       <span class="qf-chip" data-qf="fav" title="Favorites only">&#10084;</span>
-      <span class="qf-chip" data-qf="5"   title="5-star">&#9733;&#9733;&#9733;&#9733;&#9733;</span>
-      <span class="qf-chip" data-qf="4"   title="4+ stars">&#9733;&#9733;&#9733;&#9733;+</span>
-      <span class="qf-chip" data-qf="3"   title="3+ stars">&#9733;&#9733;&#9733;+</span>
       <span class="qf-chip" data-qf="-1"  title="Rejected">&#10005;</span>
     </div>
   </div>
@@ -1780,6 +1798,30 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <!-- Phase C: confirm import -->
       <div id="mtpConfirm" style="display:none">
         <div id="mtpSummary" style="font-size:13px;color:var(--text2);margin-bottom:14px;line-height:1.55;padding:10px 12px;background:var(--bg2);border-radius:6px"></div>
+        <!-- v1.5.197 — "After import" pre-selection. Mac sprint: the
+             post-import "Keep favorites, delete the rest" path was
+             buried in a toast that only showed up once import finished
+             — users didn't know the feature existed. Surfacing it
+             here as a radio group lets the user decide BEFORE they
+             commit, and showMtpCleanupOptions reads this selection
+             back to drive the appropriate confirm toast. -->
+        <div style="margin-bottom:10px;font-size:12px;font-weight:600;color:var(--text1)">
+          After import — what should happen on the phone?
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;padding:10px 12px;background:var(--bg2);border-radius:6px">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text1);cursor:pointer">
+            <input type="radio" name="mtpAfter" value="keep" checked style="accent-color:var(--accent)" />
+            📱 Keep everything on phone <span style="color:var(--text3);font-size:11px">(default — phone untouched)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text1);cursor:pointer">
+            <input type="radio" name="mtpAfter" value="keepFavs" style="accent-color:var(--amber)" />
+            ⭐ Keep favorites, <b>delete the rest</b> <span style="color:var(--text3);font-size:11px">(frees phone space)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text1);cursor:pointer">
+            <input type="radio" name="mtpAfter" value="wipe" style="accent-color:var(--danger)" />
+            🗑️ <b style="color:var(--danger)">Delete everything from phone</b>
+          </label>
+        </div>
         <div style="margin-bottom:10px;font-size:12px;font-weight:600;color:var(--text1)">Destination folder</div>
         <div style="display:flex;gap:8px;margin-bottom:8px">
           <input type="text" id="mtpDestDir" readonly placeholder="No folder selected" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);color:var(--cream);cursor:pointer;font-size:12px" />
@@ -5467,23 +5509,50 @@ function showMtpCleanupOptions(r) {
     `✅ Import complete: <b>${r.copied|0}</b> copied, ` + skipDetail +
     ` (${r.total|0} total).`;
   loadPhotos(); refreshStats(); refreshFolders();
-  // v1.5.151 — Auto-prompt for cleanup if anything was copied. 350ms
-  // delay so the user has a moment to see the summary first; race
-  // guard so a manual click on any of the three buttons cancels.
-  if ((r.copied|0) > 0) {
-    setTimeout(() => {
-      if (_mtpUserActedOnCleanup) return;
-      const n = (r.copied|0);
-      const ok = confirm(
-        `${n} photo${n === 1 ? '' : 's'} imported.\n\n` +
-        `Delete from phone except ⭐ favorites? ` +
-        `Favorites on the phone stay, the rest are permanently removed.`
+  // v1.5.197 — Read the pre-import "After import" radio. Phase E
+  // (#mtpCleanup) still shows the three manual buttons so the user
+  // can change their mind, but the auto-prompt now matches what they
+  // pre-selected on the way in.
+  const afterEl = document.querySelector('input[name="mtpAfter"]:checked');
+  const after = afterEl ? afterEl.value : 'keep';
+  if ((r.copied|0) === 0 && (r.skipped|0) === 0) return;
+  setTimeout(() => {
+    if (_mtpUserActedOnCleanup) return;
+    if (after === 'keepFavs') {
+      _mtpUserActedOnCleanup = true;
+      toastAction(
+        `${r.copied|0} imported. Keep ⭐ favorites on phone, delete the rest — confirm?`,
+        'warn', 'Delete rest from phone',
+        () => doKeepFavoritesDeleteRest(true)
       );
-      if (!_mtpUserActedOnCleanup && ok) {
-        doKeepFavoritesDeleteRest(true);
+    } else if (after === 'wipe') {
+      _mtpUserActedOnCleanup = true;
+      toastAction(
+        `${r.copied|0} imported. DELETE EVERYTHING from phone — confirm?`,
+        'error', 'Wipe phone',
+        async () => {
+          if (!_mtpState || !_mtpState.activeDevice || !_mtpState.media) return;
+          try {
+            toast('Cleaning up phone…', 'info');
+            const ids = _mtpState.media.photos.map(p => p.id);
+            const r2 = await invoke('mtp_delete', { deviceId: _mtpState.activeDevice.id, objectIds: ids });
+            toast(`✅ ${r2.deleted} items deleted from phone`, 'success');
+            $('mtpModal').classList.remove('open');
+          } catch(e) { toast('Delete failed: ' + e, 'error'); }
+        }
+      );
+    } else {
+      // after === 'keep' — legacy auto-prompt path so users who don't
+      // touch the radios still get the favorites-cleanup nudge.
+      if ((r.copied|0) > 0) {
+        toastAction(
+          `${r.copied|0} photos/videos imported. Free up iPhone space — delete everything except ⭐ favorites?`,
+          'warn', 'Delete from phone',
+          () => doKeepFavoritesDeleteRest(true)
+        );
       }
-    }, 350);
-  }
+    }
+  }, 350);
 }
 
 $('btnMtpKeep').onclick = () => {
