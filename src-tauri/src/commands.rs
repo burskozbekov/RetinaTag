@@ -11007,6 +11007,87 @@ pub async fn vault_migrate_to_store(
     .map_err(|e| e.to_string())?
 }
 
+/// v1.5.186 — Vault integrity verifier. Walks every private=1 row and
+/// checks (a) the .rtenc on disk actually exists at the stored path,
+/// (b) the file has the right magic header so we'd be able to decrypt
+/// it, and (c) any .rtenc inside the central vault-store dir actually
+/// has a DB row pointing at it.
+///
+/// Output is purely informational — never mutates DB or filesystem.
+/// Useful after a crashy migration, a drive move, or just paranoia.
+/// Returns { missing_files: N, bad_headers: N, orphan_blobs: N, total: N }.
+///
+/// KEK not required: we only check file presence + magic bytes, no
+/// decrypt happens.
+#[tauri::command]
+pub async fn vault_verify_integrity(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let db_arc = state.db.clone();
+    let store_dir = state.vault_store_dir.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        // DB → disk side: every private=1 row should point at a real
+        // .rtenc file whose first 4 bytes are the RTNT magic.
+        // IIFE for the standard SQLite-borrow lifetime dance — see
+        // vault_migrate_to_store_sync for the longer explanation.
+        let rows: Vec<(i64, String)> = (|| -> Result<Vec<(i64, String)>, String> {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            let mut stmt = conn.prepare(
+                "SELECT id, path FROM photos WHERE private = 1"
+            ).map_err(|e| e.to_string())?;
+            let iter = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            Ok(iter.filter_map(|r| r.ok()).collect())
+        })()?;
+        let mut missing_files = 0usize;
+        let mut bad_headers = 0usize;
+        let mut tracked_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (_id, p) in &rows {
+            tracked_paths.insert(p.clone());
+            let path = std::path::Path::new(p);
+            if !path.is_file() {
+                missing_files += 1;
+                continue;
+            }
+            // Read first 4 bytes; should be ASCII "RTNT" per vault_files.rs.
+            use std::io::Read;
+            let mut buf = [0u8; 4];
+            match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut buf)) {
+                Ok(()) if &buf == b"RTNT" => { /* OK */ }
+                _ => { bad_headers += 1; }
+            }
+        }
+
+        // Disk → DB side: anything sitting in vault-store/ that isn't
+        // referenced by a DB row is an orphan blob. Wasting disk; safe
+        // to delete with a separate command later if user confirms.
+        let mut orphan_blobs = 0usize;
+        if let Ok(read) = std::fs::read_dir(&store_dir) {
+            for entry in read.flatten() {
+                let p = entry.path();
+                if !p.is_file() { continue; }
+                if p.extension().and_then(|e| e.to_str()) != Some("rtenc") { continue; }
+                let s = p.to_string_lossy().to_string();
+                if !tracked_paths.contains(&s) {
+                    orphan_blobs += 1;
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "total":          rows.len(),
+            "missing_files":  missing_files,
+            "bad_headers":    bad_headers,
+            "orphan_blobs":   orphan_blobs,
+            "store_dir":      store_dir.to_string_lossy(),
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// v1.5.155 — Materialise a vault video so the WebView2 lightbox can
 /// play it. WebView2's `convertFileSrc` only points at real files on
 /// disk; it can't stream from a `.rtenc` blob, and the IPC base64 path
