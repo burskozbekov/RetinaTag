@@ -1187,6 +1187,14 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <button class="map-mode-btn active" data-mode="globe">🌐 Globe</button>
       <button class="map-mode-btn" data-mode="flat">📐 Flat Map</button>
       <button class="map-mode-btn" data-mode="places" onclick="openSmartPlaces()">📍 Smart Places</button>
+      <!-- v1.5.202 — Send whatever's currently visible on the map to
+           the Gallery as a region filter. Works regardless of mode
+           (globe/flat), zoom level, or cluster grouping — uses the
+           leaflet viewport bounds or the visible-on-globe set. -->
+      <button class="map-mode-btn" id="btnMapShowInGallery"
+              onclick="_mapShowVisibleInGallery()"
+              title="Filter the Gallery to the photos currently visible on this map view"
+              style="margin-left:8px;background:rgba(212,175,55,.85);color:#1a1612;font-weight:700">📤 Show in Gallery</button>
     </div>
     <div id="mapContainer"></div>
   </div>
@@ -2943,6 +2951,57 @@ function _clearMapRegion() {
   const cnt = document.getElementById('clearFiltersCount');
   if (cnt) cnt.textContent = '';
   try { loadPhotos(); } catch(_) {}
+}
+
+// v1.5.202 — Cache of every photo point currently driving the map.
+// Set inside _renderMapMode after `points` is built; read by
+// _mapShowVisibleInGallery to filter by the leaflet viewport bounds
+// or by the centred globe region.
+let _mapPointsCache = [];
+
+// "📤 Show in Gallery" — collect every pin currently inside the
+// visible map area, regardless of mode/cluster state, and hand the
+// id set to _selectMapRegion. Falls back gracefully if the bounds
+// can't be read.
+function _mapShowVisibleInGallery() {
+  if (!Array.isArray(_mapPointsCache) || _mapPointsCache.length === 0) {
+    toast('No location pins to filter on', 'warn');
+    return;
+  }
+  let inView = [];
+  if (_mapMode === 'flat' && leafletMap && typeof leafletMap.getBounds === 'function') {
+    try {
+      const b = leafletMap.getBounds();
+      inView = _mapPointsCache.filter(p =>
+        p.lat >= b.getSouth() && p.lat <= b.getNorth()
+        && p.lng >= b.getWest() && p.lng <= b.getEast()
+      );
+    } catch(_) { inView = _mapPointsCache.slice(); }
+  } else if (_mapMode === 'globe' && globeInstance && typeof globeInstance.pointOfView === 'function') {
+    // Globe: approximate "visible" as everything within an angular
+    // distance of the camera target. altitude→radius mapping is
+    // rough but the user can always click again after zooming.
+    try {
+      const pov = globeInstance.pointOfView();
+      const centerLat = pov.lat, centerLng = pov.lng;
+      // altitude 0.1 ≈ very close, 4 ≈ whole earth. Map onto a
+      // great-circle radius in degrees.
+      const altRadiusDeg = Math.min(90, Math.max(2, 10 + (pov.altitude || 1) * 20));
+      inView = _mapPointsCache.filter(p => {
+        const dLat = p.lat - centerLat;
+        const dLng = p.lng - centerLng;
+        return Math.sqrt(dLat*dLat + dLng*dLng) <= altRadiusDeg;
+      });
+    } catch(_) { inView = _mapPointsCache.slice(); }
+  } else {
+    inView = _mapPointsCache.slice();
+  }
+  const ids = inView.map(p => p.id).filter(Number.isInteger);
+  if (ids.length === 0) {
+    toast('No pins inside the current view — pan or zoom out first', 'info');
+    return;
+  }
+  _selectMapRegion(ids);
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -7335,6 +7394,11 @@ function _mapRenderMarkers(){
               :`📍 GPS · ${p.tag_count} tags`
     };
   });
+
+  // v1.5.202 — cache every point so the "📤 Show in Gallery" button
+  // can intersect them with the current map viewport regardless of
+  // marker/cluster state.
+  _mapPointsCache = Array.isArray(points) ? points.slice() : [];
 
   if(_mapMode==='flat' && leafletMap){
     // Clear old markers + any previous cluster group
