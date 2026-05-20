@@ -9261,6 +9261,36 @@ pub async fn fix_health_issues(state: tauri::State<'_, AppState>) -> Result<usiz
     if orphan_rows.is_empty() {
         return Ok(0);
     }
+    // v1.5.182 — KRİTİK GÜVENLİK FIX. Mac side report:
+    // fix_health_issues running at auto-startup wiped 71,544 photo rows
+    // because the SMB share holding them was momentarily unmounted at
+    // the exact moment the orphan check ran. Network-share detection
+    // (v1.5.144) only handles paths the OS reports as UNC; a locally-
+    // mounted drive that goes briefly missing (USB unplug, network
+    // drive auto-disconnect, BitLocker lock) STILL classifies every
+    // photo on it as an orphan.
+    //
+    // Mass-wipe guard: refuse to delete more than max(100, 5%) of the
+    // library in a single sweep. A real orphan situation (user deleted
+    // a folder of 50 photos) sails through. A bug (whole share missing,
+    // whole library marked orphan) trips the guard and surfaces an
+    // error the user can act on — instead of nuking the DB silently.
+    let total = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        conn.query_row("SELECT COUNT(*) FROM photos", [], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())? as usize
+    };
+    let safety_limit = std::cmp::max(100, total / 20);
+    if orphan_rows.len() > safety_limit {
+        return Err(format!(
+            "Safety abort: would delete {} of {} photos ({}%). \
+             A drive may have gone offline. Re-mount the source location \
+             and try again, or run the cleanup manually from Settings.",
+            orphan_rows.len(),
+            total,
+            (orphan_rows.len() * 100) / total.max(1)
+        ));
+    }
     // Delete the thumbnail + .rtenc files BEFORE removing the DB rows so a
     // crash mid-delete leaves recoverable state (next health-check will
     // see the orphans again and retry). Also blocking IO — keep it on

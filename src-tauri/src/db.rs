@@ -1807,11 +1807,17 @@ pub fn reset_error_photos(conn: &Connection) -> Result<usize> {
 }
 
 /// Get count of photos by status
+///
+/// v1.5.182 — Privacy leak fix: every count is now scoped to
+/// `private = 0` so the status-filter dropdown ("All status · Pending ·
+/// Tagged · Error · 24") never reveals how many vaulted photos sit in
+/// each bucket. Without this, a vault holding 50 vaulted photos would
+/// show up as +50 in Tagged/Pending counts even while locked.
 pub fn get_status_counts(conn: &Connection) -> Result<(usize, usize, usize, usize)> {
-    let pending: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='pending'", [], |r| r.get(0)).unwrap_or(0);
-    let tagged: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='tagged'", [], |r| r.get(0)).unwrap_or(0);
-    let error: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='error'", [], |r| r.get(0)).unwrap_or(0);
-    let total: usize = conn.query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0)).unwrap_or(0);
+    let pending: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='pending' AND private = 0", [], |r| r.get(0)).unwrap_or(0);
+    let tagged: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='tagged' AND private = 0", [], |r| r.get(0)).unwrap_or(0);
+    let error: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE status='error' AND private = 0", [], |r| r.get(0)).unwrap_or(0);
+    let total: usize = conn.query_row("SELECT COUNT(*) FROM photos WHERE private = 0", [], |r| r.get(0)).unwrap_or(0);
     Ok((total, pending, tagged, error))
 }
 

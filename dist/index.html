@@ -11574,10 +11574,17 @@ $('btnWelcomeSkip').onclick=()=>{$('welcomeModal').classList.remove('open');invo
   initFaceRecognition();
   // Sync person name tags at startup
   invoke('sync_person_tags').catch(()=>{});
-  // Auto-cleanup orphaned photos (files deleted from disk)
-  invoke('fix_health_issues').then(n=>{
-    if(n>0){toast(`Cleaned up ${n} orphaned entries (files deleted from disk)`,'info');refreshStats();refreshFolders();loadPhotos();}
-  }).catch(()=>{});
+  // v1.5.182 — fix_health_issues auto-startup REMOVED. Mac side
+  // wiped 71,544 photos from the DB when a network share briefly
+  // unmounted at the exact moment startup ran the orphan check. The
+  // network-path defer in the backend (v1.5.144) doesn't catch a
+  // locally-mounted volume that goes momentarily missing (USB
+  // unplug, BitLocker auto-lock, network drive disconnect). User
+  // now runs the cleanup from Settings → "Fix orphaned entries"
+  // when they actually want it, and the backend's 5%/100-row
+  // safety abort catches the case anyway.
+  // PREVIOUSLY:
+  //   invoke('fix_health_issues').then(n=>{ if(n>0) toast(...); ... });
   // Always start the device monitor so phones (MTP) and USB drives trigger
   // the import modal as soon as they're plugged in. It's a passive poller —
   // no files are copied without the user completing the modal.
