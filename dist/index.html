@@ -8358,7 +8358,7 @@ function _cuRenderBlurry() {
       : '';
     const pathAttr = (p.path || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
     html += `<div class="${classes.join(' ')}" data-path="${pathAttr}"
-          onclick="_cuToggleBlur(${p.id})"
+          onclick="_cuToggleBlur(${p.id}, event)"
           ondblclick="_cuDblClickOpen(event, ${p.id})"
           oncontextmenu="_cuRightClickReveal(event, this)"
           title="Double-click: open fullscreen · Right-click: show in Explorer">
@@ -8514,10 +8514,34 @@ function _cuApplyDragSelection() {
   _cuRefreshActionBar();
 }
 
-function _cuToggleBlur(pid) {
+// v1.5.195 — Shift+click range select for the blurry grid. Same
+// pattern as gallery / vault: plain click toggles a single card,
+// Ctrl/Cmd+click also toggles (kept for muscle memory consistency),
+// Shift+click selects every card between the last clicked anchor
+// and the new click. _cuBlurLastClickedId remembers the anchor.
+let _cuBlurLastClickedId = null;
+function _cuToggleBlur(pid, ev) {
   if (_cuDragJustDone) return;   // mouseup after drag — don't also toggle the card
+  ev = ev || (typeof event !== 'undefined' ? event : null);
+  const shift = !!(ev && ev.shiftKey);
+  if (shift && _cuBlurLastClickedId != null && Array.isArray(_cuBlurPhotos)) {
+    const anchor = _cuBlurPhotos.findIndex(p => p.id === _cuBlurLastClickedId);
+    const here   = _cuBlurPhotos.findIndex(p => p.id === pid);
+    if (anchor >= 0 && here >= 0) {
+      const from = Math.min(anchor, here);
+      const to   = Math.max(anchor, here);
+      for (let i = from; i <= to; i++) {
+        const p = _cuBlurPhotos[i];
+        if (p) _cuSelectedIds.add(p.id);
+      }
+      _cuRenderBlurry();
+      _cuRefreshActionBar();
+      return;
+    }
+  }
   if (_cuSelectedIds.has(pid)) _cuSelectedIds.delete(pid);
   else _cuSelectedIds.add(pid);
+  _cuBlurLastClickedId = pid;
   _cuRenderBlurry();
   _cuRefreshActionBar();
 }
