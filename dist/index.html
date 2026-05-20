@@ -178,10 +178,14 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
   0%   {transform: translateX(-120%)}
   100% {transform: translateX(385%)}
 }
+/* v1.5.201 — Toolbar tightened so chips + count + buttons fit on one
+   line. Gap 8→6, search-box max 320→260 + min 140→160, flex grow
+   restricted (flex:1 1 200px) so chips don't get bumped down. */
 .toolbar{padding:6px 14px 8px;border-bottom:1px solid var(--border);display:flex;align-items:center;
-  gap:8px;background:var(--surface);flex-shrink:0;flex-wrap:wrap;overflow:visible}
+  gap:6px;background:var(--surface);flex-shrink:0;flex-wrap:wrap;overflow:visible}
 .toolbar .btn,.toolbar .tb-select{flex-shrink:0;white-space:nowrap}
-.search-box{flex:1;position:relative;min-width:140px;max-width:320px}
+.search-box{flex:1 1 200px;position:relative;min-width:160px;max-width:260px}
+.tb-spacer{flex:1 1 auto;min-width:0}
 .search-box svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);
   width:14px;height:14px;stroke:var(--text3);fill:none;stroke-width:2}
 #searchInput{width:100%;padding:8px 12px 8px 34px;border-radius:20px;border:1px solid var(--border2);
@@ -204,7 +208,8 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
 select.tb-select{padding:7px 10px;border-radius:20px;border:1px solid var(--border2);background:var(--card);
   color:var(--text2);font-size:12px;outline:none;cursor:pointer;font-family:var(--font);transition:border-color .2s}
 select.tb-select:focus{border-color:var(--red-dark)}
-.tb-count{font-size:12px;color:var(--text3);white-space:nowrap;font-weight:600}
+.tb-count{font-size:11.5px;color:var(--text3);white-space:nowrap;
+  font-weight:600;font-variant-numeric:tabular-nums}
 
 /* View tabs in toolbar */
 /* View tabs always on their own full-width row.
@@ -397,6 +402,66 @@ select.tb-select:focus{border-color:var(--red-dark)}
    path or the display-toggle layout path. Verified in v1.5.102: modal
    rect 1440×900, opacity 1, visibility visible, and visually rendered
    on screen (Settings panel actually appeared). */
+/* v1.5.203/205/207 — iPhone friendly waiting screen.
+   Logo + animated scanline + lock badge that fades in when the device
+   reports locked. .mtp-state-{connecting,locked,scanning,error} drive
+   visibility from JS. */
+.mtp-scan{display:flex;flex-direction:column;align-items:center;padding:38px 24px 28px;text-align:center}
+.mtp-stage{position:relative;margin-bottom:26px;display:inline-flex;align-items:center;justify-content:center;isolation:isolate}
+.mtp-logo-wrap{position:relative;display:inline-flex;line-height:0}
+.mtp-logo-img{display:block;width:108px;height:108px;object-fit:contain;
+  filter:drop-shadow(0 6px 18px rgba(184,58,18,.32))}
+.mtp-scan-beam{position:absolute;left:0;right:0;height:8px;top:0;
+  pointer-events:none;mix-blend-mode:screen;
+  background:linear-gradient(180deg,
+    rgba(255,210,150,0) 0%, rgba(255,200,130,.5) 40%,
+    rgba(255,230,170,.92) 50%, rgba(255,200,130,.5) 60%, rgba(255,210,150,0) 100%);
+  filter:blur(.6px);
+  animation:rt-mtp-scan 2.4s cubic-bezier(.55,0,.45,1) infinite}
+@keyframes rt-mtp-scan {
+  0%{top:-8px;opacity:0} 14%{opacity:1} 86%{opacity:1} 100%{top:108px;opacity:0}
+}
+.mtp-phone-lock{position:absolute;top:-4px;right:-4px;transform:scale(0);
+  width:34px;height:34px;border-radius:50%;
+  background:linear-gradient(180deg,var(--amber,#f0a500) 0%,#c97900 100%);
+  color:#1a0e00;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 12px rgba(240,165,0,.45);
+  transition:transform .45s cubic-bezier(.34,1.56,.64,1),opacity .25s ease;opacity:0;z-index:3}
+.mtp-phone-lock svg{width:18px;height:18px}
+.mtp-phone-dots{position:absolute;left:50%;bottom:-10px;transform:translateX(-50%);
+  display:flex;gap:5px;opacity:0;transition:opacity .25s ease;z-index:3}
+.mtp-phone-dots span{width:6px;height:6px;border-radius:50%;background:var(--red-light);
+  animation:rt-mtp-dot 1.1s ease-in-out infinite}
+.mtp-phone-dots span:nth-child(2){animation-delay:.15s}
+.mtp-phone-dots span:nth-child(3){animation-delay:.30s}
+@keyframes rt-mtp-dot{0%,80%,100%{transform:scale(.4);opacity:.4}40%{transform:scale(1);opacity:1}}
+.mtp-scan-title{font-size:15px;font-weight:600;color:var(--cream);margin-bottom:6px;letter-spacing:-.2px}
+.mtp-scan-sub{font-size:12.5px;color:var(--text3);line-height:1.55;max-width:360px}
+.mtp-hint{max-height:0;overflow:hidden;opacity:0;width:100%;max-width:360px;
+  margin-top:0;background:rgba(240,165,0,.06);border:1px solid rgba(240,165,0,.22);
+  border-radius:10px;text-align:left;
+  transition:max-height .35s ease,opacity .25s ease,margin-top .25s ease,padding .25s ease;padding:0 14px}
+.mtp-hint-step{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:12.5px;color:var(--cream2)}
+.mtp-step-num{flex:0 0 22px;width:22px;height:22px;border-radius:50%;
+  background:rgba(240,165,0,.15);color:var(--amber,#f0a500);display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:700;border:1px solid rgba(240,165,0,.35)}
+.mtp-hint-foot{padding:8px 0 10px;border-top:1px dashed rgba(240,165,0,.18);margin-top:4px;font-size:11px;color:var(--text3);display:flex;align-items:center;gap:8px}
+.mtp-retry-dot{width:7px;height:7px;border-radius:50%;background:var(--amber,#f0a500);
+  animation:rt-mtp-retry 1.4s ease-in-out infinite}
+@keyframes rt-mtp-retry{0%,100%{transform:scale(.6);opacity:.4}50%{transform:scale(1.1);opacity:1}}
+.mtp-state-locked .mtp-scan-beam{
+  background:linear-gradient(180deg,rgba(255,200,100,0) 0%,rgba(255,190,90,.55) 40%,rgba(255,220,140,.95) 50%,rgba(255,190,90,.55) 60%,rgba(255,200,100,0) 100%);
+  animation-duration:3.2s}
+.mtp-state-locked .mtp-phone-lock{transform:scale(1);opacity:1}
+.mtp-state-locked .mtp-hint{max-height:260px;opacity:1;margin-top:6px;padding:12px 14px}
+.mtp-state-scanning .mtp-scan-beam{animation-duration:1.2s}
+.mtp-state-scanning .mtp-phone-dots{opacity:1}
+.mtp-state-error .mtp-logo-img{filter:grayscale(.6) brightness(.85)}
+.mtp-state-error .mtp-scan-beam{animation:none;opacity:0}
+@media (prefers-reduced-motion:reduce){
+  .mtp-scan-beam,.mtp-phone-dots span,.mtp-retry-dot{animation:none}
+}
+
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;width:100vw;height:100vh;
   background:rgba(8,4,4,.85);display:flex;align-items:center;justify-content:center;
   z-index:100;opacity:1;visibility:hidden;pointer-events:none}
@@ -837,7 +902,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
 #scrollTopBtn{position:absolute;bottom:20px;right:24px;width:44px;height:44px;border-radius:50%;background:var(--red);color:#fff;border:none;font-size:20px;font-weight:600;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.08);display:none;z-index:30;transition:transform .15s,background .15s;line-height:1}
 #scrollTopBtn.visible{display:flex;align-items:center;justify-content:center}
 #scrollTopBtn:hover{background:var(--red-light);transform:translateY(-2px)}
-.quick-filter-chips{display:flex;gap:4px;margin-left:auto}
+.quick-filter-chips{display:flex;gap:4px}
 .qf-chip{padding:3px 10px;border-radius:14px;font-size:11px;background:var(--card2);color:var(--text3);border:1px solid var(--border2);cursor:pointer;letter-spacing:-.5px;transition:all .12s;user-select:none;font-variant-numeric:tabular-nums}
 .qf-chip:hover{background:var(--card);color:var(--cream2);border-color:var(--border2)}
 .qf-chip.active{background:var(--red);color:#fff;border-color:var(--red-light);box-shadow:0 0 0 1px var(--red-light)}
@@ -1134,6 +1199,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
         <line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
     </button>
+    <span class="tb-spacer"></span>
     <span class="tb-count" id="photoCount">0 photos</span>
     <span id="dashFilterPill" style="display:none;margin-left:8px;padding:4px 10px;background:var(--red);color:var(--cream);border-radius:12px;font-size:11px;font-weight:600;cursor:pointer;align-items:center;gap:6px" title="Click to clear and return to Dashboard" onclick="clearDashFilter()"></span>
     <span id="clearFiltersPill" style="display:none;margin-left:8px;padding:4px 10px;background:var(--card2);color:var(--cream2);border:1px solid var(--border2);border-radius:12px;font-size:11px;font-weight:600;cursor:pointer;gap:6px;user-select:none;white-space:nowrap" title="Clear all active filters" onclick="clearAllFilters()">✕ Clear filters <span id="clearFiltersCount" style="opacity:.7;font-size:10px"></span></span>
@@ -1793,7 +1859,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <div class="modal-box" style="width:640px;max-width:92vw">
     <div class="modal-head">
       <h2 id="mtpTitle">📱 Import from Phone</h2>
-      <button class="btn-ghost" onclick="document.getElementById('mtpModal').classList.remove('open')">&times;</button>
+      <button class="btn-ghost" onclick="if(typeof _mtpStopRetry==='function')_mtpStopRetry();document.getElementById('mtpModal').classList.remove('open')">&times;</button>
     </div>
     <div class="modal-body">
       <!-- Phase A: device picker (when multiple MTP devices are connected) -->
@@ -1802,10 +1868,31 @@ select.tb-select:focus{border-color:var(--red-dark)}
         <div id="mtpDeviceList" style="display:flex;flex-direction:column;gap:8px"></div>
       </div>
 
-      <!-- Phase B: scanning state -->
-      <div id="mtpScanning" style="display:none;text-align:center;padding:28px 10px">
-        <div class="progress-track" style="margin-bottom:10px"><div class="progress-fill" id="mtpScanFill" style="width:30%"></div></div>
-        <div style="font-size:13px;color:var(--text2)" id="mtpScanLabel">Scanning device… iPhone may take a few seconds.</div>
+      <!-- Phase B: friendly waiting screen (v1.5.203/205/207). Logo +
+           animated scanline + lock badge that flips on when the device
+           is locked + hint card with unlock steps. JS toggles the
+           .mtp-state-* class to swap title/sub + lock badge visibility. -->
+      <div id="mtpScanning" class="mtp-scan mtp-state-connecting" style="display:none">
+        <div class="mtp-stage">
+          <div class="mtp-logo-wrap">
+            <img class="mtp-logo-img" src="logo.png" alt="RetinaTag" draggable="false" />
+            <div class="mtp-scan-beam" aria-hidden="true"></div>
+          </div>
+          <div class="mtp-phone-lock">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+              <rect x="5" y="11" width="14" height="10" rx="2" />
+              <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+            </svg>
+          </div>
+          <div class="mtp-phone-dots"><span></span><span></span><span></span></div>
+        </div>
+        <div class="mtp-scan-title" id="mtpStatusTitle">Looking for your iPhone…</div>
+        <div class="mtp-scan-sub" id="mtpStatusSub">Make sure the cable is connected.</div>
+        <div class="mtp-hint" id="mtpHint">
+          <div class="mtp-hint-step"><span class="mtp-step-num">1</span><span class="mtp-step-text">Unlock your iPhone</span></div>
+          <div class="mtp-hint-step"><span class="mtp-step-num">2</span><span class="mtp-step-text">Tap <b>"Trust This Computer"</b> if it appears</span></div>
+          <div class="mtp-hint-foot">Waiting automatically — no need to click anything. <span class="mtp-retry-dot"></span></div>
+        </div>
       </div>
 
       <!-- Phase C: confirm import -->
@@ -5432,20 +5519,76 @@ function openMtpModal() {
   $('mtpModal').classList.add('open');
 }
 
+// v1.5.203/205/207 — Friendly waiting screen state manager + auto-retry.
+// Replaces the old "show 'Could not connect…' text + Close button"
+// pattern with: visual scan animation, lock badge that flips in when
+// the device reports locked, hint card with unlock steps, and a
+// 2.5s auto-retry loop that resumes the moment the phone unlocks.
+function _mtpScanSetState(state, opts) {
+  const root = document.getElementById('mtpScanning');
+  if (!root) return;
+  root.classList.remove('mtp-state-connecting','mtp-state-locked','mtp-state-scanning','mtp-state-error');
+  root.classList.add('mtp-state-' + state);
+  const t = document.getElementById('mtpStatusTitle');
+  const s = document.getElementById('mtpStatusSub');
+  const presets = {
+    connecting: ['Looking for your iPhone…', 'Make sure the cable is connected.'],
+    locked:     ['Waiting for your iPhone…', 'I\'ll continue the moment it\'s unlocked.'],
+    scanning:   ['Reading your library…', 'On iPhone this can take 5-30s depending on photo count.'],
+    error:      ['Couldn\'t reach the iPhone', 'Try unplugging the cable and connecting again.'],
+  };
+  const [title, sub] = (opts && opts.title) ? [opts.title, opts.sub || ''] : presets[state] || presets.connecting;
+  if (t) t.textContent = title;
+  if (s) s.textContent = sub;
+}
+
+// Recognise the family of "phone is locked / not trusted" errors so
+// the retry loop kicks in instead of the user seeing raw openSession
+// text and a manual Close button. Matches strings on both iOS / WPD.
+function _mtpErrIsLocked(err) {
+  const m = String(err || '').toLowerCase();
+  return m.includes('please unlock') || m.includes('opensession failed') ||
+         m.includes('lockdown') || m.includes('not paired') ||
+         m.includes('trust this computer') || m.includes('passcode') ||
+         m.includes('user denied');
+}
+
+let _mtpRetryTimer = 0;
+function _mtpStopRetry() { if (_mtpRetryTimer) { clearTimeout(_mtpRetryTimer); _mtpRetryTimer = 0; } }
+
 async function pickMtpDevice(device) {
   _mtpState.activeDevice = device;
   $('mtpTitle').textContent = `📱 ${device.friendly_name || device.description || 'Phone'}`;
   $('mtpDevicePicker').style.display = 'none';
-  $('mtpScanning').style.display = 'block';
-  $('mtpScanLabel').textContent = 'Scanning device… on iPhone this can take 5-30s depending on photo count.';
+  $('mtpScanning').style.display = 'flex';
+  _mtpScanSetState('connecting');
+  _mtpStopRetry();
+  _attemptMtpConnect(device, false);
+}
 
+async function _attemptMtpConnect(device, isRetry) {
+  if (!isRetry) _mtpScanSetState('connecting');
   try {
     const media = await invoke('mtp_list_media', { deviceId: device.id });
     _mtpState.media = media;
-    showMtpConfirm();
+    _mtpStopRetry();
+    _mtpScanSetState('scanning');
+    // Tiny delay so the "Reading library" pulse is briefly visible
+    // even when the scan returns instantly.
+    setTimeout(() => { if ($('mtpScanning').style.display !== 'none') showMtpConfirm(); }, 280);
   } catch(e) {
-    $('mtpScanLabel').textContent = 'Could not connect to device: ' + e;
-    toast('MTP scan error: ' + e, 'error');
+    if (_mtpErrIsLocked(e)) {
+      _mtpScanSetState('locked');
+      _mtpStopRetry();
+      _mtpRetryTimer = setTimeout(() => {
+        _mtpRetryTimer = 0;
+        if ($('mtpScanning').style.display !== 'none') _attemptMtpConnect(device, true);
+      }, 2500);
+    } else {
+      _mtpScanSetState('error', { title: 'Couldn\'t reach the iPhone', sub: String(e).slice(0, 240) });
+      _mtpStopRetry();
+      if (!isRetry) toast('MTP error: ' + e, 'error');
+    }
   }
 }
 
@@ -5734,60 +5877,93 @@ $('btnMtpKeep').onclick = () => {
   toast('Photos kept on phone', 'info');
 };
 
-// v1.5.151 — Shared cleanup action so the manual button AND the
-// auto-prompt route through one code path. `skipConfirm` lets the
-// auto-prompt skip the second confirm (user already said yes once).
-async function doKeepFavoritesDeleteRest(skipConfirm){
+// v1.5.205 — Lock-aware delete runner. Native confirm() removed (Tauri
+// ACL was rejecting plugin:dialog|confirm). If the phone re-locks
+// mid-delete the friendly waiting screen pops back with a "Phone
+// re-locked" message and the same 2.5s retry loop the initial
+// connect uses — the delete finishes the moment the user unlocks
+// again, no manual click needed.
+async function _mtpRunDeleteWithRetry(action, kindLabel) {
   if (!_mtpState.activeDevice) return;
-  if (!skipConfirm) {
-    const ok = confirm(
-      'Photos marked as favorites (⭐) on your phone will be kept. '+
-      'The rest will be PERMANENTLY deleted from the phone. This cannot be undone.\n\n'+
-      'Continue?'
-    );
-    if (!ok) return;
-  }
-  try {
-    toast('Cleaning up phone…', 'info');
-    const r = await invoke('mtp_delete_non_favorites', { deviceId: _mtpState.activeDevice.id });
-    toast(`✅ ${r.deleted} deleted, ${r.kept_favorites} favorites kept`, 'success');
+  const summarise = (r) => {
+    if (kindLabel === 'keepFavs')
+      toast(`✅ ${r.deleted} deleted, ${r.kept_favorites} favorites kept on phone`, 'success');
+    else
+      toast(`✅ ${r.deleted} items deleted from phone`, 'success');
     $('mtpModal').classList.remove('open');
-  } catch(e) {
-    toast('Delete failed: ' + e, 'error');
-  }
+  };
+  const attempt = async (isRetry) => {
+    try {
+      const r = await action();
+      _mtpStopRetry();
+      $('mtpScanning').style.display = 'none';
+      summarise(r);
+    } catch(e) {
+      if (_mtpErrIsLocked(e)) {
+        // Phone re-locked between Phase E and the delete call —
+        // bounce back to the friendly waiting screen and keep
+        // trying until the user unlocks.
+        $('mtpCleanup').style.display = 'none';
+        $('mtpProgress').style.display = 'none';
+        $('mtpConfirm').style.display = 'none';
+        $('mtpScanning').style.display = 'flex';
+        _mtpScanSetState('locked', {
+          title: 'Phone re-locked',
+          sub: kindLabel === 'keepFavs'
+               ? 'Unlock to delete non-favorites — I\'ll resume automatically.'
+               : 'Unlock to finish deleting — I\'ll resume automatically.',
+        });
+        _mtpStopRetry();
+        _mtpRetryTimer = setTimeout(() => {
+          _mtpRetryTimer = 0;
+          if ($('mtpScanning').style.display !== 'none') attempt(true);
+        }, 2500);
+      } else {
+        _mtpStopRetry();
+        toast('Delete failed: ' + e, 'error');
+        if ($('mtpScanning').style.display !== 'none') {
+          _mtpScanSetState('error', { title: 'Delete failed', sub: String(e).slice(0, 240) });
+        }
+      }
+    }
+  };
+  toast('Cleaning up phone…', 'info');
+  attempt(false);
+}
+
+async function doKeepFavoritesDeleteRest(_skipConfirm) {
+  if (!_mtpState.activeDevice) return;
+  return _mtpRunDeleteWithRetry(
+    () => invoke('mtp_delete_non_favorites', { deviceId: _mtpState.activeDevice.id }),
+    'keepFavs'
+  );
 }
 
 $('btnMtpKeepFavs').onclick = () => {
   _mtpUserActedOnCleanup = true;
-  doKeepFavoritesDeleteRest(false);
+  doKeepFavoritesDeleteRest();
 };
 
-$('btnMtpWipe').onclick = async () => {
-  _mtpUserActedOnCleanup = true; // v1.5.151 — block auto-prompt
+$('btnMtpWipe').onclick = () => {
+  _mtpUserActedOnCleanup = true;
   if (!_mtpState.activeDevice || !_mtpState.media) return;
-  const ok = confirm(
-    `All ${_mtpState.media.photo_count + _mtpState.media.video_count} `+
-    `items on the phone will be PERMANENTLY deleted. This CANNOT be undone.\n\n`+
-    `Even your favorites will be deleted. Are you sure?`
+  const count = _mtpState.media.photo_count + _mtpState.media.video_count;
+  // v1.5.205 — toastAction instead of native confirm() (ACL-rejected
+  // on this Tauri build). User can still cancel by ignoring the toast.
+  toastAction(
+    `⚠ Permanently delete ALL ${count} items from the phone? This includes ⭐ favorites and CANNOT be undone.`,
+    'error', 'Wipe phone',
+    () => {
+      const ids = _mtpState.media.photos.map(p => p.id);
+      _mtpRunDeleteWithRetry(
+        () => invoke('mtp_delete', { deviceId: _mtpState.activeDevice.id, objectIds: ids }),
+        'wipe'
+      );
+    }
   );
-  if (!ok) return;
-  const ok2 = confirm('Final warning: ALL PHOTOS will be deleted. Proceed?');
-  if (!ok2) return;
-  try {
-    toast('Cleaning up phone…', 'info');
-    const ids = _mtpState.media.photos.map(p => p.id);
-    const r = await invoke('mtp_delete', {
-      deviceId: _mtpState.activeDevice.id,
-      objectIds: ids,
-    });
-    toast(`✅ ${r.deleted} items deleted from phone`, 'success');
-    $('mtpModal').classList.remove('open');
-  } catch(e) {
-    toast('Delete failed: ' + e, 'error');
-  }
 };
 
-$('btnMtpCancel').onclick = () => $('mtpModal').classList.remove('open');
+$('btnMtpCancel').onclick = () => { _mtpStopRetry(); $('mtpModal').classList.remove('open'); };
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -8463,7 +8639,7 @@ function _cuRenderDupes() {
         ? `<button class="btn-sm" onclick="event.stopPropagation(); _cuMakeKeeper(${gi}, ${p.id})" title="Make this the keeper for the group — overrides the auto-pick" style="position:absolute;top:4px;right:4px;z-index:2;font-size:9px;padding:2px 6px;background:rgba(240,165,0,.22);color:var(--amber);border:1px solid var(--amber);border-radius:4px;cursor:pointer">★ Make keeper</button>`
         : '';
       html += `<div class="${classes.join(' ')}" data-pid="${p.id}" data-path="${pathAttr}"
-            onclick="_cuToggleDup(${p.id}, ${gi})"
+            onclick="_cuToggleDup(event, ${p.id}, ${gi})"
             ondblclick="_cuDblClickOpen(event, ${p.id})"
             oncontextmenu="_cuRightClickReveal(event, this)"
             title="Double-click: open fullscreen · Right-click: show in Explorer"
@@ -8504,8 +8680,43 @@ function _cuRenderDupes() {
   _cuBindDupesDragSelect();
 }
 
-function _cuToggleDup(pid, gi) {
+function _cuToggleDup(ev, pid, gi) {
   if (_cuDragJustDone) return;   // mouseup after drag — don't also toggle the card
+  // v1.5.198 — Shift+click range. Walks every .cu-card on screen in
+  // DOM order and adds eligible ones to the selection; skips
+  // keepers AND protected photos (unless "🔓 Unlock Protected" is
+  // on), then tells the user how many were skipped so they know
+  // why their range looks shorter than they clicked.
+  if (ev && ev.shiftKey && _cuShiftAnchor.dup != null) {
+    const unlocked = $('cuUnlockProtected') && $('cuUnlockProtected').checked;
+    const cards = Array.from(document.querySelectorAll('.cu-card'));
+    const cardIds = cards.map(c => parseInt(c.dataset.pid || '0', 10));
+    const fromIdx = cardIds.indexOf(_cuShiftAnchor.dup);
+    const toIdx   = cardIds.indexOf(pid);
+    if (fromIdx >= 0 && toIdx >= 0) {
+      const a = Math.min(fromIdx, toIdx), b = Math.max(fromIdx, toIdx);
+      // Build a quick id→photo lookup across all groups so the skip
+      // checks are O(1) instead of N×M.
+      const lookup = new Map();
+      for (const g0 of _cuDupGroups) for (const p0 of g0.photos) lookup.set(p0.id, p0);
+      let added = 0, skippedKeeper = 0, skippedInvest = 0;
+      for (let i = a; i <= b; i++) {
+        const id = cardIds[i]; if (!id) continue;
+        const p = lookup.get(id); if (!p) continue;
+        if (p.is_keeper) { skippedKeeper++; continue; }
+        if (p.is_invested && !unlocked) { skippedInvest++; continue; }
+        _cuSelectedIds.add(id); added++;
+      }
+      _cuShiftAnchor.dup = pid;
+      _cuRenderDupes(); _cuRefreshActionBar();
+      const skipBits = [];
+      if (skippedKeeper) skipBits.push(`${skippedKeeper} keeper${skippedKeeper === 1 ? '' : 's'}`);
+      if (skippedInvest) skipBits.push(`${skippedInvest} 🔒 protected`);
+      if (skipBits.length) toast(`Selected ${added}, skipped ${skipBits.join(' + ')}`, 'info');
+      return;
+    }
+  }
+  _cuShiftAnchor.dup = pid;
   const g = _cuDupGroups[gi];
   const photo = g?.photos.find(p => p.id === pid);
   if (!photo) return;
@@ -8620,11 +8831,11 @@ function _cuRenderBlurry() {
       ? ' <span title="You have invested in this photo (tagged / assigned / in collection)" style="color:#9ac7ea">🔒</span>'
       : '';
     const pathAttr = (p.path || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-    html += `<div class="${classes.join(' ')}" data-path="${pathAttr}"
-          onclick="_cuToggleBlur(${p.id}, event)"
+    html += `<div class="${classes.join(' ')}" data-pid="${p.id}" data-path="${pathAttr}"
+          onclick="_cuToggleBlur(event, ${p.id})"
           ondblclick="_cuDblClickOpen(event, ${p.id})"
           oncontextmenu="_cuRightClickReveal(event, this)"
-          title="Double-click: open fullscreen · Right-click: show in Explorer">
+          title="Double-click: open fullscreen · Right-click: show in Explorer · Shift-click: range select">
       <div class="cu-blur-score" title="Laplacian variance (lower = blurrier)">🌫 ${Math.round(p.blur_score || 0)}</div>
       <img class="thumb" data-thumb-id="${p.id}" alt="">
       <div class="meta">
@@ -8777,36 +8988,32 @@ function _cuApplyDragSelection() {
   _cuRefreshActionBar();
 }
 
-// v1.5.195 — Shift+click range select for the blurry grid. Same
-// pattern as gallery / vault: plain click toggles a single card,
-// Ctrl/Cmd+click also toggles (kept for muscle memory consistency),
-// Shift+click selects every card between the last clicked anchor
-// and the new click. _cuBlurLastClickedId remembers the anchor.
-let _cuBlurLastClickedId = null;
-function _cuToggleBlur(pid, ev) {
-  if (_cuDragJustDone) return;   // mouseup after drag — don't also toggle the card
-  ev = ev || (typeof event !== 'undefined' ? event : null);
-  const shift = !!(ev && ev.shiftKey);
-  if (shift && _cuBlurLastClickedId != null && Array.isArray(_cuBlurPhotos)) {
-    const anchor = _cuBlurPhotos.findIndex(p => p.id === _cuBlurLastClickedId);
-    const here   = _cuBlurPhotos.findIndex(p => p.id === pid);
-    if (anchor >= 0 && here >= 0) {
-      const from = Math.min(anchor, here);
-      const to   = Math.max(anchor, here);
-      for (let i = from; i <= to; i++) {
-        const p = _cuBlurPhotos[i];
-        if (p) _cuSelectedIds.add(p.id);
-      }
-      _cuRenderBlurry();
-      _cuRefreshActionBar();
+// v1.5.198 — Per-tab Shift+click anchor. Blurry and Duplicates each
+// remember their own last-clicked id so cross-tab clicks don't
+// accidentally select a long range with the wrong anchor.
+let _cuShiftAnchor = { blur: null, dup: null };
+function _cuToggleBlur(ev, pid) {
+  if (_cuDragJustDone) return;
+  if (ev && ev.shiftKey && _cuShiftAnchor.blur != null) {
+    // DOM-order walk so the range matches what the user sees on
+    // screen (post-sort, post-filter), not the _cuBlurPhotos
+    // array order which is mutated by the threshold slider.
+    const cards = Array.from(document.querySelectorAll('.cu-blur-card'));
+    const ids = cards.map(c => parseInt(c.dataset.pid || '0', 10));
+    const fromIdx = ids.indexOf(_cuShiftAnchor.blur);
+    const toIdx   = ids.indexOf(pid);
+    if (fromIdx >= 0 && toIdx >= 0) {
+      const a = Math.min(fromIdx, toIdx), b = Math.max(fromIdx, toIdx);
+      for (let i = a; i <= b; i++) if (ids[i]) _cuSelectedIds.add(ids[i]);
+      _cuShiftAnchor.blur = pid;
+      _cuRenderBlurry(); _cuRefreshActionBar();
       return;
     }
   }
   if (_cuSelectedIds.has(pid)) _cuSelectedIds.delete(pid);
   else _cuSelectedIds.add(pid);
-  _cuBlurLastClickedId = pid;
-  _cuRenderBlurry();
-  _cuRefreshActionBar();
+  _cuShiftAnchor.blur = pid;
+  _cuRenderBlurry(); _cuRefreshActionBar();
 }
 
 // ── Duplicates drag-select (rubber-band) ───────────────────────────────────
@@ -16776,7 +16983,11 @@ function _captureBaseCount(){
   // Don't capture while we're showing the selection suffix — otherwise the
   // suffix becomes part of the base on the next render cycle.
   const txt = el.textContent || '';
-  if(/·\s*\d+\s*selected/.test(txt)) return;
+  // v1.5.202 — Accept both legacy "selected" and v1.5.201 short "sel".
+  // Pre-fix this only matched the long form, so the new "· 1 sel"
+  // suffix would slip through and become part of the base on the
+  // next loadPhotos — producing "· 1 sel · 1 sel · 1 sel…" stutter.
+  if(/·\s*\d+\s*sel(ected)?\b/.test(txt)) return;
   // Also don't capture when photoCount holds a Back-button shape (similar / on-this-day views)
   if(el.querySelector && el.querySelector('button')) return;
   _tbBaseCount = txt;
@@ -16788,7 +16999,9 @@ function _syncToolbarSelectionBadge(){
   _captureBaseCount();
   if(!_tbBaseCount) return;
   const n = selectedIds ? selectedIds.size : 0;
-  el.textContent = n > 0 ? `${_tbBaseCount} · ${n} selected` : _tbBaseCount;
+  // v1.5.201 — Short "sel" suffix to keep the toolbar on one line
+  // when there's a long base count + multi-selection.
+  el.textContent = n > 0 ? `${_tbBaseCount} · ${n} sel` : _tbBaseCount;
 }
 // v1.4.28 — Breakdown tooltip on the photoCount label. Computes from the
 // currently loaded `photos` array so it reflects any active filters.
