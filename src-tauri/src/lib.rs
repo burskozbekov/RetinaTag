@@ -1009,6 +1009,7 @@ pub fn run() {
             commands::list_vault_folders,
             commands::vault_decrypt_folder_to_explorer,
             commands::vault_relock_folder,
+            commands::vault_unlock_folder,
             commands::vault_migrate_to_store,
             commands::vault_verify_integrity,
             commands::get_private_thumbnail,

@@ -11393,6 +11393,156 @@ pub async fn vault_decrypt_folder_to_explorer(
     result
 }
 
+/// v1.5.194 — Permanently unlock a folder from the vault: decrypt every
+/// photo back to its original_path, delete the .rtenc, clear the
+/// private flag, and drop the (now-empty) vault_folders row. After
+/// this returns, the folder exists ONLY in Explorer at its original
+/// location, exactly as it was before being dragged into the vault.
+///
+/// Distinct from v1.5.162's reveal/re-lock pair: those produce a
+/// *temporary* plaintext mirror while the .rtenc stays in the store.
+/// Users found that confusing — "If I'm unlocking why is the
+/// encrypted copy still here?". This verb is what the card hover
+/// button actually exposes from v1.5.194 onward.
+#[tauri::command]
+pub async fn vault_unlock_folder(
+    folder_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let kek: [u8; 32] = {
+        let g = state.vault_kek.lock().map_err(|_| "kek lock")?;
+        match *g {
+            Some(k) => k,
+            None => return Err("Vault is locked — unlock it first.".into()),
+        }
+    };
+    let db_arc = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = db_arc.lock().map_err(|_| "db lock")?;
+
+        // BFS the descendant tree so a folder-with-subfolders unlock
+        // walks every child too.
+        let mut all_folder_ids: Vec<i64> = vec![folder_id];
+        let mut frontier: Vec<i64> = vec![folder_id];
+        while let Some(pid) = frontier.pop() {
+            let kids: Vec<i64> = (|| -> Result<Vec<i64>, String> {
+                let mut stmt = conn.prepare("SELECT id FROM vault_folders WHERE parent_id = ?1")
+                    .map_err(|e| e.to_string())?;
+                let it = stmt.query_map(rusqlite::params![pid], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?;
+                Ok(it.filter_map(|r| r.ok()).collect())
+            })().unwrap_or_default();
+            for k in kids { all_folder_ids.push(k); frontier.push(k); }
+        }
+
+        let mut moved = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+
+        // For each photo: decrypt to original_path, commit DB row
+        // (path=original, private=0, vault_folder_id=NULL), then
+        // delete the .rtenc. Same atomicity contract as v1.5.154.
+        for fid in &all_folder_ids {
+            let rows: Vec<(i64, String, Option<String>)> = (|| -> Result<Vec<_>, String> {
+                let mut stmt = conn.prepare(
+                    "SELECT id, path, original_path FROM photos
+                      WHERE vault_folder_id = ?1 AND private = 1"
+                ).map_err(|e| e.to_string())?;
+                let it = stmt.query_map(rusqlite::params![fid], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+                }).map_err(|e| e.to_string())?;
+                Ok(it.filter_map(|r| r.ok()).collect())
+            })().unwrap_or_default();
+
+            for (pid, enc_path, orig_path_opt) in rows {
+                let enc_pb = std::path::PathBuf::from(&enc_path);
+                let dest_pb = match orig_path_opt
+                    .clone()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| crate::vault_files::original_path_for(&enc_pb))
+                {
+                    Some(p) => p,
+                    None => {
+                        errors.push(format!("can't derive plaintext path for photo {}", pid));
+                        continue;
+                    }
+                };
+                // Make sure target dir exists (folder was removed when
+                // it went into the vault — recreate now).
+                if let Some(parent) = dest_pb.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        errors.push(format!("mkdir {}: {}", parent.display(), e));
+                        continue;
+                    }
+                }
+                // Skip if a plaintext already exists at the destination
+                // (user might have a leftover from a previous reveal —
+                // don't trample whatever's there).
+                if dest_pb.exists() {
+                    errors.push(format!("destination already exists, skipped: {}", dest_pb.display()));
+                    continue;
+                }
+                if let Err(e) = crate::vault_files::decrypt_to_file(&enc_pb, &dest_pb, &kek) {
+                    errors.push(format!("decrypt photo {}: {}", pid, e));
+                    continue;
+                }
+                let dest_str = dest_pb.to_string_lossy().to_string();
+                let upd = conn.execute(
+                    "UPDATE photos SET path = ?1, private = 0, vault_folder_id = NULL,
+                                       private_thumb_enc = NULL
+                     WHERE id = ?2",
+                    rusqlite::params![&dest_str, pid],
+                );
+                if let Err(e) = upd {
+                    // DB failed AFTER plaintext landed. Best we can do
+                    // is wipe the plaintext so the next run sees a
+                    // consistent state, and report. .rtenc is still
+                    // the source of truth.
+                    let _ = crate::vault_files::remove_file_with_fallback(&dest_pb);
+                    errors.push(format!("UPDATE photo {}: {}", pid, e));
+                    continue;
+                }
+                // Plaintext is in place and DB committed — safe to drop
+                // the encrypted blob now.
+                if let Err(e) = crate::vault_files::remove_file_with_fallback(&enc_pb) {
+                    errors.push(format!("remove rtenc for photo {}: {}", pid, e));
+                    // Not fatal: photo is fully restored, just an
+                    // orphan .rtenc lingers. vault_verify_integrity
+                    // will flag it.
+                }
+                moved += 1;
+            }
+        }
+
+        // Sweep the (now-empty) vault_folders rows. ON DELETE SET NULL
+        // on photos.vault_folder_id already covers any photo we
+        // missed; deleting deepest-first keeps parent_id refs valid.
+        let mut sorted_ids: Vec<i64> = all_folder_ids.iter().copied().collect();
+        sorted_ids.sort_by_key(|&id| {
+            // crude depth proxy: count ancestors. We don't have a
+            // cached depth, so just delete in reverse-original order
+            // (frontier walk pushed children after their parent), and
+            // FK ON DELETE CASCADE handles the rest if order's wrong.
+            -(all_folder_ids.iter().position(|&x| x == id).unwrap_or(0) as i64)
+        });
+        let mut removed_folders = 0usize;
+        for fid in sorted_ids {
+            match conn.execute("DELETE FROM vault_folders WHERE id = ?1", rusqlite::params![fid]) {
+                Ok(n) if n > 0 => { removed_folders += 1; }
+                Ok(_) => {}
+                Err(e) => errors.push(format!("DELETE folder {}: {}", fid, e)),
+            }
+        }
+
+        Ok(serde_json::json!({
+            "moved":           moved,
+            "removed_folders": removed_folders,
+            "errors":          errors,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// v1.5.162 — Folder-vault step 5/5 (re-seal half).
 ///
 /// Reverse of `vault_decrypt_folder_to_explorer`. Walks the same folder
