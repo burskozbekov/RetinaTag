@@ -2038,9 +2038,20 @@ select.tb-select:focus{border-color:var(--red-dark)}
         </div>
       </div>
       <div id="vaultContent" style="display:none">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <span id="vaultCount" style="font-size:13px;color:var(--text2)">0 private photos</span>
+        <!-- v1.5.185 — Top banner mirrors Mac's gallery-vault banner shape:
+             icon + count on the left, action buttons on the right with the
+             primary "Lock Vault" emphasised (golden). Auto-lock dropdown
+             demoted under it as a secondary control. -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding:10px 12px;background:linear-gradient(135deg,#2a2418 0%,#1a1612 100%);border:1px solid rgba(212,175,55,.22);border-radius:8px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:18px">🔒</span>
+            <div style="display:flex;flex-direction:column">
+              <span style="font-size:13px;color:var(--cream);font-weight:600">Private Vault</span>
+              <span id="vaultCount" style="font-size:11px;color:var(--text3)">0 private photos</span>
+            </div>
+          </div>
           <div style="display:flex;gap:6px;align-items:center">
+            <button class="btn-sm btn-secondary" onclick="_vaultUnhideAllVisible()" title="Unlock every photo currently visible (respects active filter + folder)">↩ Unlock visible</button>
             <button class="btn-sm btn-secondary" onclick="vaultEnterFullscreen()" title="Full-screen vault view">⛶</button>
             <label style="font-size:11px;color:var(--text3);display:flex;align-items:center;gap:4px" title="Auto-lock the vault after this many minutes of inactivity">
               <span>Auto-lock:</span>
@@ -2053,7 +2064,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
                 <option value="30">30 min</option>
               </select>
             </label>
-            <button class="btn-sm btn-secondary" onclick="vaultLock()">Lock</button>
+            <button onclick="vaultLock()" title="Lock the vault — clears the in-memory key and hides everything" style="padding:5px 12px;border-radius:6px;background:rgba(212,175,55,.85);color:#1a1612;font-size:11.5px;font-weight:700;border:none;cursor:pointer;letter-spacing:.2px">🔓 Lock Vault</button>
           </div>
         </div>
         <input id="vaultSearchInput" type="text" placeholder="🔍 Search vault by filename or tag..." oninput="_vaultFilter()" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;color:var(--cream);font-size:12px;margin-bottom:8px" />
@@ -14383,6 +14394,45 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 });
+
+// v1.5.185 — Unlock every photo currently rendered in the grid
+// (respects the active folder drill, search, filter chip, sort). Same
+// loop as _vaultBulkUnhide but pulls IDs from the DOM instead of the
+// selection set. Asks for typed confirmation when the count is large
+// so a stray click doesn't dump 1000 photos out of the vault.
+async function _vaultUnhideAllVisible(){
+  const cards = document.querySelectorAll('#vaultPhotos .photo-card[data-id]');
+  const ids = [];
+  cards.forEach(c => {
+    const id = parseInt(c.dataset.id, 10);
+    if (Number.isInteger(id)) ids.push(id);
+  });
+  if (ids.length === 0) {
+    toast('Nothing to unlock — no photos visible', 'warn');
+    return;
+  }
+  _vaultBumpActivity();
+  // For >20 photos require typed confirmation. A misclick on a large
+  // vault should not silently dump everything.
+  let confirmed = false;
+  if (ids.length > 20) {
+    const typed = prompt(`Unlock ${ids.length} photos from the vault?\n\nThis decrypts every visible photo back to its original location.\n\nType the count (${ids.length}) to confirm:`);
+    if (typed === null) return;
+    confirmed = (typed.trim() === String(ids.length));
+    if (!confirmed) { toast('Cancelled — typed count did not match', 'info'); return; }
+  } else {
+    confirmed = confirm(`Unlock ${ids.length} photo${ids.length === 1 ? '' : 's'} from the vault?\n\nThe encrypted files will be decrypted back to their original locations.`);
+  }
+  if (!confirmed) return;
+  let ok = 0, errs = 0;
+  for (const id of ids) {
+    try { await invoke('toggle_photo_private', { photoId: id }); ok++; }
+    catch(_) { errs++; }
+  }
+  toast(`Unlocked ${ok}${errs ? `, ${errs} error${errs === 1 ? '' : 's'}` : ''}`);
+  _vaultClearSelection();
+  vaultRefresh();
+}
 
 async function _vaultBulkUnhide(){
   if (_vaultSelectedIds.size === 0) return;
