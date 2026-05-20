@@ -14552,6 +14552,99 @@ async function vaultRefresh() {
 }
 // v1.5.161 — drill into a folder. Re-renders the grid scoped to that
 // folder (and surfaces its direct child folders as cards). null = top.
+// v1.5.193 — Mouse XButton1 (back) and XButton2 (forward) are wired to
+// context-aware navigation so users get the same "go back / go forward"
+// muscle memory they have everywhere else (browsers, Explorer, file
+// dialogs). Priorities from most-specific to most-generic:
+//
+//   Lightbox open:
+//     back     → close lightbox        forward  → next photo
+//   Vault lightbox open:
+//     back     → close vault lightbox  forward  → next vault photo
+//   Vault modal, drilled into folder:
+//     back     → up one folder         forward  → no-op (no history)
+//   Vault modal, top level:
+//     back     → close + restore tab   forward  → no-op
+//   Any other .modal-overlay.open:
+//     back     → close topmost         forward  → no-op
+//   Nothing open:
+//     both     → no-op
+//
+// preventDefault on mousedown stops Windows from sending Alt+Left /
+// Alt+Right to WebView2 which would also trigger native history nav
+// inside the page. We don't want both firing.
+function _appMouseBack() {
+  // Gallery lightbox
+  const lb = document.getElementById('lightbox');
+  if (lb && getComputedStyle(lb).display !== 'none') {
+    if (typeof closeLightbox === 'function') closeLightbox();
+    return;
+  }
+  // Vault lightbox
+  const vlb = document.getElementById('vaultLightbox');
+  if (vlb && getComputedStyle(vlb).display === 'flex') {
+    if (typeof vaultLbClose === 'function') vaultLbClose();
+    return;
+  }
+  // Vault modal — drilled in vs top level
+  const vm = document.getElementById('vaultModal');
+  if (vm && vm.classList.contains('open')) {
+    if (_vaultCurrentFolderId !== null) {
+      const cur = (_vaultFoldersCache || []).find(f => f.id === _vaultCurrentFolderId);
+      const parent = cur && cur.parent_id != null ? cur.parent_id : null;
+      _vaultEnterFolder(parent);
+      return;
+    }
+    if (typeof _vaultCloseAndRestoreTab === 'function') _vaultCloseAndRestoreTab();
+    else vm.classList.remove('open');
+    return;
+  }
+  // Any other open modal — close the topmost one
+  const openModals = document.querySelectorAll('.modal-overlay.open');
+  if (openModals.length > 0) {
+    openModals[openModals.length - 1].classList.remove('open');
+    return;
+  }
+}
+function _appMouseForward() {
+  // Lightbox → next photo
+  const lb = document.getElementById('lightbox');
+  if (lb && getComputedStyle(lb).display !== 'none') {
+    if (typeof lbNav === 'function') lbNav(1);
+    return;
+  }
+  // Vault lightbox → next photo
+  const vlb = document.getElementById('vaultLightbox');
+  if (vlb && getComputedStyle(vlb).display === 'flex') {
+    if (typeof vaultLbNav === 'function') vaultLbNav(1);
+    return;
+  }
+  // Vault folder drill / other modals: no-op (no forward history stack)
+}
+window.addEventListener('mousedown', (e) => {
+  // e.button: 0=left, 1=middle, 2=right, 3=XButton1 (back), 4=XButton2 (fwd)
+  if (e.button === 3) {
+    e.preventDefault();
+    e.stopPropagation();
+    _appMouseBack();
+  } else if (e.button === 4) {
+    e.preventDefault();
+    e.stopPropagation();
+    _appMouseForward();
+  }
+});
+// Some hardware fires 'mouseup' for the XButtons without a matching
+// mousedown getting to the page (timing race in WebView2's input
+// pipeline). Catch both so the press registers regardless.
+window.addEventListener('mouseup', (e) => {
+  if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); }
+});
+// 'auxclick' is the modern event for non-primary mouse buttons. Block
+// its default in case Tauri's WebView routes navigation through it.
+window.addEventListener('auxclick', (e) => {
+  if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); }
+});
+
 function _vaultEnterFolder(folderId){
   _vaultCurrentFolderId = folderId;
   _vaultRender(_vaultPhotosCache);
