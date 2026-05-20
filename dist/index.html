@@ -1951,7 +1951,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <div class="modal-box" style="width:460px">
     <div class="modal-head">
       <h2>&#128274; Private Vault</h2>
-      <button class="btn-ghost" onclick="document.getElementById('vaultModal').classList.remove('open')">&#10005;</button>
+      <button class="btn-ghost" onclick="_vaultCloseAndRestoreTab()">&#10005;</button>
     </div>
     <div class="modal-body">
       <div id="vaultSetupBox" style="display:none">
@@ -13627,6 +13627,21 @@ async function openVault() {
   if(mnemonic) mnemonic.style.display = 'none';
   if(recovery) recovery.style.display = 'none';
 
+  // v1.5.183 — Promote the Vault tab to .active so the orange pill
+  // moves over to it while the modal is open. Pre-1.5.183 the Vault
+  // tab's onclick="openVault()" bypassed the generic .view-tab click
+  // handler that does the class swap, so the Gallery pill stayed
+  // highlighted no matter which tab the user clicked. Remember which
+  // tab WAS active so closeVault can restore it.
+  try {
+    const tabs = document.querySelectorAll('.view-tab');
+    const prev = document.querySelector('.view-tab.active');
+    if (prev && prev.dataset && prev.dataset.view !== 'vault') {
+      window._vaultPrevTab = prev.dataset.view || 'gallery';
+    }
+    tabs.forEach(t => t.classList.toggle('active', t.dataset && t.dataset.view === 'vault'));
+  } catch(_) {}
+
   try {
     const hasPin = await invoke('vault_has_pin');
     if (!hasPin) {
@@ -13860,6 +13875,21 @@ async function vaultTryUnlock() {
   } catch(e) { err.textContent = 'Error: '+e; }
 }
 
+// v1.5.183 — Restore the previously-active view tab when the vault
+// modal closes (either via Lock or the × button). Without this the
+// Vault pill stays orange even after the modal is gone — confusing
+// because the actual content area is back on Gallery / Timeline /
+// whatever the user came from.
+function _vaultCloseAndRestoreTab() {
+  document.getElementById('vaultModal').classList.remove('open');
+  try {
+    const prev = window._vaultPrevTab || 'gallery';
+    document.querySelectorAll('.view-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset && t.dataset.view === prev);
+    });
+  } catch(_) {}
+}
+
 function vaultLock() {
   _vaultUnlocked = false;
   _vaultStopIdleTimer();
@@ -13892,6 +13922,14 @@ function vaultLock() {
   _vaultLastClickedIdx = -1;
   _vaultUpdateSelectionBar();
   document.getElementById('vaultModal').classList.remove('open');
+  // v1.5.183 — Restore previously-active view tab so the orange pill
+  // moves back off the Vault entry when the user locks.
+  try {
+    const prev = window._vaultPrevTab || 'gallery';
+    document.querySelectorAll('.view-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset && t.dataset.view === prev);
+    });
+  } catch(_) {}
   toast('Vault locked');
 }
 
