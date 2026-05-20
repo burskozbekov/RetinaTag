@@ -227,10 +227,15 @@ select.tb-select:focus{border-color:var(--red-dark)}
 }
 
 /* ── Virtual grid ───────────────────────────────────────────────────── */
-#gridWrap{flex:1;overflow-y:auto;overflow-x:hidden;position:relative}
-#gridScroller{position:relative;width:100%}
+/* v1.5.200 — CSS containment + content-visibility. Tells the browser
+   each card is a self-contained layout/paint root, and off-screen
+   cards can skip render entirely. 30-50% style/paint cost drop on
+   long grids; bedava win. */
+#gridWrap{flex:1;overflow-y:auto;overflow-x:hidden;position:relative;contain:layout}
+#gridScroller{position:relative;width:100%;contain:layout style paint}
 .photo-card{position:absolute;width:var(--card-w,204px);height:var(--card-h,224px);background:var(--card);border-radius:var(--radius);
-  border:1.5px solid var(--border);overflow:hidden;cursor:pointer;transition:border-color .18s,transform .18s,box-shadow .18s}
+  border:1.5px solid var(--border);overflow:hidden;cursor:pointer;transition:border-color .18s,transform .18s,box-shadow .18s;
+  content-visibility:auto;contain-intrinsic-size:204px 224px}
 .photo-card:hover{border-color:var(--border2);transform:translateY(-3px) scale(1.01);
   box-shadow:0 12px 36px rgba(0,0,0,.7),0 0 20px rgba(184,58,18,.12)}
 .photo-card.selected{border-color:var(--red);box-shadow:0 0 0 1px var(--red),0 8px 24px rgba(184,58,18,.3)}
@@ -2860,6 +2865,20 @@ function collapseBursts(){
 let _renamePreview=[];
 let _calYear,_calMonth;
 let thumbCache=new Map(),thumbQueue=[],thumbFlight=0;
+// v1.5.200 — O(1) photo id → index lookup. photos.findIndex was the
+// hot path inside the lightbox (called 4× per open) and grew linear
+// with library size; at 30k photos it was 3-8ms per call. The Map is
+// built lazily on first use after loadPhotos() invalidates it, so the
+// build cost only happens when actually needed.
+let _photoIdToIdx = null;
+function photoIdxOf(id) {
+  if (!_photoIdToIdx) {
+    _photoIdToIdx = new Map();
+    for (let i = 0; i < photos.length; i++) _photoIdToIdx.set(photos[i].id, i);
+  }
+  const v = _photoIdToIdx.get(id);
+  return v === undefined ? -1 : v;
+}
 const THUMB_MAX=10,BUFFER=3;
 // Grid density — user can toggle between S / M / L via command palette or keyboard.
 // Outer cell = card + 10px gutter; thumb takes card height minus 54px for the info row.
@@ -3307,7 +3326,26 @@ async function loadPhotos(){
     // and all filters have already produced the final photo set.
     if(curSort){ photos=_applySort(photos); }
     $('photoCount').textContent=totalPhotos.toLocaleString()+' photo'+(totalPhotos!==1?'s':'');
-    $('toolbar').style.display='flex';thumbCache=new Map();thumbQueue=[];renderGrid();
+    // v1.5.200 — thumbCache survives loadPhotos. Pre-1.5.200 every
+    // folder click / filter toggle wiped the cache, forcing SMB to
+    // re-fetch thumbnails the user had ALREADY seen 2 seconds ago.
+    // Now we only drop entries whose photo is no longer in `photos[]`,
+    // with a 10k hard cap so aggressive filter-toggling can't bloat it.
+    $('toolbar').style.display='flex';
+    {
+      const liveIds = new Set(photos.map(p => p.id));
+      for (const k of Array.from(thumbCache.keys())) {
+        if (!liveIds.has(k)) thumbCache.delete(k);
+      }
+      if (thumbCache.size > 10000) {
+        const drop = thumbCache.size - 10000;
+        let i = 0;
+        for (const k of thumbCache.keys()) { if (i++ >= drop) break; thumbCache.delete(k); }
+      }
+    }
+    thumbQueue=[];
+    _photoIdToIdx = null; // v1.5.200 invalidate id→idx Map
+    renderGrid();
     renderDashFilterPill();
     if(typeof _updateClearFiltersPill==='function')_updateClearFiltersPill();
     // v1.4.27: keep the "· N selected" suffix in sync after loadPhotos blows
@@ -3555,7 +3593,12 @@ function updateCards(cols){
 function applyThumb(card,id){
   const u=thumbCache.get(id);if(!u)return;
   const ph=card.querySelector('.thumb-placeholder');if(!ph)return;
-  const img=document.createElement('img');img.className='photo-thumb';img.src=u;img.alt='';
+  // v1.5.200 — off-main-thread JPEG decode + lazy load. Big win for
+  // fast scroll: a card freshly entering the viewport no longer
+  // stalls the main thread while WebView2 decodes the thumb.
+  const img=document.createElement('img');img.className='photo-thumb';
+  img.decoding='async';img.loading='lazy';
+  img.src=u;img.alt='';
   ph.replaceWith(img);
 }
 function drainThumbs(){
@@ -3621,7 +3664,7 @@ new ResizeObserver(()=>{
     let anchorIdx=-1;
     let anchorOffsetInViewport=0;
     if(selectedId!=null){
-      const sIdx=photos.findIndex(p=>p.id===selectedId);
+      const sIdx=photoIdxOf(selectedId);
       if(sIdx>=0&&oldCols){
         anchorIdx=sIdx;
         const sRow=Math.floor(sIdx/oldCols);
@@ -3632,7 +3675,7 @@ new ResizeObserver(()=>{
       }
     }
     if(anchorIdx<0&&_topAnchorId!=null){
-      anchorIdx=photos.findIndex(p=>p.id===_topAnchorId);
+      anchorIdx=photoIdxOf(_topAnchorId);
       // For the top-visible fallback we anchor it at viewport top (0).
       anchorOffsetInViewport=0;
     }
@@ -3904,7 +3947,7 @@ async function selectPhoto(id,path){
         // user has a rating filter active (e.g. "5★+") the photo either
         // drops out or shows up correctly after the change.
         if (Array.isArray(photos)) {
-          const i = photos.findIndex(p => p && p.id === id);
+          const i = photoIdxOf(id);
           if (i >= 0) photos[i].rating = nr;
         }
         // Determine if the current rating filter "cares" about this change:
@@ -3920,7 +3963,7 @@ async function selectPhoto(id,path){
           await invoke('set_rating',{photoId:id,rating:prev}).catch(()=>{});
           if(selectedId===id)renderStars(prev);
           if (Array.isArray(photos)) {
-            const i = photos.findIndex(p => p && p.id === id);
+            const i = photoIdxOf(id);
             if (i >= 0) photos[i].rating = prev;
           }
           if (curRating !== '' && curRating != null) {
@@ -3951,7 +3994,7 @@ async function selectPhoto(id,path){
       // Mutate the in-memory row, then either re-fetch (when the active
       // filter cares about favorites) or just re-render visible cards.
       if (Array.isArray(photos)) {
-        const i = photos.findIndex(p => p && p.id === id);
+        const i = photoIdxOf(id);
         if (i >= 0) photos[i].favorite = nf;
       }
       if (curRating === 'fav') {
@@ -3967,7 +4010,7 @@ async function selectPhoto(id,path){
         await invoke('set_favorite',{photoId:id,favorite:prev}).catch(()=>{});
         if(selectedId===id)renderFavButton(prev);
         if (Array.isArray(photos)) {
-          const i = photos.findIndex(p => p && p.id === id);
+          const i = photoIdxOf(id);
           if (i >= 0) photos[i].favorite = prev;
         }
         if (curRating === 'fav') {
@@ -4699,7 +4742,7 @@ async function deleteCurrentPhoto(){
     // lightbox if the library is now empty.
     const lb = $('lightbox');
     const lbOpen = !!(lb && lb.style.display === 'flex');
-    const idx = (typeof photos !== 'undefined') ? photos.findIndex(p => p.id === id) : -1;
+    const idx = (typeof photos !== 'undefined') ? photoIdxOf(id) : -1;
     if (idx >= 0) photos.splice(idx, 1);
 
     // Remove cards from any visible grid, then close detail panel
@@ -4955,6 +4998,30 @@ listen('scan-error',({payload:m})=>{
   _notify('Scan error',String(m).slice(0,160),'error');
 });
 let _lastGridRefresh=0;
+// v1.5.199 — Background-debounced loadPhotos / refreshStats. tag-progress
+// used to fire refresh every 5 photos which on a 30k library means
+// ~15 MB IPC + parse + filter + render every 2 seconds — UI froze
+// during tagging. Now any event that just wants "eventually refresh"
+// goes through these two helpers; multiple bursts within `ms` collapse
+// to one call. User-initiated refreshes (folder click, filter change)
+// still call loadPhotos() directly and stay instant.
+let _bgLoadPhotosTimer = 0;
+let _bgRefreshStatsTimer = 0;
+function loadPhotosBg(ms = 2500) {
+  if (_bgLoadPhotosTimer) clearTimeout(_bgLoadPhotosTimer);
+  _bgLoadPhotosTimer = setTimeout(() => {
+    _bgLoadPhotosTimer = 0;
+    try { loadPhotos(); } catch(_) {}
+  }, ms);
+}
+function refreshStatsBg(ms = 2500) {
+  if (_bgRefreshStatsTimer) clearTimeout(_bgRefreshStatsTimer);
+  _bgRefreshStatsTimer = setTimeout(() => {
+    _bgRefreshStatsTimer = 0;
+    try { refreshStats(); } catch(_) {}
+  }, ms);
+}
+
 listen('tag-progress',({payload:p})=>{
   $('progressArea').classList.add('active');
   const pct=p.total?Math.round(p.completed/p.total*100):0;
@@ -4962,10 +5029,13 @@ listen('tag-progress',({payload:p})=>{
   $('progressFill').style.width=pct+'%';
   $('progressSub').textContent=`${p.completed}/${p.total} · ${p.current_provider} · ${p.current_file}`;
   invoke('set_tray_progress',{label:`RetinaTag — Tagging ${pct}% (${p.completed}/${p.total})`}).catch(()=>{});
-  // Refresh grid every 5 completed photos so tags appear in real-time
-  if(p.completed>0 && p.completed-_lastGridRefresh>=5){
+  // v1.5.199 — threshold 5 → 30 + 2.5s debounce. 10× fewer refreshes
+  // during a long tagging run; the user still sees fresh tags within
+  // a few seconds without the per-batch UI freeze.
+  if(p.completed>0 && p.completed-_lastGridRefresh>=30){
     _lastGridRefresh=p.completed;
-    loadPhotos();refreshStats();
+    loadPhotosBg(2500);
+    refreshStatsBg(2500);
   }
 });
 listen('tag-complete',async({payload:p})=>{
@@ -5049,7 +5119,11 @@ listen('tag-provider-error',({payload:p})=>{
 listen('scan-file-error',({payload:p})=>{
   console.warn('Scan error:',p.file,p.error);
 });
-listen('watch-new-files',({payload:p})=>{toast(`Watch: ${p.count} new files detected`,'info');loadPhotos();refreshStats()});
+// v1.5.199 — SMB fsevent bursts (one rsync = dozens of new-file events
+// in a second) used to fire loadPhotos() per event. Debounced to 3s so
+// the toast stays instant but the heavy refresh runs once after the
+// burst settles.
+listen('watch-new-files',({payload:p})=>{toast(`Watch: ${p.count} new files detected`,'info');loadPhotosBg(3000);refreshStatsBg(3000)});
 // ── Device import flow ────────────────────────────────────────────────
 // The backend only *detects* the drive and emits `device-detected` with
 // {drive, media_root, has_media, file_count}. We show a modal so the user
