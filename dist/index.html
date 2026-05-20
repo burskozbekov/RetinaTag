@@ -2911,6 +2911,39 @@ applyGridDensity();
 const $=id=>document.getElementById(id);
 const gridWrap=$('gridWrap'),gridScroll=$('gridScroller');
 let leafletMap=null,mapMarkers=[],_leafletCluster=null,globeInstance=null;
+// v1.5.201 — Active map-region filter. Set by Map view cluster click;
+// loadPhotos applies it as a final pass, narrowing the grid to just
+// the photos under the clicked region. Null = no filter.
+let _mapRegionFilter = null;
+function _selectMapRegion(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return;
+  _mapRegionFilter = new Set(ids);
+  // Switch to Gallery tab. The same generic .view-tab click handler
+  // that swaps DOM visibility + curView state also drives this — go
+  // through it instead of replicating the swap logic.
+  const tab = document.querySelector('.view-tab[data-view="gallery"]');
+  if (tab && typeof tab.click === 'function') tab.click();
+  // loadPhotos pulls a fresh list; its post-pass intersects with
+  // _mapRegionFilter so the grid lands exactly on the chosen region.
+  try { loadPhotos(); } catch(_) {}
+  // Visual confirmation — clearable pill in the toolbar.
+  try {
+    const pill = document.getElementById('clearFiltersPill');
+    if (pill) {
+      pill.style.display = 'inline-flex';
+      const cnt = document.getElementById('clearFiltersCount');
+      if (cnt) cnt.textContent = `· ${ids.length} on map`;
+    }
+  } catch(_) {}
+  toast(`📍 Showing ${ids.length} photos from this map region`, 'info');
+}
+function _clearMapRegion() {
+  if (_mapRegionFilter == null) return;
+  _mapRegionFilter = null;
+  const cnt = document.getElementById('clearFiltersCount');
+  if (cnt) cnt.textContent = '';
+  try { loadPhotos(); } catch(_) {}
+}
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 function toast(msg,type='info'){
@@ -3326,6 +3359,13 @@ async function loadPhotos(){
     // and all filters have already produced the final photo set.
     if(curSort){ photos=_applySort(photos); }
     $('photoCount').textContent=totalPhotos.toLocaleString()+' photo'+(totalPhotos!==1?'s':'');
+    // v1.5.201 — Map-region filter applied AFTER the regular query so
+    // it composes with folder/search/rating/etc. instead of replacing
+    // them. Empty intersection is fine; renderGrid's empty-state will
+    // surface it.
+    if (_mapRegionFilter && _mapRegionFilter.size > 0) {
+      photos = photos.filter(p => _mapRegionFilter.has(p.id));
+    }
     // v1.5.200 — thumbCache survives loadPhotos. Pre-1.5.200 every
     // folder click / filter toggle wiped the cache, forcing SMB to
     // re-fetch thumbnails the user had ALREADY seen 2 seconds ago.
@@ -7319,15 +7359,31 @@ function _mapRenderMarkers(){
         const marker=L.circleMarker([p.lat,p.lng],{
           radius:p.isAi?4:6,color:p.color,fillColor:p.color,fillOpacity:.85,weight:1
         }).bindPopup(`<b>${p.filename}</b><br>${p.hint}`);
+        // v1.5.201 — Stash the photo id on the marker so cluster-click
+        // can harvest every member's id and filter the gallery to
+        // exactly that region.
+        marker._photoId = p.id;
         marker.on('click',()=>selectPhoto(p.id,''));
         _leafletCluster.addLayer(marker);
       }
+      // v1.5.201 — Override the default cluster-click (zoom-in only).
+      // Now: collect every child marker's photo id and jump to gallery
+      // filtered to that set. The zoom-in still happens via the
+      // markercluster plugin's own dblclick handler.
+      _leafletCluster.on('clusterclick', (a) => {
+        try {
+          const markers = a.layer.getAllChildMarkers();
+          const ids = markers.map(m => m && m._photoId).filter(Number.isInteger);
+          if (ids.length > 0) _selectMapRegion(ids);
+        } catch(_) {}
+      });
       leafletMap.addLayer(_leafletCluster);
     } else {
       for(const p of points){
         const marker=L.circleMarker([p.lat,p.lng],{
           radius:p.isAi?4:6,color:p.color,fillColor:p.color,fillOpacity:.85,weight:1
         }).bindPopup(`<b>${p.filename}</b><br>${p.hint}`);
+        marker._photoId = p.id;
         marker.on('click',()=>selectPhoto(p.id,''));
         marker.addTo(leafletMap);
         mapMarkers.push(marker);
@@ -9322,6 +9378,11 @@ function clearAllFilters(){
   // Also clear any syncable UI state the dash helper doesn't touch
   if(typeof _syncQuickFilterChips==='function')_syncQuickFilterChips();
   const x=$('searchClearX'); if(x) x.style.display='none';
+  // v1.5.201 — also drop any active map-region filter so "Clear filters"
+  // actually clears everything visible.
+  _mapRegionFilter = null;
+  const mcnt = document.getElementById('clearFiltersCount');
+  if (mcnt) mcnt.textContent = '';
   // Repaint
   if(typeof loadPhotos==='function')loadPhotos();
   if(typeof refreshFolders==='function')refreshFolders();
