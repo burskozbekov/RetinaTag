@@ -4749,7 +4749,13 @@ function _renderRecentTags(){
   const row=$('recentTagsRow'), box=$('recentTagsChips');
   if(!row||!box) return;
   const list=_getRecentTags();
-  if(!list.length){ row.style.display='none'; return; }
+  // v1.5.224 — Hide the row until there are at least 3 recent tags.
+  // A single chip under a section label / dashed border just adds
+  // visual weight without much value (the just-typed tag is already
+  // visible in the tag cloud above). The "Recently added" header
+  // only earns its keep when the user has a real short-list to
+  // quick-pick from.
+  if(list.length < 3){ row.style.display='none'; return; }
   row.style.display='';
   box.innerHTML='';
   for(const t of list){
