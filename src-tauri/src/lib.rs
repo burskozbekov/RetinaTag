@@ -521,6 +521,57 @@ pub fn run() {
                 *g = Some(std::path::PathBuf::from(p));
             }
 
+            // v1.5.225 — DB snapshot bridge. If the user has configured a
+            // bridge_root (Settings → Tools → "Cross-machine sync"), drop a
+            // fresh copy of retina.db onto the share immediately so Mac can
+            // pull it on next launch, then keep it fresh every 30 min in a
+            // background tokio task. SMB writes block; we wrap them in
+            // spawn_blocking so the periodic loop doesn't stall the runtime.
+            {
+                let bridge_root_str: Option<String> = {
+                    let conn = db_handle_for_init.lock().unwrap_or_else(|e| e.into_inner());
+                    db::get_setting(&conn, "bridge_root").ok().flatten()
+                };
+                if let Some(root_str) = bridge_root_str {
+                    let app_handle_for_bridge = app.handle().clone();
+                    let live_db = db_path.clone();
+                    let bridge_root = std::path::PathBuf::from(&root_str);
+                    // One-shot snapshot now so the share is fresh before
+                    // anything else runs.
+                    let live_db_now = live_db.clone();
+                    let bridge_root_now = bridge_root.clone();
+                    std::thread::spawn(move || {
+                        match commands::snapshot_db_to_bridge(&live_db_now, &bridge_root_now) {
+                            Ok(b) => eprintln!("[bridge] startup snapshot ok ({} bytes)", b),
+                            Err(e) => eprintln!("[bridge] startup snapshot failed: {e}"),
+                        }
+                    });
+                    // Periodic 30-minute refresh while the app runs.
+                    let _ = app_handle_for_bridge; // reserved for future event emission
+                    tauri::async_runtime::spawn(async move {
+                        let mut interval = tokio::time::interval(
+                            std::time::Duration::from_secs(30 * 60),
+                        );
+                        // The first tick fires immediately — skip it since
+                        // we already did a one-shot above.
+                        interval.tick().await;
+                        loop {
+                            interval.tick().await;
+                            let live = live_db.clone();
+                            let dst  = bridge_root.clone();
+                            let res = tokio::task::spawn_blocking(move || {
+                                commands::snapshot_db_to_bridge(&live, &dst)
+                            }).await;
+                            match res {
+                                Ok(Ok(b))  => eprintln!("[bridge] periodic snapshot ok ({} bytes)", b),
+                                Ok(Err(e)) => eprintln!("[bridge] periodic snapshot failed: {e}"),
+                                Err(e)     => eprintln!("[bridge] periodic snapshot panic: {e}"),
+                            }
+                        }
+                    });
+                }
+            }
+
             // v1.5.176 — Background migration kicked off at startup. Moves
             // legacy .rtenc blobs out of the user's original folders into
             // the central vault-store dir and rebuilds vault_folders rows
@@ -1014,6 +1065,10 @@ pub fn run() {
             commands::shared_vault_unhide,
             commands::shared_vault_get_bytes_b64,
             commands::shared_vault_probe,
+            // v1.5.225 — DB-snapshot bridge for Mac↔PC sync
+            commands::bridge_get_root,
+            commands::bridge_set_root,
+            commands::bridge_snapshot_now,
             commands::import_from_device,
             // 19. Rating & Favorites
             commands::set_rating,

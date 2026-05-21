@@ -2565,6 +2565,15 @@ select.tb-select:focus{border-color:var(--red-dark)}
                 <button class="btn btn-secondary btn-xs" id="btnRebucketUnknown" style="white-space:nowrap">📅 Fix Unknown Imports</button>
                 <span style="font-size:11px;color:var(--text3)">Re-bucket photos stranded in <b>Unknown/Unknown/</b> using each file's EXIF capture date.</span>
               </div>
+              <div style="display:flex;align-items:flex-start;gap:10px;flex-direction:column;margin-top:6px;padding-top:8px;border-top:1px dashed var(--border)">
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">
+                  <button class="btn btn-secondary btn-xs" id="btnBridgePickRoot" style="white-space:nowrap">🌉 Cross-machine sync…</button>
+                  <span style="font-size:11px;color:var(--text3)" id="bridgeStatusLabel">Not configured</span>
+                  <button class="btn btn-secondary btn-xs" id="btnBridgeSnapshotNow" style="white-space:nowrap;display:none">⤓ Snapshot now</button>
+                  <button class="btn-ghost" id="btnBridgeDisable" style="font-size:11px;color:var(--text3);display:none">disable</button>
+                </div>
+                <span style="font-size:11px;color:var(--text3)">Drops a read-only copy of <code>retina.db</code> at <code>&lt;library&gt;\.retinatag-state\retina-pc.db</code> on startup + every 30 min so a Mac running the same library can merge tags/dates/favorites/descriptions from it. SQLite over SMB isn't safe with two writers — this is the snapshot-only alternative.</span>
+              </div>
               <div style="display:flex;align-items:center;gap:10px;margin-top:6px;padding-top:8px;border-top:1px dashed var(--border)">
                 <button class="btn btn-danger btn-xs" id="btnClearAllTags" style="white-space:nowrap">🗑 Clear All Tags</button>
                 <span style="font-size:11px;color:var(--amber)">⚠ DANGEROUS — permanently removes every tag (AI + manual). Cannot be undone.</span>
@@ -11187,6 +11196,86 @@ document.addEventListener('click', (e) => {
   });
   obs.observe(modal, { attributes: true, attributeFilter: ['class'] });
 })();
+
+// v1.5.225 — Cross-machine bridge: drop a snapshot of retina.db at
+// <library>\.retinatag-state\retina-pc.db so the Mac side can merge.
+// Backend handles startup + every-30-min refresh automatically once
+// a root is configured; this UI lets the user pick / clear / force.
+async function _refreshBridgeUI(){
+  try{
+    const root = await invoke('bridge_get_root');
+    const lbl = $('bridgeStatusLabel');
+    const snap = $('btnBridgeSnapshotNow');
+    const dis  = $('btnBridgeDisable');
+    if(root){
+      lbl.innerHTML = `Active → <code>${_esc(root)}\\.retinatag-state\\retina-pc.db</code>`;
+      lbl.style.color = 'var(--green, #6ba)';
+      if(snap) snap.style.display = '';
+      if(dis)  dis.style.display  = '';
+    } else {
+      lbl.textContent = 'Not configured';
+      lbl.style.color = 'var(--text3)';
+      if(snap) snap.style.display = 'none';
+      if(dis)  dis.style.display  = 'none';
+    }
+  } catch(e){ /* non-fatal: keep default label */ }
+}
+_refreshBridgeUI();
+
+$('btnBridgePickRoot').onclick = async () => {
+  let pick = null;
+  try {
+    const sel = await window.__TAURI__.dialog.open({
+      directory: true, multiple: false,
+      title: 'Pick the shared library root (the folder Mac sees too)',
+    });
+    if (!sel) return;
+    pick = Array.isArray(sel) ? sel[0] : sel;
+  } catch(e) {
+    toast('Folder picker failed: ' + e, 'error');
+    return;
+  }
+  const btn = $('btnBridgePickRoot');
+  const orig = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '⤓ Snapshotting…';
+  try {
+    const r = await invoke('bridge_set_root', { path: pick });
+    if (r && r.enabled) {
+      const kb = Math.round((r.bytes||0)/1024);
+      toast(`✅ Bridge active · ${kb.toLocaleString()} KB written → ${r.path}`, 'success');
+    }
+    await _refreshBridgeUI();
+  } catch(e) {
+    toast('Bridge setup failed: ' + e, 'error');
+  } finally {
+    btn.disabled = false; btn.innerHTML = orig;
+  }
+};
+
+$('btnBridgeSnapshotNow').onclick = async () => {
+  const btn = $('btnBridgeSnapshotNow');
+  const orig = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '⤓ Working…';
+  try {
+    const r = await invoke('bridge_snapshot_now');
+    const kb = Math.round((r.bytes||0)/1024);
+    toast(`✅ Snapshot refreshed · ${kb.toLocaleString()} KB`, 'success');
+  } catch(e) {
+    toast('Snapshot failed: ' + e, 'error');
+  } finally {
+    btn.disabled = false; btn.innerHTML = orig;
+  }
+};
+
+$('btnBridgeDisable').onclick = async () => {
+  try {
+    await invoke('bridge_set_root', { path: '' });
+    toast('Bridge disabled. Existing snapshot file left in place.', 'info');
+    await _refreshBridgeUI();
+  } catch(e) {
+    toast('Disable failed: ' + e, 'error');
+  }
+};
 
 // ── Extract dominant colors + search ──────────────────────────────────────
 // extract_colors_batch processes photos where dominant_colors IS NULL in a

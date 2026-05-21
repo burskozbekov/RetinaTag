@@ -3965,6 +3965,153 @@ fn parse_year_month(s: &str) -> Option<(i32, u32)> {
 // have been English across the rest of the app for a while; the MTP
 // folder layout was the last Turkish holdout.
 
+// ─── 4a. Cross-machine DB snapshot bridge ───────────────────────────────────
+//
+// v1.5.225 — Keeps a read-only copy of the PC's retina.db at a
+// well-known path on the shared library volume so the Mac side can
+// merge tags / ratings / favorites / descriptions from it. SQLite
+// over SMB with two concurrent writers corrupts; this is the
+// alternative: PC writes live to its AppData copy, periodically
+// snapshots to the share, Mac reads (never writes) the snapshot.
+//
+// Triggered:
+//   • Once at app startup if `bridge_root` setting is populated.
+//   • Every 30 min while the app is running (tokio interval).
+//   • Manually via the `bridge_snapshot_now` command (Settings UI).
+//
+// Path convention: `<bridge_root>/.retinatag-state/retina-pc.db`.
+// The `.retinatag-state` dir is hidden with `attrib +h` on Windows
+// (macOS already hides dot-prefixed paths).
+
+/// Returns the absolute path of the snapshot file given the bridge
+/// root directory. Caller is responsible for ensuring the parent
+/// dir exists.
+fn bridge_snapshot_path(bridge_root: &std::path::Path) -> std::path::PathBuf {
+    bridge_root.join(".retinatag-state").join("retina-pc.db")
+}
+
+/// Copies `src_db` to `<bridge_root>/.retinatag-state/retina-pc.db`,
+/// creating the parent directory (hidden on Windows) if it doesn't
+/// exist. Returns the byte count.
+pub fn snapshot_db_to_bridge(
+    src_db: &std::path::Path,
+    bridge_root: &std::path::Path,
+) -> Result<u64, String> {
+    let parent = bridge_root.join(".retinatag-state");
+    if !parent.exists() {
+        std::fs::create_dir_all(&parent)
+            .map_err(|e| format!("create_dir {:?}: {}", parent, e))?;
+        // Hide the dir on Windows. macOS hides dot-prefixed names
+        // by default in Finder, no equivalent step needed there.
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use std::ffi::OsStr;
+            // Best-effort: failures to hide are non-fatal.
+            let _ = std::process::Command::new("attrib")
+                .arg("+h")
+                .arg(&parent)
+                .status();
+            let _ = OsStr::new("").encode_wide(); // suppress unused-import warn on non-win
+        }
+    }
+    let dst = bridge_snapshot_path(bridge_root);
+    let bytes = std::fs::copy(src_db, &dst)
+        .map_err(|e| format!("copy {:?} -> {:?}: {}", src_db, dst, e))?;
+    Ok(bytes)
+}
+
+/// Fetch the configured bridge root from app_settings. None = bridge
+/// disabled.
+#[tauri::command]
+pub async fn bridge_get_root(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    db::get_setting(&conn, "bridge_root").map_err(|e| e.to_string())
+}
+
+/// Persist a new bridge root and fire an immediate snapshot so the
+/// share is populated right away (the user wouldn't expect to wait
+/// 30 minutes to see anything land).
+#[tauri::command]
+pub async fn bridge_set_root(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let trimmed = path.trim().to_string();
+    {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        if trimmed.is_empty() {
+            // Empty string = disable. Don't store empty; delete row instead.
+            let _ = conn.execute("DELETE FROM app_settings WHERE key = ?1", ["bridge_root"]);
+            return Ok(serde_json::json!({ "enabled": false }));
+        }
+        db::set_setting(&conn, "bridge_root", &trimmed).map_err(|e| e.to_string())?;
+    }
+    // Resolve the DB file path the same way `setup` does — Roaming
+    // first, fall back to LocalAppData if that's where the DB lives.
+    let db_path = resolve_db_path_for_snapshot(&app)?;
+    let bridge_root = std::path::PathBuf::from(&trimmed);
+    let bytes = tokio::task::spawn_blocking(move || {
+        snapshot_db_to_bridge(&db_path, &bridge_root)
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))??;
+    Ok(serde_json::json!({
+        "enabled": true,
+        "bytes": bytes,
+        "path": bridge_snapshot_path(std::path::Path::new(&trimmed)).to_string_lossy().to_string(),
+    }))
+}
+
+/// Manual "snapshot now" trigger for the Settings UI. Uses whatever
+/// bridge_root is configured; returns an error if none is set.
+#[tauri::command]
+pub async fn bridge_snapshot_now(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let root_str: Option<String> = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        db::get_setting(&conn, "bridge_root").map_err(|e| e.to_string())?
+    };
+    let root_str = root_str.ok_or_else(|| "bridge_root not configured".to_string())?;
+    let db_path = resolve_db_path_for_snapshot(&app)?;
+    let bridge_root = std::path::PathBuf::from(&root_str);
+    let bytes = tokio::task::spawn_blocking(move || {
+        snapshot_db_to_bridge(&db_path, &bridge_root)
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))??;
+    Ok(serde_json::json!({
+        "bytes": bytes,
+        "path": bridge_snapshot_path(std::path::Path::new(&root_str)).to_string_lossy().to_string(),
+    }))
+}
+
+/// Resolves the LIVE retina.db path the same way `lib.rs` does at
+/// startup (Roaming preferred, LocalAppData fallback). Pulled out
+/// so both the manual command and the periodic snapshot task can
+/// reuse it.
+pub fn resolve_db_path_for_snapshot(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let roaming = app.path().app_config_dir().ok();
+    let local   = app.path().app_data_dir().ok();
+    let candidates: Vec<std::path::PathBuf> = roaming
+        .into_iter()
+        .chain(local.into_iter())
+        .map(|d| d.join("retina.db"))
+        .collect();
+    for c in candidates {
+        if c.exists() {
+            return Ok(c);
+        }
+    }
+    Err("retina.db not found in app data dirs".to_string())
+}
+
 // ─── 4b. Rescue stranded "Unknown/Unknown/" imports ─────────────────────────
 
 /// v1.5.221 — Walk every `Unknown/Unknown/` subtree under `root`,
