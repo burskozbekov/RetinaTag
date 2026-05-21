@@ -815,7 +815,9 @@ select.tb-select:focus{border-color:var(--red-dark)}
 .tl-card img{width:100%;height:100%;object-fit:cover}
 .tl-card:hover{box-shadow:0 0 0 2px var(--red)}
 .tl-card.multi-selected{border-color:var(--blue);box-shadow:0 0 0 2px var(--blue),0 4px 16px rgba(90,127,168,.3)}
-.tl-card.multi-selected::after{content:'\2713';position:absolute;top:4px;right:4px;width:22px;height:22px;background:var(--blue);border-radius:50%;color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;z-index:5}
+/* v1.5.219 — Blue border + box-shadow already say "selected" loud and
+   clear; the corner ✓ chip was double-signalling and crowding the
+   thumbnail. Removed. */
 #timelinePhotos.drag-selecting{user-select:none;cursor:crosshair}
 #timelinePhotos.drag-selecting .tl-card{pointer-events:none}
 /* ── Aperture Dials ─────────────────────────────────────────────────── */
@@ -920,7 +922,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
 
 /* ── Multi-select ────────────────────────────────────────────────── */
 .photo-card.multi-selected{border-color:var(--blue)!important;box-shadow:0 0 0 2px var(--blue),0 4px 16px rgba(90,127,168,.3)!important}
-.photo-card.multi-selected::after{content:'\2713';position:absolute;top:4px;right:4px;width:22px;height:22px;background:var(--blue);border-radius:50%;color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;z-index:5}
+/* v1.5.219 — See tl-card note above; the same ✓ chip lived here too. */
 /* While a drag-select is in progress, disable pointer events on cards so the
    drag isn't interrupted by hover/click handlers, and hide the text selection
    caret everywhere in the scroller. Applied to both the outer wrap and the
@@ -4026,9 +4028,24 @@ function _renderDateTakenCell(photoId, current){
   };
 }
 
+// v1.5.219 — Cache the currently-marked single-selected card so we
+// don't have to scan every .photo-card in the DOM on each click. On a
+// dense gallery with the virtual recycler running ~200 cards live,
+// the previous querySelectorAll-then-forEach pattern was a measurable
+// per-click cost (especially during fast keyboard nav with j/k).
+let _prevSingleSelectedCard = null;
 async function selectPhoto(id,path){
   selectedId=id;selectedPath=path||'';
-  document.querySelectorAll('.photo-card').forEach(c=>c.classList.toggle('selected',+c.dataset.id===id));
+  // Targeted toggle: drop the previous card's class, then mark the new
+  // one. Cards entering the DOM via the virtual recycler still pick up
+  // the 'selected' class because renderGrid checks selectedId at
+  // creation time (line ~3696).
+  if(_prevSingleSelectedCard && +_prevSingleSelectedCard.dataset.id !== id){
+    _prevSingleSelectedCard.classList.remove('selected');
+  }
+  const newCard = document.querySelector(`.photo-card[data-id="${id}"]`);
+  if(newCard) newCard.classList.add('selected');
+  _prevSingleSelectedCard = newCard;
   $('detailPanel').classList.add('open');
   // Remove previous star row if present
   const oldStarRow=$('starRow');if(oldStarRow)oldStarRow.remove();
@@ -8023,6 +8040,11 @@ async function _loadTimelinePhotos(){
   try{
     const groups=await invoke('get_photos_timeline',{offset:0,limit:1000,folder:curFolder||null,yearMonth:ym});
     if(myToken !== _tlLoadToken) return; // newer load supersedes us
+    // v1.5.219 — Flat per-month list so the lightbox can scope its
+    // ←/→ navigation to "this month only". Storing in module scope
+    // (vs recomputing from the DOM on every double-click) keeps the
+    // open path snappy and avoids re-parsing data-id attrs.
+    window._tlFlatPhotos = groups.flatMap(g => g.photos || []);
     photosEl.innerHTML='';
     if(!groups||!groups.length){
       photosEl.innerHTML=`<div class="timeline-empty"><b>Empty</b>No photos for ${MONTHS_EN[_tlMonth-1]} ${_tlYear}.</div>`;
@@ -8078,7 +8100,16 @@ async function _loadTimelinePhotos(){
           updateSelectionUI();
           selectPhoto(p.id,p.path);
         };
-        card.ondblclick=e=>{e.preventDefault();openLightbox(p.id)};
+        card.ondblclick=e=>{
+          e.preventDefault();
+          // v1.5.219 — Scope lightbox nav to the current Timeline
+          // month so prev/next stays inside this set and the counter
+          // reads "5 / 50 · March 2019" instead of "5 / 64,428".
+          window._lbContextPhotos = window._tlFlatPhotos || null;
+          window._lbContextLabel  = (typeof MONTHS_EN!=='undefined' && _tlMonth)
+            ? (MONTHS_EN[_tlMonth-1]+' '+_tlYear) : null;
+          openLightbox(p.id);
+        };
         // v1.5.29 — Same native drag-out wiring as main-grid .photo-card.
         // Without it, timeline cards dragged to WhatsApp sent the 256px
         // thumbnail instead of the original.
@@ -13747,6 +13778,27 @@ listen('face-recognized', () => {
 // ── Lightbox ─────────────────────────────────────────────────────────
 let _lbCurrentId = null;
 
+// v1.5.219 — Lightbox context.
+// Timeline/Calendar paginate independently from the gallery: the global
+// `photos` array holds whatever the library grid is showing, which is
+// usually NOT the same set the user is browsing in those views. When
+// they open a photo from Timeline March 2019 or from a Calendar day,
+// the lightbox counter used to read "1 / 64,428" against the full
+// library and ←/→ navigation would jump to unrelated photos.
+// Solution: a view can set `_lbContextPhotos` (and an optional
+// `_lbContextLabel` for the header) right before calling
+// openLightbox(). All lightbox machinery (counter, progress bar,
+// lbNav) reads through `_lbList()`, which prefers the context list
+// when present and falls back to the global gallery otherwise.
+// closeLightbox() clears the context so the next gallery open
+// restores library-wide navigation.
+window._lbContextPhotos = null;
+window._lbContextLabel = null;
+function _lbList(){
+  return (window._lbContextPhotos && window._lbContextPhotos.length)
+    ? window._lbContextPhotos : photos;
+}
+
 async function openLightbox(photoId) {
   const id = photoId || selectedId;
   if (!id) { toast('No photo selected','error'); return; }
@@ -13764,17 +13816,27 @@ async function openLightbox(photoId) {
   if(typeof _lbRestoreInfoPanel==='function') _lbRestoreInfoPanel();
   _lbZoom = 1; _lbPanX = 0; _lbPanY = 0;
   _lbApplyTransform();
-  const idx = photos.findIndex(p => p.id === id);
+  const _list = _lbList();
+  const idx = _list.findIndex(p => p.id === id);
   // v1.4.80 — counter is now a vertical stack of text + mini progress bar.
   // Write to the inner text node; fall back to the wrapper if the child is
   // missing (shouldn't happen but keeps old devtools/CSP overrides safe).
   const counterText = document.getElementById('lbCounterText');
-  const counterStr = idx >= 0 ? (idx+1) + ' / ' + photos.length : '';
+  // v1.5.219 — counter formats vary by context:
+  //   gallery (no context):     "5 / 1,243"
+  //   Timeline March 2019:      "5 / 50 · March 2019"
+  //   Calendar day 2024-03-14:  "5 / 12 · 14 Mar 2024"
+  // The label comes from the view that set the context; if no label was
+  // supplied we just show numbers like before.
+  let counterStr = idx >= 0 ? (idx+1) + ' / ' + _list.length : '';
+  if(counterStr && window._lbContextLabel){
+    counterStr += ' · ' + window._lbContextLabel;
+  }
   if(counterText) counterText.textContent = counterStr;
   else counter.textContent = counterStr;
   const progFill = document.getElementById('lbProgressFill');
   if(progFill){
-    const pct = (idx>=0 && photos.length>0) ? ((idx+1)/photos.length)*100 : 0;
+    const pct = (idx>=0 && _list.length>0) ? ((idx+1)/_list.length)*100 : 0;
     progFill.style.width = pct + '%';
   }
   // Filename caption: "IMG_1234.jpg" in a pill at top-center. Dimensions and
@@ -13782,7 +13844,7 @@ async function openLightbox(photoId) {
   // available (non-blocking; the filename is painted immediately).
   try{
     const capEl=document.getElementById('lbCaption');
-    const p=photos[idx];
+    const p=_list[idx];
     if(capEl){
       const fn=(p?.filename)||(p?.path||'').split(/[\\/]/).pop()||'';
       capEl.textContent=fn;
@@ -13804,8 +13866,8 @@ async function openLightbox(photoId) {
     }
   }catch(_){}
 
-  // Find photo metadata
-  const photo = photos.find(p => p.id === id);
+  // Find photo metadata (Timeline/Calendar context-aware, see _lbList).
+  const photo = _list.find(p => p.id === id) || photos.find(p => p.id === id);
   const isVideo = photo && photo.media_type === 'video';
 
   // Video player element (created once, reused across openings).
@@ -15931,6 +15993,12 @@ setTimeout(()=>{ _setIdleTrayTooltip(); }, 2500);
 
 function closeLightbox() {
   document.getElementById('lightbox').style.display = 'none';
+  // v1.5.219 — Drop the per-view context so the next open from the
+  // gallery (or any view that doesn't set one) navigates the full
+  // library again. Without this, opening from Calendar then returning
+  // to Gallery and pressing → would still be stuck on that one day.
+  window._lbContextPhotos = null;
+  window._lbContextLabel = null;
   // Hide info overlay so it doesn't linger for the next open
   const ip = document.getElementById('lbInfoPanel');
   if (ip) ip.style.display = 'none';
@@ -16852,32 +16920,36 @@ async function lbNav(dir) {
   // next photo. The overlay itself is refreshed in openLightbox once the
   // new image loads, so we don't need to clear it here.
   if (typeof _lbFaceNameCancel === 'function') _lbFaceNameCancel();
-  if (!photos.length) return;
-  const idx = photos.findIndex(p => p.id === (_lbCurrentId || selectedId));
+  // v1.5.219 — Read against context list when one is set (Timeline /
+  // Calendar / future scoped views). Falls back to global gallery
+  // when no context is in play.
+  const _navList = _lbList();
+  if (!_navList.length) return;
+  const idx = _navList.findIndex(p => p.id === (_lbCurrentId || selectedId));
   // v1.4.73 — Slideshow-aware wrap-around. When the timer is driving us we
   // loop back to the start (standard slideshow behaviour) so a long unattended
   // playback doesn't silently stall on the last photo. Manual arrow-key nav
   // still clamps at the edges: users expect "no more photos that way" to be
   // a hard stop, not a sudden jump across the library.
   let next = idx + dir;
-  if (next < 0 || next >= photos.length) {
+  if (next < 0 || next >= _navList.length) {
     if (_slideshowActive) {
-      next = (next + photos.length) % photos.length;
+      next = (next + _navList.length) % _navList.length;
     } else if (Math.abs(dir) > 1) {
       // v1.4.92 — Big-step nav (Shift+arrow, ±10). Clamp to edge rather than
       // silently no-op: the user's intent is "as far as possible this way",
       // so overshooting the library bounds should still deliver them to
       // photo[0] or photo[length-1]. Regular ±1 nav keeps its hard stop so
       // single arrow key at the edge remains a clear "can't go further" cue.
-      if(next >= photos.length) next = photos.length - 1;
+      if(next >= _navList.length) next = _navList.length - 1;
       else next = 0;
       if (next === idx) return; // already at the target edge
     } else {
       return;
     }
   }
-  selectPhoto(photos[next].id, photos[next].path);
-  await openLightbox(photos[next].id);
+  selectPhoto(_navList[next].id, _navList[next].path);
+  await openLightbox(_navList[next].id);
   // Refresh info overlay (if open) to reflect the newly loaded photo
   const ip=document.getElementById('lbInfoPanel');
   if(ip&&ip.style.display==='block'&&typeof _lbRenderInfo==='function')_lbRenderInfo();
@@ -17041,13 +17113,29 @@ function _batchStatsText(){
   }
   return parts.join(' · ');
 }
+// v1.5.219 — Diff-driven multi-select repaint.
+// Before: every selection change scanned every card in the DOM
+// (gallery + timeline) and toggled the class. On rapid Ctrl-click in
+// a dense gallery this was 200+ class toggles per click, most of them
+// no-ops. After: we keep _prevSelectedIds and only touch the cards
+// whose membership actually changed. Cards entering the DOM via the
+// virtual recycler still get 'multi-selected' applied at creation
+// time (renderGrid/_loadTimelinePhotos check the set), so we don't
+// regress that side.
+let _prevSelectedIds = new Set();
 function updateSelectionUI(){
-  // Main gallery cards + timeline cards share the same selectedIds set, so
-  // multi-selection (and the floating batch bar) works across views.
-  document.querySelectorAll('.photo-card,#timelinePhotos .tl-card').forEach(c=>{
-    const id=parseInt(c.dataset.id);
-    c.classList.toggle('multi-selected',selectedIds.has(id));
-  });
+  const added = [], removed = [];
+  for(const id of selectedIds) if(!_prevSelectedIds.has(id)) added.push(id);
+  for(const id of _prevSelectedIds) if(!selectedIds.has(id)) removed.push(id);
+  for(const id of added){
+    const c = document.querySelector(`.photo-card[data-id="${id}"],#timelinePhotos .tl-card[data-id="${id}"]`);
+    if(c) c.classList.add('multi-selected');
+  }
+  for(const id of removed){
+    const c = document.querySelector(`.photo-card[data-id="${id}"],#timelinePhotos .tl-card[data-id="${id}"]`);
+    if(c) c.classList.remove('multi-selected');
+  }
+  _prevSelectedIds = new Set(selectedIds);
   const bar=$('batchBar');
   if(selectedIds.size>1){
     bar.style.display='flex';
@@ -18744,20 +18832,49 @@ async function _calLoadThumbnails() {
   }
 }
 
-async function filterByDate(dateStr) {
-  switchToView('gallery');
-  // Load all photos and filter by date client-side
-  $('searchInput').value = '';
-  curSearch = '';
+// v1.5.219 — Calendar day-click handler.
+// Before: filterByDate() ALWAYS bounced to Gallery view, dumped that
+// day's photos into the main grid, and the user lost their position
+// in the calendar. To get back to the calendar they had to click the
+// tab again and re-navigate to the right month.
+// After: by default we stay in Calendar — fetch the day's photos,
+// stash them as the lightbox context (so prev/next and the counter
+// stay scoped to that day), and open the first one in the lightbox.
+// Esc / × returns to the calendar with no view switch. A second
+// argument forces the old behaviour for the rare callsite that
+// genuinely wants to switch to Gallery (none today, but cheap to
+// keep around).
+async function filterByDate(dateStr, opts) {
+  const switchView = opts && opts.switchToGallery;
   try {
     const resp = await invoke('get_photos', {offset:0, limit:100000, folder:curFolder||null, tagFilter:null, statusFilter:null});
-    photos = resp.photos.filter(p => {
-      const d = p.date_taken || '';
-      return d.startsWith(dateStr);
-    });
-    totalPhotos = photos.length;
-    $('photoCount').innerHTML = '<button class="btn-sm" onclick="loadPhotos()" style="color:var(--red)">&larr; Back</button> ' + totalPhotos + ' photos on ' + dateStr;
-    thumbCache = new Map(); thumbQueue = []; renderGrid();
+    const dayPhotos = (resp.photos || []).filter(p => (p.date_taken || '').startsWith(dateStr));
+    if(!dayPhotos.length){ toast('No photos on ' + dateStr, 'info'); return; }
+    if(switchView){
+      switchToView('gallery');
+      $('searchInput').value = '';
+      curSearch = '';
+      photos = dayPhotos;
+      totalPhotos = photos.length;
+      $('photoCount').innerHTML = '<button class="btn-sm" onclick="loadPhotos()" style="color:var(--red)">&larr; Back</button> ' + totalPhotos + ' photos on ' + dateStr;
+      thumbCache = new Map(); thumbQueue = []; renderGrid();
+      return;
+    }
+    // Stay in Calendar. Open the lightbox with this day's photos as
+    // the navigation context so ←/→ stays inside the day.
+    window._lbContextPhotos = dayPhotos;
+    // Pretty-print the date as "14 Mar 2024" rather than dumping the
+    // ISO string back at the user.
+    let label = dateStr;
+    try{
+      const dt = new Date(dateStr + 'T00:00:00');
+      if(!isNaN(dt.getTime())){
+        const moAbbr=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        label = dt.getDate() + ' ' + moAbbr[dt.getMonth()] + ' ' + dt.getFullYear();
+      }
+    }catch(_){}
+    window._lbContextLabel = label;
+    openLightbox(dayPhotos[0].id);
   } catch(e) { toast('Filter failed: ' + e, 'error'); }
 }
 
