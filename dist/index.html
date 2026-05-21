@@ -1640,6 +1640,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <button class="btn-sm btn-secondary" onclick="batchXmp()">&#128190; XMP</button>
   <button class="btn-sm btn-secondary" onclick="batchCompare()" id="btnBatchCompare">&#128256; Compare</button>
   <button class="btn-sm btn-secondary" onclick="batchPerson()" title="Assign all selected photos to a person (existing or new)">&#128100; Person</button>
+  <button class="btn-sm btn-secondary" onclick="batchUnperson()" title="Remove a person tag from selected photos (e.g. mis-tagged as Serdar)">&#9747; Un-person</button>
   <button class="btn-sm btn-secondary" onclick="batchVault()" title="Move selected photos into the private vault">&#128274; Vault</button>
   <button class="btn-sm btn-danger" onclick="batchDelete()" title="Move selected photos to Recycle Bin">&#128465; Delete</button>
   <div style="flex:1"></div>
@@ -17858,6 +17859,47 @@ async function batchPerson(){
       try{const d=await invoke('get_photo_detail',{photoId:selectedId});renderTags(d.tags,selectedId);$('detailTagCount').textContent=d.tags.length;}catch(_){}
     }
   }catch(e){toast('Person assign failed: '+e,'error');}
+}
+// v1.5.228 — Inverse of batchPerson. Removes a person association
+// from selected photos: unassigns face_regions that link the person
+// and drops the matching face-kind tag. Defaults the person name
+// from the current search filter when it's `person:Name`, so the
+// common flow "filter by person → select wrong-tagged photos →
+// untag" is two clicks.
+async function batchUnperson(){
+  if(selectedIds.size===0){ toast('Nothing selected','info'); return; }
+  // Sniff a name from `person:XYZ` in the active search if present.
+  let presetName = '';
+  try{
+    const q = ($('searchInput')?.value || '').trim();
+    const m = q.match(/person:([^\s]+)/i);
+    if(m) presetName = m[1].replace(/^[\"']|[\"']$/g, '');
+  } catch(_) {}
+  // Show existing names as a hint so a quick rename-correction doesn't
+  // require the user to remember the exact spelling.
+  let existing = [];
+  try{ existing = await invoke('get_persons'); } catch(_) { existing = []; }
+  const names = (existing||[]).map(p=>p.name).filter(Boolean);
+  const hint = names.length
+    ? `Existing: ${names.slice(0,12).join(', ')}${names.length>12?'…':''}`
+    : '';
+  const name = prompt(
+    `Remove which person from ${selectedIds.size} photo${selectedIds.size===1?'':'s'}?\n\n${hint}`,
+    presetName
+  );
+  if(!name || !name.trim()) return;
+  const ids = [...selectedIds];
+  try{
+    const r = await invoke('batch_remove_person', { photoIds: ids, personName: name.trim() });
+    const bits = [];
+    bits.push(`${r.tags_removed} tag${r.tags_removed===1?'':'s'} removed`);
+    if(r.faces_unassigned > 0) bits.push(`${r.faces_unassigned} face${r.faces_unassigned===1?'':'s'} unassigned`);
+    toast(`✕ "${r.person_name}" cleared from ${r.photos_touched} photo${r.photos_touched===1?'':'s'} · ${bits.join(' · ')}`, 'success');
+    loadPhotos(); refreshStats();
+    try{ typeof refreshPersonsSidebar === 'function' && refreshPersonsSidebar(); } catch(_) {}
+  } catch(e){
+    toast('Un-person failed: ' + e, 'error');
+  }
 }
 async function batchVault(){
   if(selectedIds.size===0){toast('Nothing selected','info');return;}

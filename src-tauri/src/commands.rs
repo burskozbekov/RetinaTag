@@ -7213,6 +7213,72 @@ pub async fn batch_assign_person(
     }))
 }
 
+/// v1.5.228 — Inverse of `batch_assign_person`: remove a person from a
+/// list of photos. For each photo we (a) unassign every face_region
+/// currently linked to that person, and (b) delete the face-kind tag
+/// for that person's name. After this call those photos no longer
+/// match a `person:Name` search and no longer surface on the person's
+/// detail page.
+///
+/// Why this is a single Tauri call and not "delete each photo's tag
+/// in a loop on the JS side": the user-flow is "I see 30 photos
+/// wrongly tagged Serdar, select them all, one click removes the
+/// association" — looping per-photo would make 30 IPC calls and
+/// 30 separate transactions; a single call keeps it atomic and snappy.
+///
+/// Returns counts. `faces_unassigned` and `tags_removed` are the two
+/// measures the UI surfaces in its success toast.
+#[tauri::command]
+pub async fn batch_remove_person(
+    photo_ids: Vec<i64>,
+    person_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let name = person_name.trim().to_string();
+    if name.is_empty() {
+        return Err("Person name cannot be empty".into());
+    }
+    if photo_ids.is_empty() {
+        return Err("No photos selected".into());
+    }
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+
+    let person_id: Option<i64> = db::find_person_by_name(&conn, &name).ok().flatten();
+    let mut faces_unassigned = 0usize;
+    let mut tags_removed = 0usize;
+    for pid in &photo_ids {
+        // 1. Unassign face_regions that link this person on this photo.
+        if let Some(person_id) = person_id {
+            let res = conn.execute(
+                "UPDATE face_regions SET person_id = NULL
+                  WHERE photo_id = ?1 AND person_id = ?2",
+                rusqlite::params![pid, person_id],
+            );
+            if let Ok(n) = res {
+                faces_unassigned += n;
+            }
+        }
+        // 2. Drop the face-kind tag for this person from this photo.
+        // We only delete tags whose `source = 'face'` so a manually-added
+        // text tag with the same string (e.g. a place that happens to
+        // share the name) stays put.
+        let res = conn.execute(
+            "DELETE FROM tags WHERE photo_id = ?1 AND tag = ?2 AND source = 'face'",
+            rusqlite::params![pid, name],
+        );
+        if let Ok(n) = res {
+            tags_removed += n;
+        }
+    }
+    Ok(serde_json::json!({
+        "person_name": name,
+        "person_id": person_id,
+        "faces_unassigned": faces_unassigned,
+        "tags_removed": tags_removed,
+        "photos_touched": photo_ids.len(),
+    }))
+}
+
 /// Overwrite a photo's user-editable description. Empty string clears it.
 /// The DB helper keeps the FTS5 index in sync so search works immediately.
 #[tauri::command]
