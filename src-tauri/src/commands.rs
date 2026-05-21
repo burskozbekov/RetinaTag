@@ -14039,3 +14039,360 @@ pub async fn import_xmp_sidecars(
     .await
     .map_err(|e| e.to_string())?
 }
+
+// ─── v1.5.222 — Shared SMB vault commands ─────────────────────────────────
+//
+// These coexist with the legacy per-machine vault (`vault_unlock`,
+// `vault_add_paths`, etc.). Two design rules:
+//
+//   1. Photos in the shared vault have `private = 1` AND
+//      `vault_oid` IS NOT NULL. Legacy vault photos have `private = 1`
+//      AND `vault_oid` IS NULL. The two never mix on a single row.
+//
+//   2. Shared vault commands NEVER touch legacy state and vice
+//      versa. The user can run both modes side by side during a
+//      migration period; nothing here forces them to choose.
+
+/// Report what the FE needs to render the Settings → Shared Vault UI.
+#[tauri::command]
+pub async fn shared_vault_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let root_opt = state.shared_vault_root.lock().map_err(|_| "lock")?.clone();
+    let unlocked = state
+        .shared_vault_master_key
+        .lock()
+        .map_err(|_| "lock")?
+        .is_some();
+    let (vault_exists_flag, photo_count) = match &root_opt {
+        Some(p) => {
+            let exists = crate::shared_vault::vault_exists(p);
+            // Quick photo count if vault is configured. Cheap query.
+            let n = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|c| {
+                    c.query_row(
+                        "SELECT COUNT(*) FROM photos WHERE vault_oid IS NOT NULL",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .ok()
+                })
+                .unwrap_or(0);
+            (exists, n)
+        }
+        None => (false, 0),
+    };
+    Ok(serde_json::json!({
+        "configured": root_opt.is_some(),
+        "library_root": root_opt.map(|p| p.to_string_lossy().to_string()),
+        "vault_exists": vault_exists_flag,
+        "unlocked": unlocked,
+        "photo_count": photo_count,
+    }))
+}
+
+/// First-time setup: create a new shared vault at `library_root` with
+/// `pin`. Persists `library_root` to the `shared_vault_config` table so
+/// the next launch hydrates it automatically. Auto-unlocks the vault
+/// at the end so the user can immediately start using it.
+#[tauri::command]
+pub async fn shared_vault_setup(
+    library_root: String,
+    pin: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let root = std::path::PathBuf::from(library_root.trim());
+    if !root.exists() {
+        return Err(format!(
+            "library root does not exist: {}",
+            root.display()
+        ));
+    }
+    if !root.is_dir() {
+        return Err(format!(
+            "library root is not a directory: {}",
+            root.display()
+        ));
+    }
+    if crate::shared_vault::vault_exists(&root) {
+        return Err(
+            "a vault already exists at that root. Use Unlock instead, or pick a different folder."
+                .into(),
+        );
+    }
+    let pin_clone = pin.clone();
+    let root_clone = root.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::shared_vault::init_vault(&root_clone, &pin_clone, "pc")
+    })
+    .await
+    .map_err(|e| format!("setup join: {e}"))??;
+
+    // Persist library_root.
+    {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO shared_vault_config (id, library_root, enabled, created_at)
+             VALUES (1, ?1, 1, ?2)
+             ON CONFLICT(id) DO UPDATE SET
+               library_root = excluded.library_root,
+               enabled = 1,
+               created_at = excluded.created_at",
+            rusqlite::params![root.to_string_lossy().to_string(), now],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    *state.shared_vault_root.lock().map_err(|_| "lock")? = Some(root.clone());
+
+    // Auto-unlock so the user can start adding photos immediately.
+    let root_clone = root.clone();
+    let pin_clone = pin.clone();
+    let mk = tokio::task::spawn_blocking(move || {
+        crate::shared_vault::unlock_vault(&root_clone, &pin_clone)
+    })
+    .await
+    .map_err(|e| format!("unlock join: {e}"))??;
+    *state
+        .shared_vault_master_key
+        .lock()
+        .map_err(|_| "lock")? = Some(mk);
+
+    Ok(serde_json::json!({ "ok": true, "library_root": root.to_string_lossy().to_string() }))
+}
+
+/// Unlock an existing shared vault. Returns ok=true on success and
+/// stashes the master key in AppState; ok=false on wrong PIN.
+#[tauri::command]
+pub async fn shared_vault_unlock(
+    pin: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let root = state
+        .shared_vault_root
+        .lock()
+        .map_err(|_| "lock")?
+        .clone()
+        .ok_or("shared vault not configured — run setup first")?;
+    let pin_clone = pin.clone();
+    let root_clone = root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::shared_vault::unlock_vault(&root_clone, &pin_clone)
+    })
+    .await
+    .map_err(|e| format!("unlock join: {e}"))?;
+    match result {
+        Ok(mk) => {
+            *state
+                .shared_vault_master_key
+                .lock()
+                .map_err(|_| "lock")? = Some(mk);
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        Err(e) => {
+            // "incorrect PIN" path. Don't surface the underlying
+            // AES-GCM tag error verbatim to the user — anything other
+            // than "ok: false" leaks attack-useful info.
+            let _ = e;
+            Ok(serde_json::json!({ "ok": false }))
+        }
+    }
+}
+
+/// Wipe the master key from memory. The vault config (library_root)
+/// stays so a subsequent unlock doesn't need a folder picker.
+#[tauri::command]
+pub async fn shared_vault_lock(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    if let Ok(mut guard) = state.shared_vault_master_key.lock() {
+        if let Some(mut mk) = guard.take() {
+            // Best-effort scrub. Rust's borrow checker doesn't
+            // guarantee this isn't a no-op (the compiler may have
+            // optimised out the write), but we still try — it's
+            // cheap insurance.
+            mk.fill(0);
+        }
+    }
+    Ok(())
+}
+
+/// Encrypt the bytes at each `path` into the shared vault. Returns a
+/// map of `path → oid` for successful items, and a separate failed
+/// list. Updates `photos.private = 1` and `photos.vault_oid` for any
+/// row whose `path` matches. Leaves rows it can't match alone (the
+/// blob is on disk, the DB just doesn't have a row yet — a future
+/// library scan will pick it up).
+///
+/// Does NOT delete the original yet. The user separately decides
+/// when to remove originals — same UX as the legacy vault.
+#[tauri::command]
+pub async fn shared_vault_add_paths(
+    paths: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mk = state
+        .shared_vault_master_key
+        .lock()
+        .map_err(|_| "lock")?
+        .clone()
+        .ok_or("vault is locked")?;
+    let root = state
+        .shared_vault_root
+        .lock()
+        .map_err(|_| "lock")?
+        .clone()
+        .ok_or("shared vault not configured")?;
+    let db = state.db.clone();
+
+    let outcome = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let mut added: Vec<serde_json::Value> = Vec::new();
+        let mut failed: Vec<serde_json::Value> = Vec::new();
+        for p in &paths {
+            let src = std::path::PathBuf::from(p);
+            match crate::shared_vault::encrypt_file_to_vault(&root, &mk, &src) {
+                Ok(oid) => {
+                    // Update DB row by path. If no row matches, we
+                    // leave the blob on disk — the user's library
+                    // scan will index it later. Vault_oid lets the
+                    // future scanner detect a duplicate immediately.
+                    {
+                        let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+                        let _ = conn.execute(
+                            "UPDATE photos SET private = 1, vault_oid = ?1 WHERE path = ?2",
+                            rusqlite::params![oid, p],
+                        );
+                    }
+                    added.push(serde_json::json!({ "path": p, "oid": oid }));
+                }
+                Err(e) => failed.push(serde_json::json!({ "path": p, "error": e })),
+            }
+        }
+        Ok(serde_json::json!({
+            "added": added,
+            "failed": failed,
+            "added_count": added.len(),
+            "failed_count": failed.len(),
+        }))
+    })
+    .await
+    .map_err(|e| format!("add join: {e}"))??;
+    Ok(outcome)
+}
+
+/// Decrypt a vaulted photo back to a chosen destination, then clear
+/// the DB's `private` / `vault_oid` flags. The blob in
+/// `objects/<oid>.rtenc` is **NOT** removed: the same content might
+/// be vaulted from another machine that hasn't pulled the unhide
+/// yet. A future "compact vault" pass can prune orphaned blobs.
+#[tauri::command]
+pub async fn shared_vault_unhide(
+    photo_id: i64,
+    dest_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mk = state
+        .shared_vault_master_key
+        .lock()
+        .map_err(|_| "lock")?
+        .clone()
+        .ok_or("vault is locked")?;
+    let root = state
+        .shared_vault_root
+        .lock()
+        .map_err(|_| "lock")?
+        .clone()
+        .ok_or("shared vault not configured")?;
+    let oid: String = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        conn.query_row(
+            "SELECT vault_oid FROM photos WHERE id = ?1 AND vault_oid IS NOT NULL",
+            [photo_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "photo not in shared vault".to_string())?
+    };
+    let dest = std::path::PathBuf::from(dest_path);
+    let dest_for_blocking = dest.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::shared_vault::decrypt_oid_to_file(&root, &mk, &oid, &dest_for_blocking)
+    })
+    .await
+    .map_err(|e| format!("unhide join: {e}"))??;
+    {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        conn.execute(
+            "UPDATE photos SET private = 0, vault_oid = NULL, path = ?1 WHERE id = ?2",
+            rusqlite::params![dest.to_string_lossy().to_string(), photo_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(serde_json::json!({ "ok": true, "path": dest.to_string_lossy().to_string() }))
+}
+
+/// Return the decrypted bytes of a vaulted photo, base64-encoded so
+/// the WebView can stuff it into `<img src="data:…">`. For preview /
+/// thumbnail rendering only — large files should use a streaming
+/// decrypt-to-temp path instead.
+#[tauri::command]
+pub async fn shared_vault_get_bytes_b64(
+    photo_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    use base64::Engine;
+    let mk = state
+        .shared_vault_master_key
+        .lock()
+        .map_err(|_| "lock")?
+        .clone()
+        .ok_or("vault is locked")?;
+    let root = state
+        .shared_vault_root
+        .lock()
+        .map_err(|_| "lock")?
+        .clone()
+        .ok_or("shared vault not configured")?;
+    let oid: String = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        conn.query_row(
+            "SELECT vault_oid FROM photos WHERE id = ?1 AND vault_oid IS NOT NULL",
+            [photo_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "photo not in shared vault".to_string())?
+    };
+    let bytes = tokio::task::spawn_blocking(move || {
+        crate::shared_vault::decrypt_oid_to_bytes(&root, &mk, &oid)
+    })
+    .await
+    .map_err(|e| format!("decrypt join: {e}"))??;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+/// Probe a folder for an existing shared vault. Lets the UI tell the
+/// user "this looks like a previously-set-up vault, enter PIN" vs.
+/// "no vault here, set one up". No PIN is consumed.
+#[tauri::command]
+pub async fn shared_vault_probe(library_root: String) -> Result<serde_json::Value, String> {
+    let root = std::path::PathBuf::from(library_root.trim());
+    if !root.exists() {
+        return Ok(serde_json::json!({
+            "exists": false,
+            "vault_found": false,
+            "error": "library root does not exist",
+        }));
+    }
+    let found = crate::shared_vault::vault_exists(&root);
+    let n_blobs = crate::shared_vault::list_oids(&root)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    Ok(serde_json::json!({
+        "exists": true,
+        "vault_found": found,
+        "blob_count": n_blobs,
+    }))
+}
+

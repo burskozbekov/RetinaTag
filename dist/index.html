@@ -2562,6 +2562,21 @@ select.tb-select:focus{border-color:var(--red-dark)}
               </div>
             </div>
           </div>
+          <!-- v1.5.222 — Shared SMB vault (cross-machine Mac↔PC). Minimal
+               Phase 1 UI: configure + unlock + lock. Photo add/remove
+               from the gallery comes in a later phase. -->
+          <div class="pane-section">
+            <div class="sb-label">🔐 Shared Vault (cross-machine)</div>
+            <div id="sharedVaultPanel" style="display:flex;flex-direction:column;gap:10px;font-size:12px;color:var(--text3)">
+              <div style="line-height:1.5">
+                Sets up a vault inside <code>&lt;library-root&gt;/.retinatag-vault/</code> that Mac and PC can both unlock with the same PIN. Photos sealed on one side decrypt on the other.
+              </div>
+              <div id="sharedVaultStatus" style="padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:12px">
+                <span style="color:var(--text3)">Checking status…</span>
+              </div>
+              <div id="sharedVaultActions" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+            </div>
+          </div>
           <div class="pane-section" style="border-bottom:none">
             <div class="sb-label" style="display:flex;align-items:center;justify-content:space-between">
               <span>📜 Scan History</span>
@@ -10994,6 +11009,169 @@ $('btnRebucketUnknown').onclick = async () => {
     btn.innerHTML = orig;
   }
 };
+
+// ── v1.5.222 — Shared SMB vault (Phase 1 Settings UI) ─────────────────────
+// Minimal: status line + "Setup" / "Unlock" / "Lock" actions. Photo
+// add/remove plumbing into the gallery comes in Phase 2 once the cross-
+// platform XMP sync is wired and we know what the unified vault page
+// should look like. For now this is the operator surface that lets a
+// user provision the shared vault from PC and confirm Mac sees the
+// same one.
+
+async function _sharedVaultRefresh(){
+  const statusEl  = document.getElementById('sharedVaultStatus');
+  const actionsEl = document.getElementById('sharedVaultActions');
+  if(!statusEl || !actionsEl) return;
+  let s;
+  try {
+    s = await invoke('shared_vault_status');
+  } catch(e) {
+    statusEl.innerHTML = `<span style="color:var(--amber)">Status unavailable: ${_esc ? _esc(String(e)) : String(e)}</span>`;
+    actionsEl.innerHTML = '';
+    return;
+  }
+  const root = s.library_root || '';
+  if(!s.configured){
+    statusEl.innerHTML = `<span style="color:var(--text3)">No shared vault configured yet.</span>`;
+    actionsEl.innerHTML = `<button class="btn btn-primary btn-xs" id="btnSvSetup">📁 Set up shared vault…</button>`;
+    document.getElementById('btnSvSetup').onclick = _sharedVaultStartSetup;
+    return;
+  }
+  // Configured. Vault file present?
+  const lockState = s.unlocked
+    ? `<span style="color:var(--green,#7ec07e)">● Unlocked</span>`
+    : `<span style="color:var(--amber)">● Locked</span>`;
+  const exists = s.vault_exists
+    ? `<span style="color:var(--text2)">vault files present</span>`
+    : `<span style="color:var(--red)">vault files MISSING at that path</span>`;
+  const cnt = s.photo_count
+    ? `· <b>${s.photo_count.toLocaleString()}</b> photos in vault`
+    : '';
+  statusEl.innerHTML = `
+    <div>${lockState} &nbsp; ${exists} ${cnt}</div>
+    <div style="font-size:11px;color:var(--text3);margin-top:4px">Library: <code>${root}</code></div>
+  `;
+  if(s.unlocked){
+    actionsEl.innerHTML = `
+      <button class="btn btn-secondary btn-xs" id="btnSvLock">🔒 Lock vault</button>
+      <button class="btn btn-secondary btn-xs" id="btnSvChange">Change library root…</button>`;
+    document.getElementById('btnSvLock').onclick   = _sharedVaultLock;
+    document.getElementById('btnSvChange').onclick = _sharedVaultStartSetup;
+  } else {
+    actionsEl.innerHTML = `
+      <button class="btn btn-primary btn-xs" id="btnSvUnlock">🔓 Unlock with PIN</button>
+      <button class="btn btn-secondary btn-xs" id="btnSvChange">Change library root…</button>`;
+    document.getElementById('btnSvUnlock').onclick = _sharedVaultPromptUnlock;
+    document.getElementById('btnSvChange').onclick = _sharedVaultStartSetup;
+  }
+}
+
+// Setup or "change root" flow. Pick folder → probe → branch:
+//   - vault already present at that root → ask for the existing PIN
+//     (unlock-flavoured, doesn't reinit)
+//   - no vault → ask for a new PIN + confirmation, then init
+async function _sharedVaultStartSetup(){
+  let root;
+  try {
+    const sel = await window.__TAURI__.dialog.open({
+      directory: true,
+      multiple: false,
+      title: 'Pick the library root (the folder both Mac and PC see, e.g. D:\\Fotograflar or \\\\NAS\\Photos)',
+    });
+    if(!sel) return;
+    root = Array.isArray(sel) ? sel[0] : sel;
+  } catch(e) {
+    toast('Folder picker failed: ' + e, 'error');
+    return;
+  }
+  let probe;
+  try {
+    probe = await invoke('shared_vault_probe', { libraryRoot: root });
+  } catch(e) {
+    toast('Probe failed: ' + e, 'error');
+    return;
+  }
+  if(probe.vault_found){
+    // Pre-existing vault — collect the existing PIN.
+    const pin = prompt(
+      `Found an existing shared vault at:\n${root}\n\n` +
+      `It already holds ${probe.blob_count.toLocaleString()} encrypted file${probe.blob_count===1?'':'s'}.\n\n` +
+      `Enter the PIN to connect this machine to it:`
+    );
+    if(!pin) return;
+    try {
+      // Persist root via setup path — but the existing wrapped-key.bin
+      // is intact, so we need a "setup-existing" branch. The current
+      // backend setup refuses when a vault is already there; use
+      // unlock instead after just persisting the path. To do that we
+      // call a tiny side-channel: write the path through setup with
+      // a "use existing" flag. Phase 2 will add that flag. For now
+      // tell the user the limitation.
+      toast(
+        '⚠ Connecting to an existing vault from a fresh PC build needs the Phase-2 attach flow. ' +
+        'For now run setup on the side that initialised the vault, or rename the folder and start fresh.',
+        'warn'
+      );
+    } catch(e) { toast('Setup failed: ' + e, 'error'); }
+    return;
+  }
+  // Fresh setup
+  const pin1 = prompt(`Set a PIN for the new shared vault at:\n${root}\n\nMin 6 chars. Don't lose this — there's no recovery in Phase 1.`);
+  if(!pin1) return;
+  if(pin1.length < 6){ toast('PIN must be at least 6 characters', 'error'); return; }
+  const pin2 = prompt('Confirm the PIN.');
+  if(pin1 !== pin2){ toast('PINs did not match — try again', 'error'); return; }
+  try {
+    await invoke('shared_vault_setup', { libraryRoot: root, pin: pin1 });
+    toast(`✅ Shared vault created at ${root}. Unlocked.`, 'success');
+    _sharedVaultRefresh();
+  } catch(e) {
+    toast('Setup failed: ' + e, 'error');
+  }
+}
+
+async function _sharedVaultPromptUnlock(){
+  const pin = prompt('Enter the shared vault PIN:');
+  if(!pin) return;
+  try {
+    const r = await invoke('shared_vault_unlock', { pin });
+    if(r.ok){
+      toast('✅ Vault unlocked', 'success');
+      _sharedVaultRefresh();
+    } else {
+      toast('Incorrect PIN', 'error');
+    }
+  } catch(e) {
+    toast('Unlock failed: ' + e, 'error');
+  }
+}
+
+async function _sharedVaultLock(){
+  try {
+    await invoke('shared_vault_lock');
+    toast('🔒 Vault locked', 'info');
+    _sharedVaultRefresh();
+  } catch(e) {
+    toast('Lock failed: ' + e, 'error');
+  }
+}
+
+// Refresh status whenever Settings opens. The nav-item click hook
+// switches panes via `data-pane`; we listen on it to populate the
+// Shared Vault status on first reveal.
+document.addEventListener('click', (e) => {
+  const navItem = e.target && e.target.closest && e.target.closest('.settings-nav-item[data-pane="tools"]');
+  if(navItem) setTimeout(_sharedVaultRefresh, 50);
+});
+// Also refresh once when the Settings modal itself opens.
+(function(){
+  const modal = document.getElementById('settingsModal');
+  if(!modal) return;
+  const obs = new MutationObserver(() => {
+    if(modal.classList.contains('open')) _sharedVaultRefresh();
+  });
+  obs.observe(modal, { attributes: true, attributeFilter: ['class'] });
+})();
 
 // ── Extract dominant colors + search ──────────────────────────────────────
 // extract_colors_batch processes photos where dominant_colors IS NULL in a

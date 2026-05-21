@@ -193,6 +193,7 @@ mod models;
 mod vault_crypto;
 mod vault_biometric;
 mod vault_files;
+mod shared_vault;
 mod providers;
 mod quality;
 mod router;
@@ -259,6 +260,28 @@ pub struct AppState {
     /// v1.5.157 then removes it, and the vault becomes truly invisible
     /// to Explorer.
     pub vault_store_dir: std::path::PathBuf,
+
+    /// v1.5.222 — Shared SMB vault master key, kept in memory only while
+    /// the user has the vault unlocked. Separate from `vault_kek` because
+    /// the two vault formats have separate key types: legacy uses
+    /// KEK-direct (one Argon2 hop), shared uses a master key wrapped by
+    /// a KEK (two hops, so the wrapping survives a PIN change and so
+    /// Mac and PC can share the same wrapped key without exposing
+    /// their PINs to each other). `None` = vault locked.
+    ///
+    /// `Arc<Mutex<...>>` rather than bare `Mutex<...>` so the setup
+    /// hook (which uses `app.state()` and thus only has a temporary
+    /// borrow of `AppState`) can clone the handle out and lock on the
+    /// owned Arc without fighting the borrow checker.
+    pub shared_vault_master_key: Arc<Mutex<Option<[u8; 32]>>>,
+
+    /// Cached library root for the shared vault, populated on launch
+    /// from the `shared_vault_config` table. Reading the table on
+    /// every encrypt/decrypt call would add a DB lock to a hot path.
+    /// `None` = the user hasn't picked one yet (no shared vault
+    /// configured). Same `Arc<Mutex<...>>` reasoning as
+    /// `shared_vault_master_key` above.
+    pub shared_vault_root: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 /// Suppress Windows "The application was unable to start correctly (0xc0000142)"
@@ -459,7 +482,44 @@ pub fn run() {
                 vault_temp_files: Arc::new(Mutex::new(Vec::new())),
                 revealed_folders: Arc::new(Mutex::new(Vec::new())),
                 vault_store_dir: vault_store_dir.clone(),
+                // v1.5.222 — shared vault starts locked and unrooted;
+                // the launch hook below populates `shared_vault_root`
+                // from the DB if the user has previously configured one.
+                shared_vault_master_key: Arc::new(Mutex::new(None)),
+                shared_vault_root: Arc::new(Mutex::new(None)),
             });
+
+            // v1.5.222 — hydrate the cached library_root for the shared
+            // vault from the DB. Reading the path on every encrypt/
+            // decrypt call would add a DB lock to the hot path; cache
+            // it once here.
+            //
+            // We grab the State once, pull the DB handle (Arc) out of
+            // it, then lock that Arc directly. Going through
+            // `state.db.lock()` doesn't work in a setup hook because
+            // `app.state()` returns a temporary whose lifetime ends
+            // at the semicolon, killing any guard derived from it.
+            let db_handle_for_init = app.state::<AppState>().db.clone();
+            let cached_root_str: Option<String> = {
+                let conn = db_handle_for_init
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                conn.query_row(
+                    "SELECT library_root FROM shared_vault_config WHERE id = 1 AND enabled = 1",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            };
+            if let Some(p) = cached_root_str {
+                let root_handle = app.state::<AppState>().shared_vault_root.clone();
+                // Explicit `let mut g = ...` (instead of `if let Ok(mut g) = ...`)
+                // so the MutexGuard temporary doesn't outlive `root_handle` —
+                // an `if let Ok(...)` form keeps the unwrapped Result alive
+                // until the end of the surrounding block and trips E0597.
+                let mut g = root_handle.lock().unwrap_or_else(|e| e.into_inner());
+                *g = Some(std::path::PathBuf::from(p));
+            }
 
             // v1.5.176 — Background migration kicked off at startup. Moves
             // legacy .rtenc blobs out of the user's original folders into
@@ -945,6 +1005,15 @@ pub fn run() {
             commands::mtp_delete,
             commands::mtp_delete_non_favorites,
             commands::rebucket_unknown_folder,
+            // v1.5.222 — shared SMB vault (Phase 1)
+            commands::shared_vault_status,
+            commands::shared_vault_setup,
+            commands::shared_vault_unlock,
+            commands::shared_vault_lock,
+            commands::shared_vault_add_paths,
+            commands::shared_vault_unhide,
+            commands::shared_vault_get_bytes_b64,
+            commands::shared_vault_probe,
             commands::import_from_device,
             // 19. Rating & Favorites
             commands::set_rating,

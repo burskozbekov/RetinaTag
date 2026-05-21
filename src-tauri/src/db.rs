@@ -507,6 +507,30 @@ pub fn init_db(path: &str) -> Result<Connection> {
     conn.execute_batch("ALTER TABLE photos ADD COLUMN vault_folder_id INTEGER NULL REFERENCES vault_folders(id) ON DELETE SET NULL;").ok();
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_photos_vault_folder ON photos(vault_folder_id);").ok();
 
+    // v1.5.222 — Shared SMB vault (cross-platform Mac/PC parity).
+    // `vault_oid` distinguishes a photo encrypted into the new shared
+    // vault (NULL = legacy per-machine `.rtenc` next to the original;
+    // 64-char hex = SHA-256 of the original content, the address of
+    // the encrypted blob under `<library_root>/.retinatag-vault/
+    // objects/<oid[0..2]>/<oid>.rtenc`). Indexed because Phase 2's
+    // XMP cross-sync will look up rows by oid when applying a
+    // `retinatag:VaultOid` value seen in an imported sidecar.
+    conn.execute_batch("ALTER TABLE photos ADD COLUMN vault_oid TEXT;").ok();
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_photos_vault_oid ON photos(vault_oid);").ok();
+
+    // Shared-vault config table — one-row store for the library root
+    // the user picked at setup. Kept separate from `app_settings` to
+    // make backup/restore tooling explicit about what gets carried
+    // across machines (the path doesn't, it's local).
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS shared_vault_config (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            library_root TEXT NOT NULL,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT NOT NULL
+        );"
+    ).ok();
+
     // GPS cluster cache: pre-computed location clusters for the Map view.
     // Re-built when user asks for it, not every scan.
     conn.execute_batch(
