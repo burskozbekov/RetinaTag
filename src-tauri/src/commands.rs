@@ -3965,6 +3965,264 @@ fn parse_year_month(s: &str) -> Option<(i32, u32)> {
 // have been English across the rest of the app for a while; the MTP
 // folder layout was the last Turkish holdout.
 
+// ─── 4b. Rescue stranded "Unknown/Unknown/" imports ─────────────────────────
+
+/// v1.5.221 — Walk every `Unknown/Unknown/` subtree under `root`,
+/// read each file's EXIF (or fall back to mtime), and move it into the
+/// correct `YYYY/MM-MonthName/` bucket. Updates `photos.folder` in
+/// the DB for rows whose path used to live in Unknown/.
+///
+/// Why: pre-v1.5.153 MTP imports placed every iPhone photo whose WPD
+/// metadata lacked a usable capture date into `dest_root/Unknown/Unknown/`.
+/// The slow-path EXIF fallback that solves this for new imports was
+/// added in v1.5.153, but legacy users still have thousands of
+/// photos stranded in those folders — including this user's
+/// D:\Fotograflar\Unknown\Unknown\ with ~3,162 files. This command
+/// fixes them in place without re-importing.
+///
+/// Emits `rebucket-unknown-progress` `{done, total, moved, mtime_fallback,
+/// failed, last}` after every file so the UI can show a real bar.
+/// Returns the same counts at the end.
+#[tauri::command]
+pub async fn rebucket_unknown_folder(
+    app: tauri::AppHandle,
+    root: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.clone();
+    let root_path = std::path::PathBuf::from(&root);
+    let unknown_root = root_path.join("Unknown").join("Unknown");
+    if !unknown_root.exists() {
+        // Nothing to rescue at the canonical nested location. Still
+        // honor a single-level fallback ("Unknown/") just in case the
+        // legacy import ever wrote there.
+        let single = root_path.join("Unknown");
+        if !single.exists() {
+            return Ok(serde_json::json!({
+                "done": 0,
+                "total": 0,
+                "moved": 0,
+                "mtime_fallback": 0,
+                "failed": 0,
+                "no_unknown_folder": true,
+            }));
+        }
+    }
+    // Collect candidate paths up front so we can show a stable total.
+    // Walk both Unknown/Unknown/ AND Unknown/ (some legacy imports
+    // wrote single-level).
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for dir in [root_path.join("Unknown").join("Unknown"), root_path.join("Unknown")] {
+        if !dir.exists() { continue; }
+        for entry in walkdir::WalkDir::new(&dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            // Skip OS junk + RetinaTag's own files.
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name == "thumbs.db" || name == ".ds_store" || name.starts_with('.') {
+                continue;
+            }
+            candidates.push(entry.into_path());
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    let total = candidates.len();
+    let _ = app.emit(
+        "rebucket-unknown-progress",
+        serde_json::json!({
+            "done": 0,
+            "total": total,
+            "moved": 0,
+            "mtime_fallback": 0,
+            "failed": 0,
+            "last": "",
+        }),
+    );
+    let ah = app.clone();
+    let outcome = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let mut moved = 0usize;
+        let mut mtime_fallback = 0usize;
+        let mut failed = 0usize;
+        let mut last_msg = String::new();
+        for (i, src) in candidates.iter().enumerate() {
+            // Resolve (year, month). Prefer EXIF DateTimeOriginal so
+            // we honour the actual capture date even when the file's
+            // mtime was clobbered by a copy. Fall back to mtime.
+            let src_str = src.to_string_lossy().to_string();
+            let (year, month, used_mtime) = {
+                let mut y: i32 = 0;
+                let mut m: u32 = 0;
+                let mut fb = false;
+                if let Ok(exif) = crate::exif_reader::read_exif(&src_str) {
+                    if let Some(dt) = exif.date_taken {
+                        if let Some((yy, mm)) = parse_year_month(&dt) {
+                            y = yy;
+                            m = mm;
+                        }
+                    }
+                }
+                if y == 0 {
+                    if let Ok(meta) = std::fs::metadata(src) {
+                        if let Ok(t) = meta.modified() {
+                            let dt: chrono::DateTime<chrono::Local> = t.into();
+                            y = chrono::Datelike::year(&dt);
+                            m = chrono::Datelike::month(&dt);
+                            fb = true;
+                        }
+                    }
+                }
+                (y, m, fb)
+            };
+            if year == 0 || !(1..=12).contains(&month) {
+                failed += 1;
+                last_msg = format!("no date: {}", src.file_name().unwrap_or_default().to_string_lossy());
+                let _ = ah.emit(
+                    "rebucket-unknown-progress",
+                    serde_json::json!({
+                        "done": i + 1,
+                        "total": total,
+                        "moved": moved,
+                        "mtime_fallback": mtime_fallback,
+                        "failed": failed,
+                        "last": last_msg,
+                    }),
+                );
+                continue;
+            }
+            let month_name = english_month_name(month);
+            let dest_dir = root_path
+                .join(format!("{:04}", year))
+                .join(format!("{:02}-{}", month, month_name));
+            if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+                failed += 1;
+                last_msg = format!("mkdir {:?}: {}", dest_dir, e);
+                continue;
+            }
+            let filename = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let mut dest = dest_dir.join(&filename);
+            // Collision-safe: if a same-named file already lives in
+            // the destination, append _1, _2, … unless the contents
+            // are identical (same size) in which case drop the
+            // stranded copy and just update the DB row.
+            if dest.exists() {
+                let same_size = std::fs::metadata(src).ok().map(|a| a.len())
+                    == std::fs::metadata(&dest).ok().map(|a| a.len());
+                if same_size {
+                    let _ = std::fs::remove_file(src);
+                    // Still update the DB row so timeline/calendar
+                    // stop pointing at Unknown.
+                    update_photo_folder(&db, &src_str, &dest);
+                    moved += 1;
+                    if used_mtime { mtime_fallback += 1; }
+                    let _ = ah.emit(
+                        "rebucket-unknown-progress",
+                        serde_json::json!({
+                            "done": i + 1,
+                            "total": total,
+                            "moved": moved,
+                            "mtime_fallback": mtime_fallback,
+                            "failed": failed,
+                            "last": filename,
+                        }),
+                    );
+                    continue;
+                }
+                let stem = src.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                let ext = src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                let mut n = 1;
+                loop {
+                    let cand = dest_dir.join(format!("{}_{}{}", stem, n, ext));
+                    if !cand.exists() {
+                        dest = cand;
+                        break;
+                    }
+                    n += 1;
+                    if n > 9999 {
+                        break;
+                    }
+                }
+            }
+            match std::fs::rename(src, &dest) {
+                Ok(_) => {
+                    update_photo_folder(&db, &src_str, &dest);
+                    moved += 1;
+                    if used_mtime { mtime_fallback += 1; }
+                    last_msg = filename.clone();
+                }
+                Err(e) => {
+                    // Cross-volume rename can fail on Windows when
+                    // the source and dest are on different roots.
+                    // Try a copy + delete as a last resort.
+                    if std::fs::copy(src, &dest).is_ok()
+                        && std::fs::remove_file(src).is_ok()
+                    {
+                        update_photo_folder(&db, &src_str, &dest);
+                        moved += 1;
+                        if used_mtime { mtime_fallback += 1; }
+                        last_msg = filename.clone();
+                    } else {
+                        failed += 1;
+                        last_msg = format!("move failed: {}", e);
+                    }
+                }
+            }
+            let _ = ah.emit(
+                "rebucket-unknown-progress",
+                serde_json::json!({
+                    "done": i + 1,
+                    "total": total,
+                    "moved": moved,
+                    "mtime_fallback": mtime_fallback,
+                    "failed": failed,
+                    "last": last_msg,
+                }),
+            );
+        }
+        // Best-effort: prune now-empty Unknown subtree.
+        for dir in [root_path.join("Unknown").join("Unknown"), root_path.join("Unknown")] {
+            if dir.exists() {
+                let _ = std::fs::remove_dir(&dir);
+            }
+        }
+        Ok(serde_json::json!({
+            "done": total,
+            "total": total,
+            "moved": moved,
+            "mtime_fallback": mtime_fallback,
+            "failed": failed,
+        }))
+    })
+    .await
+    .map_err(|e| format!("rebucket join: {e}"))??;
+    Ok(outcome)
+}
+
+/// v1.5.221 helper — when we move a stranded photo file, the `photos`
+/// row's `path` and `folder` columns still point at the old
+/// Unknown/Unknown location. Patch them in place so the gallery,
+/// timeline, and calendar all see the new home immediately (no
+/// re-scan needed). We match the row by its OLD full path, which is
+/// the unique key the rest of the app already uses.
+fn update_photo_folder(db: &std::sync::Mutex<rusqlite::Connection>, old_path: &str, new_path: &std::path::Path) {
+    let conn = match db.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let new_path_str = new_path.to_string_lossy().to_string();
+    let new_folder = new_path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let _ = conn.execute(
+        "UPDATE photos SET path = ?1, folder = ?2 WHERE path = ?3",
+        rusqlite::params![new_path_str, new_folder, old_path],
+    );
+}
+
 // ── 5. Tag Management ───────────────────────────────────────────────────────
 
 #[tauri::command]

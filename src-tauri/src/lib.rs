@@ -944,6 +944,7 @@ pub fn run() {
             commands::mtp_import,
             commands::mtp_delete,
             commands::mtp_delete_non_favorites,
+            commands::rebucket_unknown_folder,
             commands::import_from_device,
             // 19. Rating & Favorites
             commands::set_rating,

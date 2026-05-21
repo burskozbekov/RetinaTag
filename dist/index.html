@@ -188,11 +188,18 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
 .tb-spacer{flex:1 1 auto;min-width:0}
 .search-box svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);
   width:14px;height:14px;stroke:var(--text3);fill:none;stroke-width:2}
-#searchInput{width:100%;padding:8px 12px 8px 34px;border-radius:20px;border:1px solid var(--border2);
-  background:var(--card);color:var(--text);font-size:13px;outline:none;transition:all .2s;font-family:var(--font)}
+/* v1.5.221 — right-padding sized so typed text NEVER runs under the
+   floating result-count hint (.search-hint) or the × clear button.
+   Chip layout (right edge → left):
+     × clear:     right:10px width:20px
+     hint chip:   right:36px max-width:80px
+   So the rightmost typable column is at  ~120px from the right edge,
+   which the 124px padding-right honours. */
+#searchInput{width:100%;padding:8px 124px 8px 34px;border-radius:20px;border:1px solid var(--border2);
+  background:var(--card);color:var(--text);font-size:13px;outline:none;transition:all .2s;font-family:var(--font);text-overflow:ellipsis}
 #searchInput:focus{border-color:var(--red-dark);background:var(--card2);box-shadow:0 0 0 3px rgba(184,58,18,.12)}
 #searchInput::placeholder{color:var(--text3)}
-.search-hint{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:10px;color:var(--amber);pointer-events:none;max-width:110px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.search-hint{position:absolute;right:36px;top:50%;transform:translateY(-50%);font-size:10px;color:var(--amber);pointer-events:none;max-width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:var(--card);padding:1px 4px;border-radius:8px}
 .search-person-pill{position:absolute;left:30px;right:14px;top:50%;transform:translateY(-50%);
   display:none;align-items:center;gap:6px;pointer-events:auto;height:26px;padding:0 6px 0 9px;
   background:linear-gradient(180deg,rgba(184,58,18,.28),rgba(184,58,18,.18));
@@ -1137,14 +1144,14 @@ select.tb-select:focus{border-color:var(--red-dark)}
     </div>
     <div class="search-box">
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input type="text" id="searchInput" placeholder="Search photos…" title="Operators: tag:cat &nbsp;person:Name &nbsp;folder:family &nbsp;in:trip2024 &nbsp;year:2020-2023 &nbsp;before:2024 &nbsp;after:2010 &nbsp;date:today/yesterday/this-week/this-month/this-year/last-week/last-month/last-year &nbsp;rating:>=4 &nbsp;fav:true &nbsp;media:video &nbsp;ext:jpg · &quot;exact phrase&quot; · -word excludes · -tag:night excludes a tag · cat* prefix · OR explicit · Click ? for full help · Ctrl+F to focus" style="padding-right:62px">
+      <input type="text" id="searchInput" placeholder="Search photos…" title="Operators: tag:cat &nbsp;person:Name &nbsp;folder:family &nbsp;in:trip2024 &nbsp;year:2020-2023 &nbsp;before:2024 &nbsp;after:2010 &nbsp;date:today/yesterday/this-week/this-month/this-year/last-week/last-month/last-year &nbsp;rating:>=4 &nbsp;fav:true &nbsp;media:video &nbsp;ext:jpg · &quot;exact phrase&quot; · -word excludes · -tag:night excludes a tag · cat* prefix · OR explicit · Click ? for full help · Ctrl+F to focus">
       <span class="search-hint" id="searchHint"></span>
       <!-- v1.5.57 — Right-side icons rearranged so they don't crowd the
            placeholder. When the box is empty, only ? shows on the right
            (right:10). As soon as the user types, ? hides and X (clear,
            right:34) + ☆ (save, right:10) appear. Same horizontal real
            estate, never overlap. -->
-      <span id="searchClearX" title="Clear search (Esc)" style="display:none;position:absolute;right:34px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;background:var(--border2);color:var(--cream);text-align:center;line-height:20px;font-size:13px;cursor:pointer;user-select:none;z-index:3">&times;</span>
+      <span id="searchClearX" title="Clear search (Esc)" style="display:none;position:absolute;right:10px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;background:var(--border2);color:var(--cream);text-align:center;line-height:20px;font-size:13px;cursor:pointer;user-select:none;z-index:3">&times;</span>
       <span id="searchStar" title="Save / unsave this search" onclick="_toggleSavedFromInput()" style="display:none;position:absolute;right:10px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;color:rgba(255,210,120,.85);text-align:center;line-height:20px;font-size:14px;cursor:pointer;user-select:none;z-index:3">☆</span>
       <span id="searchHelpBtn" title="Search syntax help" onclick="openSearchHelp()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);width:18px;height:18px;border-radius:50%;background:rgba(184,58,18,.18);color:var(--amber);text-align:center;line-height:18px;font-size:11px;font-weight:700;cursor:pointer;user-select:none;z-index:3">?</span>
       <span class="search-person-pill" id="searchPersonPill">
@@ -2544,6 +2551,10 @@ select.tb-select:focus{border-color:var(--red-dark)}
               <div style="display:flex;align-items:center;gap:10px">
                 <button class="btn btn-secondary btn-xs" id="btnExtractColors" style="white-space:nowrap">🎨 Extract Dominant Colors</button>
                 <span style="font-size:11px;color:var(--text3)">Enables the "search by color" feature.</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <button class="btn btn-secondary btn-xs" id="btnRebucketUnknown" style="white-space:nowrap">📅 Fix Unknown Imports</button>
+                <span style="font-size:11px;color:var(--text3)">Re-bucket photos stranded in <b>Unknown/Unknown/</b> using each file's EXIF capture date.</span>
               </div>
               <div style="display:flex;align-items:center;gap:10px;margin-top:6px;padding-top:8px;border-top:1px dashed var(--border)">
                 <button class="btn btn-danger btn-xs" id="btnClearAllTags" style="white-space:nowrap">🗑 Clear All Tags</button>
@@ -10918,6 +10929,69 @@ $('btnExtractGps').onclick=async()=>{
   }finally{
     if(unlisten)try{unlisten();}catch(_){}
     btn.disabled=false;btn.innerHTML=orig;
+  }
+};
+
+// v1.5.221 — Rescue legacy Unknown/Unknown imports.
+// Pre-v1.5.153 builds dumped iPhone photos with missing WPD metadata
+// into `<root>/Unknown/Unknown/`. Backend command walks that folder,
+// reads each file's EXIF (mtime fallback), and moves them into the
+// correct `YYYY/MM-Month/` bucket — also updating the photos table
+// path/folder so the gallery/timeline/calendar reflect the new home
+// without re-scanning.
+$('btnRebucketUnknown').onclick = async () => {
+  const btn = $('btnRebucketUnknown');
+  const orig = btn.innerHTML;
+  // Pick the parent folder containing Unknown/ — usually the same root
+  // the user gave to the iPhone import (e.g. D:\Fotograflar). We use
+  // the Tauri dialog so the user can confirm.
+  let root = null;
+  try {
+    const sel = await window.__TAURI__.dialog.open({
+      directory: true,
+      multiple: false,
+      title: 'Pick the import root containing Unknown/Unknown/ (e.g. D:\\Fotograflar)',
+    });
+    if (!sel) return;
+    root = Array.isArray(sel) ? sel[0] : sel;
+  } catch(e) {
+    toast('Folder picker failed: ' + e, 'error');
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = '📅 Scanning Unknown/…';
+  let unlisten = null;
+  try {
+    const { listen } = window.__TAURI__.event;
+    unlisten = await listen('rebucket-unknown-progress', (ev) => {
+      const p = ev.payload || {};
+      const done = p.done|0, total = p.total|0, moved = p.moved|0, failed = p.failed|0;
+      const pct = total > 0 ? Math.round(100 * done / total) : 0;
+      btn.innerHTML = `📅 ${done.toLocaleString()} / ${total.toLocaleString()} (${pct}%) · ${moved} moved${failed ? ' · ' + failed + ' failed' : ''}`;
+    });
+  } catch(e) {
+    console.warn('rebucket progress listener failed:', e);
+  }
+  try {
+    const r = await invoke('rebucket_unknown_folder', { root });
+    if (r.no_unknown_folder) {
+      toast('No Unknown/Unknown folder found under that path — nothing to fix.', 'info');
+      return;
+    }
+    const bits = [`${r.moved} moved`];
+    if (r.mtime_fallback > 0) bits.push(`${r.mtime_fallback} via mtime`);
+    if (r.failed > 0) bits.push(`${r.failed} failed`);
+    toast(`✅ Rebucketed Unknown photos: ${bits.join(' · ')}.`, r.failed > 0 ? 'warn' : 'success');
+    // Refresh the gallery + folders sidebar so the new YYYY/MM-Month/
+    // entries show up immediately.
+    try { if (typeof loadPhotos === 'function') loadPhotos(); } catch(_){}
+    try { if (typeof refreshFolders === 'function') refreshFolders(); } catch(_){}
+  } catch(e) {
+    toast('Rebucket failed: ' + e, 'error');
+  } finally {
+    if (unlisten) try { unlisten(); } catch(_){}
+    btn.disabled = false;
+    btn.innerHTML = orig;
   }
 };
 
