@@ -2001,10 +2001,23 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <div id="mtpCleanup" style="display:none">
         <div id="mtpDoneSummary" style="font-size:13px;color:var(--text2);margin-bottom:16px;padding:10px 12px;background:var(--bg2);border-radius:6px"></div>
 
-        <!-- Cleanup status — hidden until auto-cleanup runs -->
+        <!-- Cleanup status — hidden until auto-cleanup runs.
+             v1.5.220 — real progress bar replaces the indefinite
+             "Cleaning up phone…" spinner. Backend emits a
+             mtp-delete-progress event after each 20-item chunk;
+             we redraw the fill + N / total + percentage. -->
         <div id="mtpCleanupStatus" style="display:none;margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;text-align:center">
           <div id="mtpCleanupStatusIcon" style="font-size:22px;margin-bottom:6px">🧹</div>
           <div id="mtpCleanupStatusText" style="font-size:13px;color:var(--cream);font-weight:600">Cleaning up phone…</div>
+          <div id="mtpCleanupProgressWrap" style="display:none;margin:10px auto 4px;max-width:280px">
+            <div style="height:8px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden">
+              <div id="mtpCleanupProgressFill" style="height:100%;width:0%;background:linear-gradient(90deg,var(--red-dark),var(--red));border-radius:4px;transition:width .25s ease"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums">
+              <span id="mtpCleanupProgressCount">0 / 0</span>
+              <span id="mtpCleanupProgressPct">0%</span>
+            </div>
+          </div>
           <div id="mtpCleanupStatusSub" style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5"></div>
         </div>
 
@@ -5968,6 +5981,31 @@ function _mtpSetCleanupStatus(opts) {
 function _mtpHideCleanupButtons(){ const b = document.getElementById('mtpCleanupButtons'); if (b) b.style.display = 'none'; }
 function _mtpShowCleanupButtons(){ const b = document.getElementById('mtpCleanupButtons'); if (b) b.style.display = ''; }
 
+// v1.5.220 — Progress-bar helpers for the cleanup phase.
+// Driven by the `mtp-delete-progress` Tauri event the backend fires
+// after each ~20-item chunk. Showing the bar replaces the indefinite
+// spinner so the user can tell whether the phone is actually working
+// or quietly stuck.
+function _mtpShowCleanupProgress(){
+  const w = document.getElementById('mtpCleanupProgressWrap');
+  if(w) w.style.display = 'block';
+}
+function _mtpHideCleanupProgress(){
+  const w = document.getElementById('mtpCleanupProgressWrap');
+  if(w) w.style.display = 'none';
+}
+function _mtpSetCleanupProgress(done, total){
+  const fill  = document.getElementById('mtpCleanupProgressFill');
+  const count = document.getElementById('mtpCleanupProgressCount');
+  const pctEl = document.getElementById('mtpCleanupProgressPct');
+  const t = Math.max(1, total|0);
+  const d = Math.min(t, Math.max(0, done|0));
+  const pct = Math.round((d / t) * 100);
+  if(fill)  fill.style.width = pct + '%';
+  if(count) count.textContent = `${d} / ${t}`;
+  if(pctEl) pctEl.textContent = pct + '%';
+}
+
 // v1.5.218 — Lock-aware delete runner. Modal stays open through the
 // whole run: cleanup-status div shows '🧹 Cleaning up phone…' →
 // on success swaps to '✅ All done · N deleted, M ⭐ kept' (or '⚠️
@@ -5980,14 +6018,64 @@ async function _mtpRunDeleteWithRetry(action, kindLabel, importResult) {
   $('mtpCleanup').style.display = 'block';
   _mtpHideCleanupButtons();
   _mtpSetCleanupStatus({ icon: '🧹', text: 'Cleaning up phone…', sub: 'This usually takes a few seconds.' });
+  // v1.5.220 — Reset and show the real progress bar. Backend fires
+  // `mtp-delete-progress` after each chunk; we just keep redrawing.
+  _mtpSetCleanupProgress(0, 1);
+  _mtpShowCleanupProgress();
+
+  // Subscribe to chunk-level progress events for the lifetime of this
+  // delete run. Unlisten is held in a closure-captured variable so the
+  // success / partial / refused paths can all tear it down cleanly.
+  let unlistenProgress = null;
+  try {
+    if (window.__TAURI__ && window.__TAURI__.event && typeof window.__TAURI__.event.listen === 'function') {
+      unlistenProgress = await window.__TAURI__.event.listen('mtp-delete-progress', (ev) => {
+        const p = ev && ev.payload || {};
+        const done  = +p.done  || 0;
+        const total = +p.total || 0;
+        if (total > 0) _mtpSetCleanupProgress(done, total);
+        if (p.last_error) {
+          // Keep the headline calm; surface the latest error quietly
+          // in the sub-line so the user can tell the phone's pushing
+          // back without spamming them with toasts.
+          const sub = document.getElementById('mtpCleanupStatusSub');
+          if (sub) sub.textContent = `Latest: ${String(p.last_error).slice(0, 120)}`;
+        }
+      });
+    }
+  } catch(_) { /* event API unavailable on this build — non-fatal */ }
+  const stopProgress = () => { try { if (unlistenProgress) unlistenProgress(); } catch(_){} unlistenProgress = null; };
 
   const finalSummary = (r) => {
+    stopProgress();
+    _mtpHideCleanupProgress();
     const importLine = importResult
       ? `<b>${importResult.copied || 0}</b> imported, <b>${importResult.skipped || 0}</b> skipped`
       : null;
     const deletedN  = (r && r.deleted) || 0;
     const failedN   = (r && r.failed)  || 0;
     const keptFavN  = (r && r.kept_favorites) || 0;
+    const icloudBlock = !!(r && r.icloud_block_suspected);
+    // v1.5.220 — iCloud Photos block path.
+    // When the backend's heuristic fires (40+ refusals, 0 successes)
+    // the phone is almost certainly advertising its storage as
+    // read-only-without-deletion, which is the well-known iOS
+    // behaviour when iCloud Photos is enabled. Show a clear hint
+    // instead of just "all refused by phone" — the user CAN fix
+    // this themselves by toggling the setting on the phone.
+    if (icloudBlock) {
+      _mtpSetCleanupStatus({
+        icon: '☁️',
+        text: 'Phone refused all deletions',
+        sub: (importLine ? importLine + '<br>' : '') +
+             '<span style="color:var(--amber)"><b>iCloud Photos is most likely enabled</b> on this iPhone. ' +
+             'iOS reports the camera roll as read-only over USB when iCloud Photos is on, ' +
+             'so RetinaTag can\'t remove the originals. Disable <b>Settings → Photos → Sync this iPhone</b> ' +
+             '(or <b>iCloud Photos</b> on older iOS) and try again. Your imported photos are safe in your library.</span>',
+      });
+      toast('☁️ iPhone refused all deletes — iCloud Photos likely on', 'warn');
+      return;
+    }
     const cleanBits = [`<b>${deletedN}</b> deleted from phone`];
     if (kindLabel === 'keepFavs' && keptFavN > 0) cleanBits.push(`<b>${keptFavN}</b> ⭐ favorites kept`);
     if (failedN > 0) cleanBits.push(`<b style="color:var(--amber)">${failedN}</b> refused by phone`);
@@ -6030,6 +6118,11 @@ async function _mtpRunDeleteWithRetry(action, kindLabel, importResult) {
         }, _mtpNextDelayMs(3));
       } else {
         _mtpStopRetry();
+        // v1.5.220 — drop the progress subscription so we don't leak
+        // an event listener if the delete call itself throws (not
+        // just per-object refusals).
+        stopProgress();
+        _mtpHideCleanupProgress();
         const msg = typeof e === 'string' ? e : (e?.message || String(e));
         $('mtpScanning').style.display = 'none';
         $('mtpCleanup').style.display  = 'block';

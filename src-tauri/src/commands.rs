@@ -3480,22 +3480,41 @@ pub async fn mtp_import(
 
 /// Delete a list of MTP objects directly from the phone.
 /// Used by "iPhone'u komple sil" (after confirmation).
+///
+/// v1.5.220 — Now chunked and emits `mtp-delete-progress`
+/// `{done, total, last_error}` after each ~20-item chunk so the UI
+/// can render a real progress bar instead of the indefinite spinner.
+/// See `mtp::delete_objects_chunked` for the why and the iCloud
+/// Photos detection heuristic. Returns
+/// `{deleted, failed, total, errors, icloud_block_suspected}`.
 #[tauri::command]
 pub async fn mtp_delete(
+    app: tauri::AppHandle,
     device_id: String,
     object_ids: Vec<String>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(windows)]
     {
-        let (deleted, failed) =
-            tokio::task::spawn_blocking(move || crate::mtp::delete_objects(&device_id, &object_ids))
-                .await
-                .map_err(|e| format!("mtp_delete join: {e}"))??;
-        Ok(serde_json::json!({ "deleted": deleted, "failed": failed }))
+        let app_for_blocking = app.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::mtp::delete_objects_chunked(&device_id, &object_ids, |done, total, last_err| {
+                let _ = app_for_blocking.emit(
+                    "mtp-delete-progress",
+                    serde_json::json!({
+                        "done": done,
+                        "total": total,
+                        "last_error": last_err,
+                    }),
+                );
+            })
+        })
+        .await
+        .map_err(|e| format!("mtp_delete join: {e}"))??;
+        Ok(serde_json::to_value(&outcome).map_err(|e| e.to_string())?)
     }
     #[cfg(not(windows))]
     {
-        let _ = (device_id, object_ids);
+        let _ = (app, device_id, object_ids);
         Err("MTP is only supported on Windows in this build".to_string())
     }
 }
@@ -3506,15 +3525,25 @@ pub async fn mtp_delete(
 /// which library photo. Favorites stay on the phone; everything else
 /// is removed.
 ///
-/// Returns { deleted, kept_favorites, not_imported }.
+/// Returns { deleted, failed, kept_favorites, not_imported,
+///            errors, icloud_block_suspected }.
+///
+/// v1.5.220 — Like `mtp_delete`, this now drives chunked deletes with
+/// per-chunk progress events. Phase E of the import flow listens on
+/// `mtp-delete-progress` and paints a real bar. The
+/// `icloud_block_suspected` flag is set when the phone refuses every
+/// delete in the first 40 attempts — at that point the UI swaps the
+/// status to the "iCloud Photos may be on" hint instead of waiting
+/// for the rest of the (also-doomed) chunks.
 #[tauri::command]
 pub async fn mtp_delete_non_favorites(
+    app: tauri::AppHandle,
     device_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(not(windows))]
     {
-        let _ = (device_id, state);
+        let _ = (app, device_id, state);
         return Err("MTP is only supported on Windows in this build".to_string());
     }
     #[cfg(windows)]
@@ -3588,14 +3617,32 @@ pub async fn mtp_delete_non_favorites(
         let kept = favorite_ids.len();
 
         let device_id_for_del = device_id.clone();
-        let (deleted, _failed) = tokio::task::spawn_blocking(move || {
-            crate::mtp::delete_objects(&device_id_for_del, &to_delete)
+        let app_for_blocking = app.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::mtp::delete_objects_chunked(
+                &device_id_for_del,
+                &to_delete,
+                |done, total, last_err| {
+                    let _ = app_for_blocking.emit(
+                        "mtp-delete-progress",
+                        serde_json::json!({
+                            "done": done,
+                            "total": total,
+                            "last_error": last_err,
+                        }),
+                    );
+                },
+            )
         })
         .await
         .map_err(|e| format!("delete join: {e}"))??;
 
         Ok(serde_json::json!({
-            "deleted": deleted,
+            "deleted": outcome.deleted,
+            "failed": outcome.failed,
+            "total": outcome.total,
+            "errors": outcome.errors,
+            "icloud_block_suspected": outcome.icloud_block_suspected,
             "kept_favorites": kept,
             "not_imported": not_imported_count,
         }))

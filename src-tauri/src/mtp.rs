@@ -587,55 +587,185 @@ pub unsafe fn copy_object_with_device(
 
 // ─── Phase 5: delete objects from device ───────────────────────────────────
 
-/// Delete the given objects from the device. Returns (deleted, failed).
-/// On iPhone this is the equivalent of "remove from Camera Roll" — files
-/// are gone permanently.
-pub fn delete_objects(device_id: &str, object_ids: &[String]) -> Result<(usize, usize), String> {
+/// v1.5.220 — Outcome of a chunked delete pass.
+/// `errors` carries the first few HRESULT/text errors we saw so the UI can
+/// show a meaningful diagnostic instead of "something went wrong". When
+/// `icloud_block_suspected` is true, the symptom matches the well-known
+/// "iCloud Photos enabled → storage advertised read-only-without-deletion"
+/// failure — Delete() returns S_OK or per-object E_ACCESSDENIED but no
+/// files actually leave the device. We surface that as a hint, not a
+/// hard claim, since we can't always tell deterministically.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteOutcome {
+    pub deleted: usize,
+    pub failed: usize,
+    pub total: usize,
+    pub errors: Vec<String>,
+    pub icloud_block_suspected: bool,
+}
+
+/// v1.5.220 — Chunked delete with progress callback.
+///
+/// Why chunked: a single WPD `Content::Delete()` over hundreds of objects
+/// on an iPhone routinely takes 30+ seconds and blocks the spawn_blocking
+/// task with no way for the UI to show progress. Worse, when iCloud
+/// Photos is enabled the call can hang for minutes before WPD gives up.
+/// By chunking into ~20-item batches we get a progress tick every 1–3
+/// seconds and can early-abort with a clear message instead of an
+/// infinite "Cleaning up phone…" spinner.
+///
+/// `on_progress(done, total, last_error)` fires after each chunk and is
+/// also called once with done=0 before the first chunk so the UI can
+/// paint a 0% bar immediately. `last_error` is `None` while everything
+/// is going fine and `Some(msg)` once the first chunk-level error
+/// surfaces.
+///
+/// Return shape: `(deleted, failed, errors, icloud_suspected)`. We
+/// detect the iCloud-Photos pattern heuristically: if the first ~40
+/// objects across two consecutive chunks all came back as failures
+/// with zero successes, the phone is almost certainly read-only and
+/// we abort early so the user gets a clear hint instead of waiting
+/// for the rest of the (also-doomed) chunks.
+pub fn delete_objects_chunked<F>(
+    device_id: &str,
+    object_ids: &[String],
+    on_progress: F,
+) -> Result<DeleteOutcome, String>
+where
+    F: Fn(usize, usize, Option<&str>),
+{
+    let total = object_ids.len();
     if object_ids.is_empty() {
-        return Ok((0, 0));
+        on_progress(0, 0, None);
+        return Ok(DeleteOutcome {
+            deleted: 0,
+            failed: 0,
+            total: 0,
+            errors: Vec::new(),
+            icloud_block_suspected: false,
+        });
     }
+    // Chunk size picked by experiment: small enough that the user sees a
+    // moving bar (1–3 seconds per chunk on a healthy iPhone), large
+    // enough to amortize the per-call Delete() / PropVariantCollection
+    // construction overhead.
+    const CHUNK: usize = 20;
+    let mut deleted = 0usize;
+    let mut failed = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    let mut icloud_block_suspected = false;
+    on_progress(0, total, None);
     unsafe {
         let device = open_device(device_id)?;
         let content: IPortableDeviceContent =
             device.Content().map_err(|e| format!("Content: {e}"))?;
-
-        // Build an IPortableDevicePropVariantCollection of VT_LPWSTR entries.
-        let coll: IPortableDevicePropVariantCollection = CoCreateInstance(
-            &PortableDevicePropVariantCollection,
-            None,
-            CLSCTX_INPROC_SERVER,
-        )
-        .map_err(|e| format!("CoCreateInstance(PropVariantCollection): {e}"))?;
-
-        for id in object_ids {
-            // WPD's Delete/EnumObjects accept VT_BSTR for object IDs on
-            // both Apple and Android drivers, so PROPVARIANT::from(&str)
-            // (which produces a VT_BSTR) is sufficient here.
-            let pv = PROPVARIANT::from(id.as_str());
-            coll.Add(&pv)
-                .map_err(|e| format!("PropVariantCollection::Add: {e}"))?;
-        }
-
-        // Delete (no recursion — we don't want to accidentally nuke a
-        // whole folder tree if someone passed a folder ID by mistake).
-        let delete_result = content.Delete(
-            PORTABLE_DEVICE_DELETE_NO_RECURSION.0 as u32,
-            &coll,
-            std::ptr::null_mut(),
-        );
-
-        // Inspect the results collection to count successes vs failures.
-        // If the Delete call itself failed, treat all as failed.
-        match delete_result {
-            Ok(_) => {
-                // For a conservative first pass, assume all succeeded. WPD
-                // does have a per-item HRESULT collection but parsing that
-                // is a whole extra pile of COM; we'll refine later if real
-                // failures show up.
-                Ok((object_ids.len(), 0))
+        for (chunk_idx, chunk) in object_ids.chunks(CHUNK).enumerate() {
+            // Fresh collection per chunk — reusing the same one across
+            // chunks led to Add() failures on some Android drivers and
+            // it's cheap to recreate.
+            let coll: IPortableDevicePropVariantCollection = CoCreateInstance(
+                &PortableDevicePropVariantCollection,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|e| format!("CoCreateInstance(PropVariantCollection): {e}"))?;
+            for id in chunk {
+                let pv = PROPVARIANT::from(id.as_str());
+                coll.Add(&pv)
+                    .map_err(|e| format!("PropVariantCollection::Add: {e}"))?;
             }
-            Err(e) => Err(format!("Content::Delete: {e}")),
+            let mut results: Option<IPortableDevicePropVariantCollection> = None;
+            let delete_result = content.Delete(
+                PORTABLE_DEVICE_DELETE_NO_RECURSION.0 as u32,
+                &coll,
+                &mut results,
+            );
+            let chunk_len = chunk.len();
+            let mut chunk_deleted = 0usize;
+            let mut chunk_failed = 0usize;
+            // Inspect per-object outcomes when WPD populated the results
+            // collection. Apple's WPD driver does populate it on partial
+            // failures; the top-level HRESULT alone is unreliable.
+            if let Some(res) = &results {
+                let mut count: u32 = 0;
+                if res.GetCount(&mut count).is_ok() && count as usize == chunk_len {
+                    for i in 0..count {
+                        let pv = PROPVARIANT::new();
+                        if res.GetAt(i, &pv).is_ok() {
+                            // Reach into the underlying PROPVARIANT to
+                            // distinguish VT_ERROR (per-object failure)
+                            // from anything else. windows-rs exposes the
+                            // raw C union via `.as_raw()`; VARENUM is a
+                            // plain u16 with VT_ERROR == 0x000A.
+                            let raw = pv.as_raw();
+                            let vt: u16 = raw.Anonymous.Anonymous.vt;
+                            if vt == 0x000A {
+                                chunk_failed += 1;
+                                if errors.len() < 4 {
+                                    let hr: i32 =
+                                        raw.Anonymous.Anonymous.Anonymous.scode;
+                                    errors.push(format!(
+                                        "HRESULT 0x{:08x}",
+                                        hr as u32
+                                    ));
+                                }
+                            } else {
+                                chunk_deleted += 1;
+                            }
+                        } else {
+                            chunk_failed += 1;
+                        }
+                    }
+                }
+            }
+            // Fallback: no per-object results were produced (older drivers,
+            // or the call errored before populating). Use the top-level
+            // HRESULT for an all-or-nothing decision on this chunk.
+            if chunk_deleted + chunk_failed == 0 {
+                match &delete_result {
+                    Ok(_) => chunk_deleted = chunk_len,
+                    Err(e) => {
+                        chunk_failed = chunk_len;
+                        if errors.len() < 4 {
+                            errors.push(format!("Delete: {e}"));
+                        }
+                    }
+                }
+            }
+            deleted += chunk_deleted;
+            failed += chunk_failed;
+            let last_err = errors.last().map(|s| s.as_str());
+            on_progress(deleted + failed, total, last_err);
+            // Heuristic: two full chunks where every single object came
+            // back failed and we never saw a success → the phone is
+            // refusing all deletes. The overwhelmingly common cause on
+            // iPhones is iCloud Photos being enabled (the storage is
+            // advertised as read-only-without-deletion). Bail out
+            // instead of grinding through hundreds more doomed chunks.
+            if chunk_idx >= 1 && deleted == 0 && failed >= CHUNK * 2 {
+                icloud_block_suspected = true;
+                if errors.len() < 4 {
+                    errors.push(
+                        "Phone refused first 40 deletes — iCloud Photos may be on".to_string(),
+                    );
+                }
+                break;
+            }
         }
     }
+    Ok(DeleteOutcome {
+        deleted,
+        failed,
+        total,
+        errors,
+        icloud_block_suspected,
+    })
+}
+
+/// v1.5.220 — Back-compat wrapper for any callsite that doesn't care
+/// about progress. Returns (deleted, failed) like the old signature.
+pub fn delete_objects(device_id: &str, object_ids: &[String]) -> Result<(usize, usize), String> {
+    let out = delete_objects_chunked(device_id, object_ids, |_, _, _| {})?;
+    Ok((out.deleted, out.failed))
 }
 
