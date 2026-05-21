@@ -1067,6 +1067,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <div style="display:flex;align-items:center;gap:4px" onclick="event.stopPropagation()">
         <button class="btn-ghost" id="btnClusterFaces" title="Auto-cluster all faces" style="font-size:10px;padding:2px 6px;color:var(--amber)">Cluster</button>
         <button class="btn-ghost" id="btnRecognizeAll" title="Recognize known people in all photos" style="font-size:10px;padding:2px 6px">Recognize</button>
+        <button class="btn-ghost" id="btnFixMixed" title="Move faces between two persons based on which centroid they're closer to (cleans up mis-clustered people)" style="font-size:10px;padding:2px 6px;color:var(--amber)">Fix mixed</button>
         <button class="btn-ghost" id="btnNewPerson" title="Add new person" style="font-size:14px;padding:0 4px">+</button>
         <span id="peopleChevron" style="font-size:10px;transition:transform .2s;display:inline-block" onclick="sbToggle('peopleBody','peopleChevron');event.stopPropagation()">▼</span>
       </div>
@@ -2090,6 +2091,39 @@ select.tb-select:focus{border-color:var(--red-dark)}
 </div>
 
 <!-- ── Assign Face Modal ──────────────────────────────────────────── -->
+<!-- v1.5.229 — Fix mixed clusters by moving faces from one person to
+     another based on centroid proximity. Opens from People sidebar
+     "Fix mixed" button. -->
+<div class="modal-overlay" id="fixMixedModal">
+  <div class="modal-box" style="width:760px;max-height:82vh;display:flex;flex-direction:column">
+    <div class="modal-head">
+      <h2>🔄 Move mis-clustered faces</h2>
+      <button class="btn-ghost" id="btnFmClose">&times;</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;overflow:hidden">
+      <div style="font-size:11px;color:var(--text3);line-height:1.5">
+        Pick the person whose cluster has wrong faces (FROM) and the person those faces actually belong to (TO).
+        We rank every face_region currently under FROM by how much closer it is to the TO centroid.
+        Confidence shown per row. Uncheck any that look wrong before applying.
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px">
+          From:
+          <select id="fmFromSelect" class="tb-select" style="min-width:160px"></select>
+        </label>
+        <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px">
+          To:
+          <select id="fmToSelect" class="tb-select" style="min-width:160px"></select>
+        </label>
+        <button class="btn btn-secondary btn-sm" id="btnFmFind">🔍 Find suggestions</button>
+        <div style="flex:1"></div>
+        <button class="btn btn-primary btn-sm" id="btnFmApply" disabled>✓ Move checked</button>
+      </div>
+      <div id="fmSuggestList" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--card)"></div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="assignFaceModal">
   <div class="modal-box" style="width:340px;padding:24px">
     <div style="font-size:15px;font-weight:800;color:var(--cream);margin-bottom:16px;text-align:center">Assign Face to Person</div>
@@ -12840,6 +12874,126 @@ function initFaceRecognition() {
     } finally {
       btn.textContent = 'Recognize'; btn.disabled = false;
     }
+  };
+
+  // v1.5.229 — "Fix mixed" flow. For when two persons got merged by
+  // the clusterer or by inheritance from a snapshot import. User picks
+  // FROM person and TO person; backend ranks each face_region linked
+  // to FROM by how much closer it is to TO's centroid than FROM's;
+  // user reviews thumbnails + checks the ones to move; one apply
+  // moves face_regions + retags photos.
+  $('btnFixMixed').onclick = async () => {
+    try {
+      const persons = await invoke('get_persons');
+      const named = (persons || []).filter(p => p && p.name && p.name.trim());
+      if (named.length < 2) {
+        toast('Need at least 2 named persons before you can move faces between them', 'info');
+        return;
+      }
+      _fixMixedOpen(named);
+    } catch (e) {
+      toast('Could not load persons: ' + e, 'error');
+    }
+  };
+
+  function _fixMixedOpen(persons) {
+    const modal = document.getElementById('fixMixedModal');
+    const fromSel = document.getElementById('fmFromSelect');
+    const toSel   = document.getElementById('fmToSelect');
+    const list    = document.getElementById('fmSuggestList');
+    list.innerHTML = '<div style="padding:14px;color:var(--text3);font-size:11px;text-align:center">Pick FROM and TO above, then click "Find suggestions".</div>';
+    const opts = persons.map(p =>
+      `<option value="${p.id}">${_esc(p.name)} (${p.face_count|0} faces)</option>`
+    ).join('');
+    fromSel.innerHTML = '<option value="">Pick a person…</option>' + opts;
+    toSel.innerHTML   = '<option value="">Pick a person…</option>' + opts;
+    modal.classList.add('open');
+  }
+
+  document.getElementById('btnFmFind').onclick = async () => {
+    const fromId = parseInt(document.getElementById('fmFromSelect').value);
+    const toId   = parseInt(document.getElementById('fmToSelect').value);
+    if (!fromId || !toId || fromId === toId) {
+      toast('Pick two different persons', 'error');
+      return;
+    }
+    const btn = document.getElementById('btnFmFind');
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = 'Computing…';
+    try {
+      const sugs = await invoke('suggest_reassignment', {
+        fromPersonId: fromId, toPersonId: toId,
+      });
+      _fmRenderSuggestions(sugs, fromId, toId);
+    } catch (e) {
+      toast('Suggest failed: ' + e, 'error');
+    } finally {
+      btn.disabled = false; btn.innerHTML = orig;
+    }
+  };
+
+  function _fmRenderSuggestions(sugs, fromId, toId) {
+    const list = document.getElementById('fmSuggestList');
+    if (!sugs || sugs.length === 0) {
+      list.innerHTML = '<div style="padding:18px;color:var(--text3);font-size:11px;text-align:center">No faces look closer to the TO person than to FROM. The cluster is already clean from this angle.</div>';
+      document.getElementById('btnFmApply').disabled = true;
+      return;
+    }
+    document.getElementById('btnFmApply').disabled = false;
+    // Render checkbox grid of face thumbnails + cos values.
+    let html = `<div style="margin-bottom:8px;color:var(--text2);font-size:11px"><b>${sugs.length}</b> face${sugs.length===1?'':'s'} suggested. Uncheck any that look wrong before applying.</div>`;
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px">';
+    for (const s of sugs) {
+      const margin = (s.cos_to - s.cos_from);
+      const tone = margin > 0.15 ? 'var(--green,#6b9)' : margin > 0.08 ? 'var(--amber)' : 'var(--text3)';
+      const img = s.thumb_b64
+        ? `<img src="data:image/jpeg;base64,${s.thumb_b64}" style="width:100%;height:90px;object-fit:cover;border-radius:4px">`
+        : `<div style="width:100%;height:90px;background:var(--card2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:10px">no preview</div>`;
+      html += `
+        <label style="display:block;background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:6px;cursor:pointer">
+          <input type="checkbox" class="fm-check" data-face-id="${s.face_id}" checked style="margin-bottom:4px">
+          ${img}
+          <div style="font-size:9px;color:var(--text3);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_esc(s.filename)}">${_esc(s.filename||'')}</div>
+          <div style="font-size:9px;color:${tone};margin-top:2px;font-variant-numeric:tabular-nums">
+            from ${s.cos_from.toFixed(2)} → to ${s.cos_to.toFixed(2)}
+          </div>
+        </label>`;
+    }
+    html += '</div>';
+    list.innerHTML = html;
+    list.dataset.fromId = fromId;
+    list.dataset.toId   = toId;
+  }
+
+  document.getElementById('btnFmApply').onclick = async () => {
+    const list = document.getElementById('fmSuggestList');
+    const fromId = parseInt(list.dataset.fromId);
+    const toId   = parseInt(list.dataset.toId);
+    const checked = [...list.querySelectorAll('.fm-check:checked')].map(c => parseInt(c.dataset.faceId));
+    if (!checked.length) {
+      toast('Nothing checked', 'info');
+      return;
+    }
+    const btn = document.getElementById('btnFmApply');
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = 'Moving…';
+    try {
+      const r = await invoke('apply_reassignment', {
+        faceIds: checked, fromPersonId: fromId, toPersonId: toId,
+      });
+      toast(`✓ Moved ${r.faces_moved} face${r.faces_moved===1?'':'s'} from "${r.from_name}" to "${r.to_name}" · ${r.photos_retagged} photo${r.photos_retagged===1?'':'s'} retagged`, 'success');
+      document.getElementById('fixMixedModal').classList.remove('open');
+      refreshPersonsSidebar();
+      loadPhotos();
+    } catch (e) {
+      toast('Apply failed: ' + e, 'error');
+    } finally {
+      btn.disabled = false; btn.innerHTML = orig;
+    }
+  };
+
+  document.getElementById('btnFmClose').onclick = () => {
+    document.getElementById('fixMixedModal').classList.remove('open');
   };
 
   // Assign face modal — close

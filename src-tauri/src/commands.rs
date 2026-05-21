@@ -7279,6 +7279,225 @@ pub async fn batch_remove_person(
     }))
 }
 
+/// v1.5.229 — "You moved one face from Serdar to Buğra → here are
+/// 27 more we're confident belong to Buğra" suggestion engine.
+///
+/// Algorithm:
+///   1. Pull every face_region whose embedding is non-empty for the
+///      FROM person — that's the candidate pool.
+///   2. Pull the same for the TO person — compute its centroid.
+///      Also pull the FROM person's centroid (so we can rank by
+///      "moved closer to TO than to FROM").
+///   3. For each candidate face, compute cos(emb, TO_centroid)
+///      and cos(emb, FROM_centroid). Include it in the suggestion
+///      list when cos_to > cos_from + MARGIN (default 0.05) AND
+///      cos_to > MIN_ABS (default 0.5 — must look plausibly like TO).
+///   4. Sort by (cos_to - cos_from) descending, return at most LIMIT.
+///
+/// Returns face_id, photo_id, filename, cos_from, cos_to per row so
+/// the UI can render thumbnails + confidence and the user can
+/// confirm/deselect before applying.
+#[derive(serde::Serialize)]
+pub struct ReassignSuggestion {
+    pub face_id: i64,
+    pub photo_id: i64,
+    pub filename: String,
+    pub cos_from: f32,
+    pub cos_to: f32,
+    pub thumb_b64: Option<String>,
+}
+
+#[tauri::command]
+pub async fn suggest_reassignment(
+    from_person_id: i64,
+    to_person_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ReassignSuggestion>, String> {
+    if from_person_id == to_person_id {
+        return Err("from and to must be different persons".into());
+    }
+    const MARGIN: f32 = 0.05;
+    const MIN_ABS: f32 = 0.5;
+    const LIMIT: usize = 200;
+
+    let (from_centroid, to_centroid, candidates, faces_dir) = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+
+        // Collect embeddings for both persons in one pass each.
+        let read = |pid: i64| -> Result<Vec<(i64, i64, String, Vec<u8>)>, String> {
+            let mut s = conn.prepare(
+                "SELECT fr.id, fr.photo_id, COALESCE(p.path, ''), fr.embedding
+                   FROM face_regions fr
+                   LEFT JOIN photos p ON p.id = fr.photo_id
+                  WHERE fr.person_id = ?1 AND fr.embedding IS NOT NULL"
+            ).map_err(|e| e.to_string())?;
+            let rows: Vec<(i64, i64, String, Vec<u8>)> = s
+                .query_map([pid], |r| Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Vec<u8>>(3)?,
+                )))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        };
+
+        let from_rows = read(from_person_id)?;
+        let to_rows = read(to_person_id)?;
+        if from_rows.is_empty() {
+            return Err("from person has no face embeddings".into());
+        }
+        if to_rows.is_empty() {
+            return Err("to person has no face embeddings".into());
+        }
+
+        fn centroid(rows: &[(i64, i64, String, Vec<u8>)]) -> Vec<f32> {
+            let embs: Vec<Vec<f32>> = rows
+                .iter()
+                .map(|(_, _, _, b)| crate::face::bytes_to_embedding(b))
+                .filter(|e| !e.is_empty())
+                .collect();
+            if embs.is_empty() { return vec![]; }
+            let d = embs[0].len();
+            let mut c = vec![0f32; d];
+            for e in &embs {
+                if e.len() == d {
+                    for i in 0..d { c[i] += e[i]; }
+                }
+            }
+            for v in &mut c { *v /= embs.len() as f32; }
+            c
+        }
+        let from_c = centroid(&from_rows);
+        let to_c   = centroid(&to_rows);
+        (from_c, to_c, from_rows, state.thumbnails_dir.clone())
+    };
+
+    let faces_dir = faces_dir.join("faces");
+    let mut suggestions: Vec<ReassignSuggestion> = Vec::new();
+    for (fid, photo_id, path, emb_bytes) in candidates {
+        let emb = crate::face::bytes_to_embedding(&emb_bytes);
+        if emb.is_empty() { continue; }
+        let cos_from = crate::face::cosine_similarity(&emb, &from_centroid);
+        let cos_to   = crate::face::cosine_similarity(&emb, &to_centroid);
+        if cos_to < MIN_ABS { continue; }
+        if cos_to <= cos_from + MARGIN { continue; }
+        let filename = std::path::Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let thumb_b64 = std::fs::read(faces_dir.join(format!("face_{}.jpg", fid)))
+            .ok()
+            .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+        suggestions.push(ReassignSuggestion {
+            face_id: fid, photo_id, filename, cos_from, cos_to, thumb_b64,
+        });
+    }
+    // Best margins first; cap at LIMIT so the UI doesn't choke on a
+    // pathologically mixed cluster.
+    suggestions.sort_by(|a, b| {
+        (b.cos_to - b.cos_from)
+            .partial_cmp(&(a.cos_to - a.cos_from))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    suggestions.truncate(LIMIT);
+    Ok(suggestions)
+}
+
+/// v1.5.229 — Apply a batch of reassignment suggestions in one go.
+/// For each face_id: set face_regions.person_id = to_person_id. Then
+/// for each affected photo, swap the face-kind tag from the FROM
+/// person's name to the TO person's name (only when the photo no
+/// longer has any face linking the FROM person).
+///
+/// Returns counts so the UI can surface "27 faces moved · 14 photos
+/// retagged" in the success toast.
+#[tauri::command]
+pub async fn apply_reassignment(
+    face_ids: Vec<i64>,
+    from_person_id: i64,
+    to_person_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    if face_ids.is_empty() {
+        return Ok(serde_json::json!({"faces_moved":0,"photos_retagged":0}));
+    }
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    let from_name: String = conn.query_row(
+        "SELECT name FROM persons WHERE id = ?1",
+        rusqlite::params![from_person_id],
+        |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    let to_name: String = conn.query_row(
+        "SELECT name FROM persons WHERE id = ?1",
+        rusqlite::params![to_person_id],
+        |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    // Photo ids touched — needed for the tag rewrite.
+    let placeholders: String = (0..face_ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+    let photo_ids: Vec<i64> = {
+        let q = format!("SELECT DISTINCT photo_id FROM face_regions WHERE id IN ({placeholders})");
+        let mut s = conn.prepare(&q).map_err(|e| e.to_string())?;
+        let mut binds: Vec<rusqlite::types::Value> = face_ids.iter().map(|i| (*i).into()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> = binds.iter_mut()
+            .map(|v| v as &dyn rusqlite::ToSql)
+            .collect();
+        // Bind the QueryMap iterator to a local so its borrow on `s`
+        // ends before the .collect() returns — otherwise the inline
+        // form trips E0597 because the temporary holds `&s` past the
+        // expression's lifetime.
+        let it = s.query_map(params_refs.as_slice(), |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        let v: Vec<i64> = it.filter_map(|r| r.ok()).collect();
+        v
+    };
+
+    // Move the faces.
+    let q = format!("UPDATE face_regions SET person_id = ?1 WHERE id IN ({placeholders})");
+    let mut binds: Vec<rusqlite::types::Value> = std::iter::once((to_person_id).into())
+        .chain(face_ids.iter().map(|i| (*i).into()))
+        .collect();
+    let params_refs: Vec<&dyn rusqlite::ToSql> = binds.iter_mut()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
+    let faces_moved = conn.execute(&q, params_refs.as_slice()).map_err(|e| e.to_string())?;
+
+    // For each photo touched, retag if the FROM person no longer has
+    // any face there. (If they still do — e.g., a group photo with
+    // both people — keep the FROM tag in addition to adding TO.)
+    let mut photos_retagged = 0usize;
+    for pid in &photo_ids {
+        let from_left: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM face_regions WHERE photo_id = ?1 AND person_id = ?2",
+            rusqlite::params![pid, from_person_id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        if from_left == 0 {
+            // Drop the FROM tag for this photo.
+            let _ = conn.execute(
+                "DELETE FROM tags WHERE photo_id = ?1 AND tag = ?2 AND source = 'face'",
+                rusqlite::params![pid, from_name],
+            );
+        }
+        // Always add the TO tag (idempotent — UNIQUE constraint on
+        // (photo_id, tag) means no duplicate row inserted).
+        let _ = db::insert_tags(
+            &conn, *pid,
+            &[(to_name.clone(), 1.0, "face".to_string())],
+        );
+        photos_retagged += 1;
+    }
+    Ok(serde_json::json!({
+        "faces_moved": faces_moved,
+        "photos_retagged": photos_retagged,
+        "from_name": from_name,
+        "to_name": to_name,
+    }))
+}
+
 /// Overwrite a photo's user-editable description. Empty string clears it.
 /// The DB helper keeps the FTS5 index in sync so search works immediately.
 #[tauri::command]

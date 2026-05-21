@@ -1160,6 +1160,8 @@ pub fn run() {
             commands::export_collection_as_folder,
             commands::batch_assign_person,
             commands::batch_remove_person,
+            commands::suggest_reassignment,
+            commands::apply_reassignment,
             commands::set_photo_description,
             commands::export_metadata_snapshot,
             commands::import_metadata_snapshot,
