@@ -30,9 +30,18 @@
 html,body{height:100%;overflow:hidden;background:var(--ink);color:var(--text);
   font-family:var(--font);font-size:13px;-webkit-font-smoothing:antialiased}
 ::selection{background:var(--red);color:var(--cream)}
-::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
-::-webkit-scrollbar-thumb:hover{background:var(--red-dark)}
+/* v1.5.223 — Hide every scrollbar app-wide.
+   The previous 5 px thin scrollbar was still visible enough to feel
+   cluttered on modals and side panels. Mouse wheel, trackpad,
+   keyboard arrows, and touch swipe all continue to scroll exactly as
+   before — we're only removing the visual chrome. `!important` here
+   is intentional: it defeats the half-dozen component-scoped
+   `::-webkit-scrollbar { height: 6px }` rules elsewhere in this file
+   without making me hunt them down one by one. */
+*{scrollbar-width:none!important;-ms-overflow-style:none!important}
+*::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;background:transparent!important}
+*::-webkit-scrollbar-track{background:transparent!important}
+*::-webkit-scrollbar-thumb{background:transparent!important}
 body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
   background:radial-gradient(ellipse 60% 50% at 30% 50%,rgba(184,58,18,.06) 0%,transparent 70%)}
 #app{display:flex;height:100vh;position:relative;z-index:1}
