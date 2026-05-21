@@ -226,6 +226,12 @@ pub struct MtpMediaList {
     pub total_size: u64,
     pub photo_count: usize,
     pub video_count: usize,
+    /// v1.5.218 — Shape parity with the Mac payload (ImageCaptureCore
+    /// surfaces this when iCloud Photos is on and the device is hiding
+    /// originals behind cloud-only references). Windows WPD doesn't
+    /// surface this gate — hardcoded false on this platform so the
+    /// frontend can render the same warning UI without a platform fork.
+    pub i_cloud_photos_enabled: bool,
 }
 
 /// Open a WPD device handle for `device_id`. Caller owns the returned
@@ -483,6 +489,9 @@ pub fn list_media(device_id: &str) -> Result<MtpMediaList, String> {
             total_size,
             photo_count,
             video_count,
+            // Windows WPD doesn't surface the iCloud-Photos gate — keep
+            // shape parity with the Mac payload by hardcoding false.
+            i_cloud_photos_enabled: false,
         })
     }
 }

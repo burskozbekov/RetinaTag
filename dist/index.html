@@ -446,6 +446,17 @@ select.tb-select:focus{border-color:var(--red-dark)}
   background:rgba(240,165,0,.15);color:var(--amber,#f0a500);display:flex;align-items:center;justify-content:center;
   font-size:11px;font-weight:700;border:1px solid rgba(240,165,0,.35)}
 .mtp-hint-foot{padding:8px 0 10px;border-top:1px dashed rgba(240,165,0,.18);margin-top:4px;font-size:11px;color:var(--text3);display:flex;align-items:center;gap:8px}
+/* v1.5.218 — Manual retry escape hatch + diagnostic line. Both stay
+   hidden until the auto-retry has tried >=3 times without success
+   (revealed by _mtpRevealEscape). Users almost never need them, but
+   they make the difference between 'waiting forever' and 'I see what's
+   wrong now'. */
+.mtp-hint-action{display:block;width:100%;margin-top:8px;padding:6px 10px;
+  background:rgba(240,165,0,.12);border:1px solid rgba(240,165,0,.4);
+  border-radius:6px;color:var(--amber,#f0a500);font-size:11.5px;font-weight:600;cursor:pointer;text-align:center}
+.mtp-hint-err{margin-top:6px;padding:6px 8px;background:rgba(180,90,40,.08);
+  border-left:2px solid rgba(180,90,40,.6);border-radius:3px;
+  font-size:10.5px;color:var(--text3);line-height:1.4;word-break:break-word;font-family:ui-monospace,monospace}
 .mtp-retry-dot{width:7px;height:7px;border-radius:50%;background:var(--amber,#f0a500);
   animation:rt-mtp-retry 1.4s ease-in-out infinite}
 @keyframes rt-mtp-retry{0%,100%{transform:scale(.6);opacity:.4}50%{transform:scale(1.1);opacity:1}}
@@ -1892,6 +1903,8 @@ select.tb-select:focus{border-color:var(--red-dark)}
           <div class="mtp-hint-step"><span class="mtp-step-num">1</span><span class="mtp-step-text">Unlock your iPhone</span></div>
           <div class="mtp-hint-step"><span class="mtp-step-num">2</span><span class="mtp-step-text">Tap <b>"Trust This Computer"</b> if it appears</span></div>
           <div class="mtp-hint-foot">Waiting automatically — no need to click anything. <span class="mtp-retry-dot"></span></div>
+          <button id="mtpManualRetry" class="mtp-hint-action" style="display:none" onclick="_mtpManualRetry()">↻ Already unlocked? Try again</button>
+          <div id="mtpHintErr" class="mtp-hint-err" style="display:none"></div>
         </div>
       </div>
 
@@ -1978,22 +1991,32 @@ select.tb-select:focus{border-color:var(--red-dark)}
       </div>
 
       <!-- Phase E: after import — cleanup options -->
+      <!-- v1.5.218 — Phase E redesign. Modal stays open through the
+           cleanup; status div is hidden until auto-cleanup runs, then
+           swaps the manual buttons out so the user sees one focused
+           progress message + final summary instead of "buttons … click
+           … modal closes … was that successful?". -->
       <div id="mtpCleanup" style="display:none">
         <div id="mtpDoneSummary" style="font-size:13px;color:var(--text2);margin-bottom:16px;padding:10px 12px;background:var(--bg2);border-radius:6px"></div>
-        <div style="font-size:12px;font-weight:600;color:var(--text1);margin-bottom:10px">What should I do with the photos on your phone?</div>
-        <div style="display:flex;flex-direction:column;gap:8px">
-          <button class="btn btn-secondary btn-block btn-sm" id="btnMtpKeep" style="text-align:left">
-            📱 Keep on phone (delete nothing)
-          </button>
-          <button class="btn btn-secondary btn-block btn-sm" id="btnMtpKeepFavs" style="text-align:left;border-color:var(--amber)">
-            ⭐ Keep favorites, <b>delete the rest from phone</b>
-          </button>
-          <button class="btn-danger btn-block btn-sm" id="btnMtpWipe" style="text-align:left">
-            🗑️ <b>Delete all photos from phone</b>
-          </button>
+
+        <!-- Cleanup status — hidden until auto-cleanup runs -->
+        <div id="mtpCleanupStatus" style="display:none;margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;text-align:center">
+          <div id="mtpCleanupStatusIcon" style="font-size:22px;margin-bottom:6px">🧹</div>
+          <div id="mtpCleanupStatusText" style="font-size:13px;color:var(--cream);font-weight:600">Cleaning up phone…</div>
+          <div id="mtpCleanupStatusSub" style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5"></div>
         </div>
-        <div style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.5">
-          Deletion on the phone is <b>permanent</b>. Only the photos you imported are safe in your library — make sure you copied everything you might need.
+
+        <!-- Manual buttons — only visible when no auto-cleanup in flight -->
+        <div id="mtpCleanupButtons">
+          <div style="font-size:12px;font-weight:600;color:var(--text1);margin-bottom:10px">What should I do with the photos on your phone?</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <button class="btn btn-secondary btn-block btn-sm" id="btnMtpKeep" style="text-align:left">📱 Keep on phone (delete nothing)</button>
+            <button class="btn btn-secondary btn-block btn-sm" id="btnMtpKeepFavs" style="text-align:left;border-color:var(--amber)">⭐ Keep favorites, <b>delete the rest from phone</b></button>
+            <button class="btn-danger btn-block btn-sm" id="btnMtpWipe" style="text-align:left">🗑️ <b>Delete all photos from phone</b></button>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.5">
+            Deletion on the phone is <b>permanent</b>. Only the photos you imported are safe in your library — make sure you copied everything you might need.
+          </div>
         </div>
       </div>
     </div>
@@ -5553,8 +5576,49 @@ function _mtpErrIsLocked(err) {
          m.includes('user denied');
 }
 
-let _mtpRetryTimer = 0;
+let _mtpRetryTimer = 0, _mtpRetryAttempts = 0;
 function _mtpStopRetry() { if (_mtpRetryTimer) { clearTimeout(_mtpRetryTimer); _mtpRetryTimer = 0; } }
+
+// v1.5.218 — Escape-hatch UI for the rare case the auto-retry never
+// gets a successful read (cable problem, phone software glitch).
+// First 3 attempts: silent wait. After that: surface a manual retry
+// button + raw error string so the user has a path out.
+function _mtpResetRetryUi() {
+  _mtpRetryAttempts = 0;
+  const btn = document.getElementById('mtpManualRetry');
+  const err = document.getElementById('mtpHintErr');
+  if (btn) btn.style.display = 'none';
+  if (err) { err.style.display = 'none'; err.textContent = ''; }
+}
+function _mtpRevealEscape(errMsg) {
+  const btn = document.getElementById('mtpManualRetry');
+  const err = document.getElementById('mtpHintErr');
+  if (btn) btn.style.display = 'block';
+  if (err) {
+    let m = String(errMsg || '').replace(/^.*?(openSession failed|lockdown|Please unlock|not paired):?\s*/i, '');
+    if (!m) m = String(errMsg || '');
+    err.textContent = 'Last error: ' + m.slice(0, 220);
+    err.style.display = 'block';
+  }
+}
+window._mtpManualRetry = async function() {
+  if (!_mtpState.activeDevice) return;
+  _mtpStopRetry();
+  _mtpResetRetryUi();
+  _mtpScanSetState('connecting');
+  try { await invoke('mtp_scan_devices'); } catch(_) {}
+  _attemptMtpConnect(_mtpState.activeDevice, true);
+};
+
+// v1.5.218 — Adaptive retry delays. First few polls are aggressive
+// (400-700ms) because the user just typed their passcode and is
+// staring at the screen waiting; later polls back off to 2.5s so a
+// truly-not-coming-back phone doesn't burn CPU.
+const _MTP_RETRY_DELAYS_MS = [400, 700, 1100, 1700, 2500];
+function _mtpNextDelayMs(attempts) {
+  const idx = Math.min(Math.max(0, attempts - 1), _MTP_RETRY_DELAYS_MS.length - 1);
+  return _MTP_RETRY_DELAYS_MS[idx];
+}
 
 async function pickMtpDevice(device) {
   _mtpState.activeDevice = device;
@@ -5563,6 +5627,7 @@ async function pickMtpDevice(device) {
   $('mtpScanning').style.display = 'flex';
   _mtpScanSetState('connecting');
   _mtpStopRetry();
+  _mtpResetRetryUi();
   _attemptMtpConnect(device, false);
 }
 
@@ -5572,6 +5637,7 @@ async function _attemptMtpConnect(device, isRetry) {
     const media = await invoke('mtp_list_media', { deviceId: device.id });
     _mtpState.media = media;
     _mtpStopRetry();
+    _mtpResetRetryUi();
     _mtpScanSetState('scanning');
     // Tiny delay so the "Reading library" pulse is briefly visible
     // even when the scan returns instantly.
@@ -5579,14 +5645,19 @@ async function _attemptMtpConnect(device, isRetry) {
   } catch(e) {
     if (_mtpErrIsLocked(e)) {
       _mtpScanSetState('locked');
+      // v1.5.218 — Adaptive delay + escape hatch after 3 attempts.
+      _mtpRetryAttempts = (isRetry ? _mtpRetryAttempts : 0) + 1;
+      if (_mtpRetryAttempts >= 3) _mtpRevealEscape(e);
       _mtpStopRetry();
+      const delayMs = _mtpNextDelayMs(_mtpRetryAttempts);
       _mtpRetryTimer = setTimeout(() => {
         _mtpRetryTimer = 0;
         if ($('mtpScanning').style.display !== 'none') _attemptMtpConnect(device, true);
-      }, 2500);
+      }, delayMs);
     } else {
-      _mtpScanSetState('error', { title: 'Couldn\'t reach the iPhone', sub: String(e).slice(0, 240) });
+      _mtpScanSetState('error', { title: "Couldn't reach the iPhone", sub: String(e).slice(0, 240) });
       _mtpStopRetry();
+      _mtpResetRetryUi();
       if (!isRetry) toast('MTP error: ' + e, 'error');
     }
   }
@@ -5804,71 +5875,57 @@ listen('mtp-import-complete', ({payload:p})=>{
 // to true inside each button's handler, checked by the auto-prompt.
 let _mtpUserActedOnCleanup = false;
 
-function showMtpCleanupOptions(r) {
+async function showMtpCleanupOptions(r) {
+  // v1.5.218 — Phase E redesigned. Modal stays open through cleanup;
+  // pre-selected actions run directly (no toastAction relay layer)
+  // and present their result inside the same modal.
   $('mtpProgress').style.display = 'none';
-  $('mtpCleanup').style.display = 'block';
-  // v1.5.151 — Surface the skip-reason split in the done summary
-  // (same template the in-flight progress used).
-  const sd = r.skip_dest|0, sx = r.skip_dup|0, sf = r.skip_fail|0;
-  const has_split = (typeof r.skip_dest === 'number')
-    || (typeof r.skip_dup === 'number')
-    || (typeof r.skip_fail === 'number');
-  let skipDetail = `<b>${r.skipped|0}</b> skipped`;
-  if (has_split && (sd + sx + sf) > 0) {
-    const parts = [];
-    if (sx > 0) parts.push(`${sx} already in library`);
-    if (sd > 0) parts.push(`${sd} already in destination`);
-    if (sf > 0) parts.push(`<span style="color:var(--red)">${sf} failed</span>`);
-    skipDetail = `<b>${sd + sx + sf}</b> skipped <span style="opacity:.7;font-size:11.5px">(${parts.join(' · ')})</span>`;
+  $('mtpCleanup').style.display  = 'block';
+  _mtpShowCleanupButtons();
+  const status = document.getElementById('mtpCleanupStatus');
+  if (status) status.style.display = 'none';
+
+  let breakdown = '';
+  if (r.skipped > 0) {
+    const bits = [];
+    if (r.skip_dup  > 0) bits.push(`${r.skip_dup} already in library`);
+    if (r.skip_dest > 0) bits.push(`${r.skip_dest} already in destination`);
+    if (r.skip_fail > 0) bits.push(`<span style="color:var(--danger,var(--red))">${r.skip_fail} failed to download</span>`);
+    if (bits.length) breakdown = `<div style="margin-top:6px;font-size:11px;color:var(--text3)">Skipped: ${bits.join(' · ')}</div>`;
   }
-  $('mtpDoneSummary').innerHTML =
-    `✅ Import complete: <b>${r.copied|0}</b> copied, ` + skipDetail +
-    ` (${r.total|0} total).`;
+  const headline = (r.copied === 0 && r.skipped > 0)
+    ? `✅ All <b>${r.skipped}</b> ${r.skipped === 1 ? 'item' : 'items'} on the phone are already in your library.`
+    : `✅ Import complete: <b>${r.copied}</b> copied, <b>${r.skipped}</b> skipped (${r.total} total).`;
+  $('mtpDoneSummary').innerHTML = headline + breakdown;
   loadPhotos(); refreshStats(); refreshFolders();
-  // v1.5.197 — Read the pre-import "After import" radio. Phase E
-  // (#mtpCleanup) still shows the three manual buttons so the user
-  // can change their mind, but the auto-prompt now matches what they
-  // pre-selected on the way in.
+
   const afterEl = document.querySelector('input[name="mtpAfter"]:checked');
   const after = afterEl ? afterEl.value : 'keep';
-  if ((r.copied|0) === 0 && (r.skipped|0) === 0) return;
-  setTimeout(() => {
-    if (_mtpUserActedOnCleanup) return;
-    if (after === 'keepFavs') {
-      _mtpUserActedOnCleanup = true;
-      toastAction(
-        `${r.copied|0} imported. Keep ⭐ favorites on phone, delete the rest — confirm?`,
-        'warn', 'Delete rest from phone',
-        () => doKeepFavoritesDeleteRest(true)
-      );
-    } else if (after === 'wipe') {
-      _mtpUserActedOnCleanup = true;
-      toastAction(
-        `${r.copied|0} imported. DELETE EVERYTHING from phone — confirm?`,
-        'error', 'Wipe phone',
-        async () => {
-          if (!_mtpState || !_mtpState.activeDevice || !_mtpState.media) return;
-          try {
-            toast('Cleaning up phone…', 'info');
-            const ids = _mtpState.media.photos.map(p => p.id);
-            const r2 = await invoke('mtp_delete', { deviceId: _mtpState.activeDevice.id, objectIds: ids });
-            toast(`✅ ${r2.deleted} items deleted from phone`, 'success');
-            $('mtpModal').classList.remove('open');
-          } catch(e) { toast('Delete failed: ' + e, 'error'); }
-        }
-      );
-    } else {
-      // after === 'keep' — legacy auto-prompt path so users who don't
-      // touch the radios still get the favorites-cleanup nudge.
-      if ((r.copied|0) > 0) {
-        toastAction(
-          `${r.copied|0} photos/videos imported. Free up iPhone space — delete everything except ⭐ favorites?`,
-          'warn', 'Delete from phone',
-          () => doKeepFavoritesDeleteRest(true)
+  if (r.copied === 0 && r.skipped === 0) return;
+
+  if (after === 'keepFavs') {
+    _mtpRunDeleteWithRetry(
+      () => invoke('mtp_delete_non_favorites', { deviceId: _mtpState.activeDevice.id }),
+      'keepFavs', r
+    );
+    return;
+  }
+  if (after === 'wipe') {
+    const n = (r.copied + r.skipped) | 0;
+    toastAction(
+      `⚠ Pre-selected: WIPE phone (${n} items, including ⭐ favorites). Confirm?`,
+      'error', 'Wipe phone',
+      () => {
+        const ids = _mtpState.media.photos.map(p => p.id);
+        _mtpRunDeleteWithRetry(
+          () => invoke('mtp_delete', { deviceId: _mtpState.activeDevice.id, objectIds: ids }),
+          'wipe', r
         );
       }
-    }
-  }, 350);
+    );
+    return;
+  }
+  // after === 'keep' (default) — manual Phase E buttons stay visible.
 }
 
 $('btnMtpKeep').onclick = () => {
@@ -5877,35 +5934,70 @@ $('btnMtpKeep').onclick = () => {
   toast('Photos kept on phone', 'info');
 };
 
-// v1.5.205 — Lock-aware delete runner. Native confirm() removed (Tauri
-// ACL was rejecting plugin:dialog|confirm). If the phone re-locks
-// mid-delete the friendly waiting screen pops back with a "Phone
-// re-locked" message and the same 2.5s retry loop the initial
-// connect uses — the delete finishes the moment the user unlocks
-// again, no manual click needed.
-async function _mtpRunDeleteWithRetry(action, kindLabel) {
+// v1.5.218 — Phase E status helpers. Replace the toast-only feedback
+// path with an in-modal status div that survives across re-lock
+// retries and ends on a final summary the user actually sees.
+function _mtpSetCleanupStatus(opts) {
+  const root = document.getElementById('mtpCleanupStatus');
+  const icon = document.getElementById('mtpCleanupStatusIcon');
+  const text = document.getElementById('mtpCleanupStatusText');
+  const sub  = document.getElementById('mtpCleanupStatusSub');
+  if (!root) return;
+  root.style.display = 'block';
+  if (icon && opts.icon !== undefined) icon.textContent = opts.icon;
+  if (text && opts.text !== undefined) text.textContent = opts.text;
+  if (sub  && opts.sub  !== undefined) sub.innerHTML   = opts.sub;
+}
+function _mtpHideCleanupButtons(){ const b = document.getElementById('mtpCleanupButtons'); if (b) b.style.display = 'none'; }
+function _mtpShowCleanupButtons(){ const b = document.getElementById('mtpCleanupButtons'); if (b) b.style.display = ''; }
+
+// v1.5.218 — Lock-aware delete runner. Modal stays open through the
+// whole run: cleanup-status div shows '🧹 Cleaning up phone…' →
+// on success swaps to '✅ All done · N deleted, M ⭐ kept' (or '⚠️
+// Partially done' if the phone refused some). If the phone re-locks
+// the friendly waiting screen pops back IN-PLACE and the same
+// adaptive retry loop the initial connect uses takes over. User can
+// close the modal manually via × / Close at any point.
+async function _mtpRunDeleteWithRetry(action, kindLabel, importResult) {
   if (!_mtpState.activeDevice) return;
-  const summarise = (r) => {
-    if (kindLabel === 'keepFavs')
-      toast(`✅ ${r.deleted} deleted, ${r.kept_favorites} favorites kept on phone`, 'success');
-    else
-      toast(`✅ ${r.deleted} items deleted from phone`, 'success');
-    $('mtpModal').classList.remove('open');
+  $('mtpCleanup').style.display = 'block';
+  _mtpHideCleanupButtons();
+  _mtpSetCleanupStatus({ icon: '🧹', text: 'Cleaning up phone…', sub: 'This usually takes a few seconds.' });
+
+  const finalSummary = (r) => {
+    const importLine = importResult
+      ? `<b>${importResult.copied || 0}</b> imported, <b>${importResult.skipped || 0}</b> skipped`
+      : null;
+    const deletedN  = (r && r.deleted) || 0;
+    const failedN   = (r && r.failed)  || 0;
+    const keptFavN  = (r && r.kept_favorites) || 0;
+    const cleanBits = [`<b>${deletedN}</b> deleted from phone`];
+    if (kindLabel === 'keepFavs' && keptFavN > 0) cleanBits.push(`<b>${keptFavN}</b> ⭐ favorites kept`);
+    if (failedN > 0) cleanBits.push(`<b style="color:var(--amber)">${failedN}</b> refused by phone`);
+    const cleanLine = cleanBits.join(', ');
+    const icon = failedN > 0 ? '⚠️' : '✅';
+    const text = failedN > 0 ? (deletedN > 0 ? 'Partially done' : 'All refused by phone') : 'All done';
+    _mtpSetCleanupStatus({ icon, text, sub: (importLine ? importLine + '<br>' : '') + cleanLine });
+    const tImport = importResult ? `${importResult.copied || 0} imported, ${importResult.skipped || 0} skipped · ` : '';
+    const tClean = `${deletedN} deleted` + (kindLabel === 'keepFavs' && keptFavN ? `, ${keptFavN} ⭐ kept` : '') + (failedN > 0 ? `, ${failedN} refused` : '');
+    toast(icon + ' ' + tImport + tClean, failedN > 0 ? 'warn' : 'success');
   };
+
   const attempt = async (isRetry) => {
     try {
       const r = await action();
       _mtpStopRetry();
       $('mtpScanning').style.display = 'none';
-      summarise(r);
+      $('mtpCleanup').style.display  = 'block';
+      finalSummary(r);
     } catch(e) {
       if (_mtpErrIsLocked(e)) {
-        // Phone re-locked between Phase E and the delete call —
-        // bounce back to the friendly waiting screen and keep
-        // trying until the user unlocks.
-        $('mtpCleanup').style.display = 'none';
+        // Phone re-locked between Phase E and the delete call. Pop
+        // the friendly waiting screen up over the modal; same retry
+        // loop the initial connect uses takes over.
+        $('mtpCleanup').style.display  = 'none';
         $('mtpProgress').style.display = 'none';
-        $('mtpConfirm').style.display = 'none';
+        $('mtpConfirm').style.display  = 'none';
         $('mtpScanning').style.display = 'flex';
         _mtpScanSetState('locked', {
           title: 'Phone re-locked',
@@ -5914,20 +6006,20 @@ async function _mtpRunDeleteWithRetry(action, kindLabel) {
                : 'Unlock to finish deleting — I\'ll resume automatically.',
         });
         _mtpStopRetry();
+        // Backed-off delay (we're past the just-typed-passcode window).
         _mtpRetryTimer = setTimeout(() => {
           _mtpRetryTimer = 0;
           if ($('mtpScanning').style.display !== 'none') attempt(true);
-        }, 2500);
+        }, _mtpNextDelayMs(3));
       } else {
         _mtpStopRetry();
-        toast('Delete failed: ' + e, 'error');
-        if ($('mtpScanning').style.display !== 'none') {
-          _mtpScanSetState('error', { title: 'Delete failed', sub: String(e).slice(0, 240) });
-        }
+        const msg = typeof e === 'string' ? e : (e?.message || String(e));
+        $('mtpScanning').style.display = 'none';
+        $('mtpCleanup').style.display  = 'block';
+        _mtpSetCleanupStatus({ icon: '⚠️', text: 'Cleanup failed', sub: msg.slice(0, 240) });
       }
     }
   };
-  toast('Cleaning up phone…', 'info');
   attempt(false);
 }
 
