@@ -7003,6 +7003,17 @@ pub async fn suggest_face_matches(
 }
 
 /// List all persons with face counts and representative thumbnail.
+///
+/// v1.5.227 — Lazy thumbnail backfill. Before this, only
+/// `assign_face_to_person` stamped `persons.thumbnail` with the
+/// `face_<id>.jpg` filename. Persons created via batch_assign_person,
+/// auto-merge clustering, or Mac→PC sync ended up with thumbnail=NULL
+/// and rendered as generic grey circles in the People sidebar even
+/// though their face crops existed on disk. We now patch the column
+/// in-place the first time get_persons is called for such a row: pick
+/// the highest-score assigned face whose `face_<id>.jpg` exists,
+/// UPDATE persons.thumbnail, and return the avatar in the same call.
+/// Idempotent; subsequent calls see the populated value and skip.
 #[tauri::command]
 pub async fn get_persons(
     state: tauri::State<'_, AppState>,
@@ -7013,11 +7024,61 @@ pub async fn get_persons(
         (rows, state.thumbnails_dir.clone())
     };
     let faces_dir = thumbs_dir.join("faces");
+
+    // Discover which persons need a backfill so we can take a single
+    // write lock on the DB instead of grabbing+releasing per-row.
+    let needs_fix: Vec<i64> = rows
+        .iter()
+        .filter(|r| r.thumbnail.as_deref().map(str::is_empty).unwrap_or(true))
+        .map(|r| r.id)
+        .collect();
+    let backfilled: std::collections::HashMap<i64, String> = if needs_fix.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM face_regions
+                  WHERE person_id = ?1
+                  ORDER BY score DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut out = std::collections::HashMap::new();
+        for pid in &needs_fix {
+            // Find the best face crop that actually exists on disk.
+            let face_ids: Vec<i64> = stmt
+                .query_map([pid], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            for fid in face_ids {
+                let p = faces_dir.join(format!("face_{}.jpg", fid));
+                if p.exists() {
+                    let name = format!("face_{}.jpg", fid);
+                    let _ = conn.execute(
+                        "UPDATE persons SET thumbnail = ?1 WHERE id = ?2",
+                        rusqlite::params![&name, pid],
+                    );
+                    out.insert(*pid, name);
+                    break;
+                }
+            }
+        }
+        out
+    };
+
     Ok(rows
         .into_iter()
         .map(|r| {
-            // Use thumbnail file name stored in DB, or fall back to any face of this person
-            let thumbnail = r.thumbnail
+            // Use thumbnail file name stored in DB, or the freshly
+            // backfilled one from the pass above. Fall back to None
+            // (grey circle) only if no crop exists anywhere.
+            let stored = r.thumbnail.clone();
+            let backfilled_for_row = backfilled.get(&r.id).cloned();
+            let thumb_name = stored
+                .filter(|s| !s.is_empty())
+                .or(backfilled_for_row);
+            let thumbnail = thumb_name
                 .as_deref()
                 .and_then(|t| std::fs::read(faces_dir.join(t)).ok())
                 .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
