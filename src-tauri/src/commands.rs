@@ -1681,26 +1681,26 @@ pub async fn start_tagging(
 fn run_write_xmp_all_inline(db_arc: &std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>) -> Result<usize, String> {
     let all_xmp: Vec<xmp::XmpData> = {
         let conn = db_arc.lock().map_err(|_| "db lock")?;
-        let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>)> = {
+        let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>)> = {
             let mut s = conn.prepare(
                 "SELECT id, path, COALESCE(width,0), COALESCE(height,0),
                         COALESCE(rating,0), COALESCE(favorite,0),
-                        description, estimated_location
+                        description, estimated_location, date_taken
                  FROM photos"
             ).map_err(|e| e.to_string())?;
-            let v: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>)> =
+            let v: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>)> =
                 s.query_map([], |r| Ok((
                     r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
                     r.get(4)?,
                     { let fav: i32 = r.get(5)?; fav != 0 },
-                    r.get(6)?, r.get(7)?,
+                    r.get(6)?, r.get(7)?, r.get(8)?,
                 ))).map_err(|e| e.to_string())?
                 .filter_map(|r| r.ok())
                 .collect();
             v
         };
         let mut result = Vec::with_capacity(photo_rows.len());
-        for (id, path, width, height, rating, favorite, description, location) in photo_rows {
+        for (id, path, width, height, rating, favorite, description, location, date_taken) in photo_rows {
             // v1.5.56 — Bind .collect() to a local before letting the
             // prepare_cached statement drop. Inline collect at end of
             // block tripped E0597 (temporary outlives the prepare's
@@ -1748,6 +1748,7 @@ fn run_write_xmp_all_inline(db_arc: &std::sync::Arc<std::sync::Mutex<rusqlite::C
                 description, location,
                 img_width: width, img_height: height,
                 faces,
+                date_taken,
             });
         }
         result
@@ -2187,19 +2188,19 @@ pub async fn write_xmp_for_photo(
         let conn = state.db.lock().map_err(|_| "db lock")?;
 
         // ── Core photo fields ────────────────────────────────────────────────
-        let (path, width, height, rating, favorite, description, location): (
-            String, u32, u32, i32, bool, Option<String>, Option<String>,
+        let (path, width, height, rating, favorite, description, location, date_taken): (
+            String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>,
         ) = conn.query_row(
             "SELECT path, COALESCE(width,0), COALESCE(height,0),
                     COALESCE(rating,0), COALESCE(favorite,0),
-                    description, estimated_location
+                    description, estimated_location, date_taken
              FROM photos WHERE id = ?1",
             rusqlite::params![photo_id],
             |r| Ok((
                 r.get(0)?, r.get(1)?, r.get(2)?,
                 r.get(3)?,
                 { let v: i32 = r.get(4)?; v != 0 },
-                r.get(5)?, r.get(6)?,
+                r.get(5)?, r.get(6)?, r.get(7)?,
             )),
         ).map_err(|e| e.to_string())?;
 
@@ -2257,6 +2258,7 @@ pub async fn write_xmp_for_photo(
             img_width: width,
             img_height: height,
             faces,
+            date_taken,
         }
     };
 
@@ -2277,18 +2279,18 @@ pub async fn write_xmp_all(
         let conn = state.db.lock().map_err(|_| "db lock")?;
 
         // ── All tagged photos ────────────────────────────────────────────────
-        let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>)> = {
+        let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>)> = {
             let mut s = conn.prepare(
                 "SELECT id, path, COALESCE(width,0), COALESCE(height,0),
                         COALESCE(rating,0), COALESCE(favorite,0),
-                        description, estimated_location
+                        description, estimated_location, date_taken
                  FROM photos"
             ).map_err(|e| e.to_string())?;
             let v: Vec<_> = s.query_map([], |r| Ok((
                 r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
                 r.get(4)?,
                 { let fav: i32 = r.get(5)?; fav != 0 },
-                r.get(6)?, r.get(7)?,
+                r.get(6)?, r.get(7)?, r.get(8)?,
             )))
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
@@ -2297,7 +2299,7 @@ pub async fn write_xmp_all(
         };
 
         let mut result = Vec::with_capacity(photo_rows.len());
-        for (id, path, width, height, rating, favorite, description, location) in photo_rows {
+        for (id, path, width, height, rating, favorite, description, location, date_taken) in photo_rows {
 
             // Tags
             let tags: Vec<String> = {
@@ -2357,6 +2359,7 @@ pub async fn write_xmp_all(
                     img_width: width,
                     img_height: height,
                     faces,
+                    date_taken,
                 });
             }
         }
@@ -9202,7 +9205,7 @@ pub async fn batch_add_tags_with_xmp(
             let row = conn.query_row(
                 "SELECT path, COALESCE(width,0), COALESCE(height,0),
                         COALESCE(rating,0), COALESCE(favorite,0),
-                        description, estimated_location
+                        description, estimated_location, date_taken
                  FROM photos WHERE id = ?1",
                 rusqlite::params![id],
                 |r| {
@@ -9213,10 +9216,11 @@ pub async fn batch_add_tags_with_xmp(
                     let favorite: bool = { let v: i32 = r.get(4)?; v != 0 };
                     let description: Option<String> = r.get(5)?;
                     let location: Option<String> = r.get(6)?;
-                    Ok((path, width, height, rating, favorite, description, location))
+                    let date_taken: Option<String> = r.get(7)?;
+                    Ok((path, width, height, rating, favorite, description, location, date_taken))
                 },
             );
-            let (path, width, height, rating, favorite, description, location) = match row {
+            let (path, width, height, rating, favorite, description, location, date_taken) = match row {
                 Ok(v) => v,
                 Err(_) => continue,
             };
@@ -9278,6 +9282,7 @@ pub async fn batch_add_tags_with_xmp(
                 img_width: width,
                 img_height: height,
                 faces,
+                date_taken,
             });
         }
         result

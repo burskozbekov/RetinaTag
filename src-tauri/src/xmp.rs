@@ -12,6 +12,12 @@ pub struct XmpData {
     pub img_width: u32,
     pub img_height: u32,
     pub faces: Vec<XmpFace>,
+    /// v1.5.226 — Capture date for round-trip sync with Mac. DB stores
+    /// "YYYY-MM-DD HH:MM:SS"; build_xmp_string emits the same value in
+    /// three Adobe-standard tags (photoshop:DateCreated, exif:
+    /// DateTimeOriginal, xmp:CreateDate) so any reader picks it up.
+    /// None = omit the tags entirely (skip date fields).
+    pub date_taken: Option<String>,
 }
 
 pub struct XmpFace {
@@ -218,6 +224,31 @@ pub fn build_xmp_string(data: &XmpData) -> String {
         ),
         _ => String::new(),
     };
+    // v1.5.226 — Emit the capture date in three Adobe-standard tags so
+    // any XMP-aware reader picks it up. DB format is "YYYY-MM-DD HH:MM:SS";
+    // XMP-correct shape is "YYYY-MM-DDTHH:MM:SS" (the T separator is what
+    // exif:DateTimeOriginal expects per the XMP spec). We accept both
+    // shapes from incoming sidecars but always WRITE the canonical T form.
+    let date_xml = match &data.date_taken {
+        Some(d) if !d.trim().is_empty() => {
+            let trimmed = d.trim();
+            let iso = if trimmed.len() >= 11 && trimmed.as_bytes().get(10) == Some(&b' ') {
+                let mut s = trimmed.to_string();
+                s.replace_range(10..11, "T");
+                s
+            } else {
+                trimmed.to_string()
+            };
+            let esc = xml(&iso);
+            format!(
+                "\n      <photoshop:DateCreated>{e}</photoshop:DateCreated>\
+                 \n      <exif:DateTimeOriginal>{e}</exif:DateTimeOriginal>\
+                 \n      <xmp:CreateDate>{e}</xmp:CreateDate>",
+                e = esc
+            )
+        }
+        _ => String::new(),
+    };
     let faces_xml = if !data.faces.is_empty() && data.img_width > 0 && data.img_height > 0 {
         let items: String = data.faces.iter().map(|f| format!(
             "        <rdf:li>\n          <rdf:Description mwg-rs:Name=\"{}\" mwg-rs:Type=\"Face\">\n            <mwg-rs:Area>\n              <rdf:Description\n                stArea:x=\"{:.6}\"\n                stArea:y=\"{:.6}\"\n                stArea:w=\"{:.6}\"\n                stArea:h=\"{:.6}\"\n                stArea:unit=\"normalized\"/>\n            </mwg-rs:Area>\n          </rdf:Description>\n        </rdf:li>",
@@ -237,6 +268,8 @@ pub fn build_xmp_string(data: &XmpData) -> String {
       xmlns:xmp="http://ns.adobe.com/xap/1.0/"
       xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
       xmlns:Iptc4xmpCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
+      xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
+      xmlns:exif="http://ns.adobe.com/exif/1.0/"
       xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
       xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#"
       xmlns:stDim="http://ns.adobe.com/xmp/sType/Dimensions#">
@@ -249,7 +282,7 @@ pub fn build_xmp_string(data: &XmpData) -> String {
         </rdf:Bag></lr:hierarchicalSubject>
       <Iptc4xmpCore:Keywords><rdf:Bag>
 {tag_xml}
-        </rdf:Bag></Iptc4xmpCore:Keywords>{rating_xml}{label_xml}{desc_xml}{loc_xml}{faces_xml}
+        </rdf:Bag></Iptc4xmpCore:Keywords>{rating_xml}{label_xml}{desc_xml}{loc_xml}{date_xml}{faces_xml}
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>"#
@@ -333,6 +366,7 @@ pub fn embed_xmp_in_jpeg(jpeg_path: &str, xmp_str: &str) -> Result<()> {
 pub fn write_xmp_sidecar(photo_path: &str, tags: &[String]) -> Result<String> {
     write_xmp_full(&XmpData {
         photo_path: photo_path.to_string(),
+        date_taken: None,
         tags: tags.to_vec(),
         rating: 0,
         favorite: false,
