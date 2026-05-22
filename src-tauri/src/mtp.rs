@@ -26,6 +26,7 @@ use windows::{
             IPortableDeviceResources, IPortableDeviceValues, PortableDevice,
             PortableDeviceKeyCollection, PortableDeviceManager, PortableDevicePropVariantCollection,
             PortableDeviceValues, PORTABLE_DEVICE_DELETE_NO_RECURSION,
+            WPD_CLIENT_DESIRED_ACCESS, WPD_CLIENT_NAME, WPD_CLIENT_SHARE_MODE,
             WPD_CONTENT_TYPE_FOLDER, WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT, WPD_CONTENT_TYPE_IMAGE,
             WPD_CONTENT_TYPE_VIDEO, WPD_DEVICE_OBJECT_ID, WPD_OBJECT_CONTENT_TYPE,
             WPD_OBJECT_DATE_CREATED, WPD_OBJECT_DATE_MODIFIED, WPD_OBJECT_ID, WPD_OBJECT_NAME,
@@ -236,16 +237,46 @@ pub struct MtpMediaList {
 
 /// Open a WPD device handle for `device_id`. Caller owns the returned
 /// interface and should let it drop when done (RAII closes the device).
+///
+/// v1.5.235 — Explicitly request READ + WRITE access. The old code
+/// passed a blank IPortableDeviceValues to Open() — Apple's WPD driver
+/// interpreted that as "read-only session" and silently accepted
+/// Delete() calls without actually removing files. iCloud Photos was
+/// the easy scapegoat in earlier diagnoses; the real culprit on
+/// iCloud-OFF phones too is the missing WPD_CLIENT_DESIRED_ACCESS
+/// hint. Setting GENERIC_READ | GENERIC_WRITE + FILE_SHARE_READ |
+/// FILE_SHARE_WRITE on the client_info before Open() restores
+/// writable-session semantics; subsequent Delete() calls actually
+/// hit the device. WPD_CLIENT_NAME is set for completeness so the
+/// Windows event log identifies us as RetinaTag rather than
+/// "(unknown)" — the old comment about that was aspirational; the
+/// property had never actually been written.
 unsafe fn open_device(device_id: &str) -> Result<IPortableDevice, String> {
     ensure_com_init();
 
-    // Client info: WPD requires an IPortableDeviceValues, but the only
-    // property most drivers actually read is WPD_CLIENT_NAME. We populate
-    // a sensible default so the Windows event log says "RetinaTag" rather
-    // than "(unknown)".
     let client_info: IPortableDeviceValues =
         CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)
             .map_err(|e| format!("CoCreateInstance(PortableDeviceValues): {e}"))?;
+
+    // Identify ourselves.
+    let app_name: Vec<u16> = "RetinaTag".encode_utf16().chain(std::iter::once(0)).collect();
+    let _ = client_info.SetStringValue(&WPD_CLIENT_NAME, PCWSTR(app_name.as_ptr()));
+
+    // GENERIC_READ | GENERIC_WRITE = 0xC0000000. Apple's WPD driver
+    // uses this to decide whether to expose a writable PTP
+    // configuration (config 3 via AppleLowerFilter.sys). Without it
+    // we get a read-only session and Delete() is a silent no-op.
+    const GENERIC_READ_WRITE: u32 = 0x80000000 | 0x40000000;
+    let _ = client_info
+        .SetUnsignedIntegerValue(&WPD_CLIENT_DESIRED_ACCESS, GENERIC_READ_WRITE);
+
+    // FILE_SHARE_READ | FILE_SHARE_WRITE so iTunes / Apple Mobile
+    // Device Service can hold an open handle to the phone at the
+    // same time we do — otherwise Open() fails with sharing
+    // violation when AMDS is mid-sync.
+    const FILE_SHARE_READ_WRITE: u32 = 0x00000001 | 0x00000002;
+    let _ = client_info
+        .SetUnsignedIntegerValue(&WPD_CLIENT_SHARE_MODE, FILE_SHARE_READ_WRITE);
 
     // Device ID → wide string.
     let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
@@ -604,6 +635,37 @@ pub struct DeleteOutcome {
     pub icloud_block_suspected: bool,
 }
 
+/// v1.5.235 — Diagnostic log for delete debugging.
+///
+/// Writes a single line to `<LocalAppData>\RetinaTag\mtp-delete.log`
+/// timestamped, so when the user reports "still doesn't work" we can
+/// open this file and see the actual HRESULTs, per-chunk numbers, and
+/// verification outcomes. Failure to write is silent — the log is a
+/// nice-to-have, not load-bearing.
+fn mtp_log(msg: &str) {
+    use std::io::Write;
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let line = format!("[{}] {}\n", now, msg);
+    let path = match std::env::var("LOCALAPPDATA") {
+        Ok(p) => std::path::PathBuf::from(p).join("RetinaTag").join("mtp-delete.log"),
+        Err(_) => return,
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Roll the log if it's > 256 KB so it doesn't grow forever.
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 256 * 1024 {
+            let _ = std::fs::rename(&path, path.with_extension("log.old"));
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+    // Also stderr — visible in `--devtools` or stderr capture.
+    eprintln!("[mtp] {}", msg);
+}
+
 /// v1.5.234 — Verifier: ask WPD whether the object still exists. We use
 /// `IPortableDeviceProperties::GetValues` for the cheapest possible
 /// "does this object_id resolve?" probe — it returns an Err with
@@ -677,10 +739,15 @@ where
     let mut errors: Vec<String> = Vec::new();
     let mut icloud_block_suspected = false;
     on_progress(0, total, None);
+    mtp_log(&format!(
+        "delete_objects_chunked start: device={} total={} chunk={}",
+        device_id, total, CHUNK
+    ));
     unsafe {
         let device = open_device(device_id)?;
         let content: IPortableDeviceContent =
             device.Content().map_err(|e| format!("Content: {e}"))?;
+        mtp_log("device opened with read+write client_info");
         // v1.5.234 — Set up the verifier once. Properties + a single
         // tiny key collection (just OBJECT_ID + ORIGINAL_FILE_NAME)
         // is enough to ask "does this id resolve?" cheaply.
@@ -723,6 +790,15 @@ where
                 &mut results,
             );
             let chunk_len = chunk.len();
+            mtp_log(&format!(
+                "chunk {} ({} items): Delete returned {}",
+                chunk_idx + 1,
+                chunk_len,
+                match &delete_result {
+                    Ok(_) => "Ok".to_string(),
+                    Err(e) => format!("Err({})", e),
+                }
+            ));
             let mut chunk_deleted = 0usize;
             let mut chunk_failed = 0usize;
             // Inspect per-object outcomes when WPD populated the results
@@ -809,6 +885,10 @@ where
                         probe_still_there += 1;
                     }
                 }
+                mtp_log(&format!(
+                    "chunk {} verify: probed {}, still-there {} (claimed deleted = {})",
+                    chunk_idx + 1, probe_total, probe_still_there, chunk_deleted
+                ));
                 if probe_total > 0 && probe_still_there == probe_total {
                     // EVERY probed id is still on the device — this
                     // chunk's "success" was a lie. Reclassify as
@@ -860,6 +940,10 @@ where
             }
         }
     }
+    mtp_log(&format!(
+        "delete_objects_chunked end: deleted={} failed={} icloud_suspected={} errors={:?}",
+        deleted, failed, icloud_block_suspected, errors
+    ));
     Ok(DeleteOutcome {
         deleted,
         failed,
