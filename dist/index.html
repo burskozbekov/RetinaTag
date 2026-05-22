@@ -1070,7 +1070,12 @@ select.tb-select:focus{border-color:var(--red-dark)}
         <button class="btn-ghost" id="btnClusterFaces" title="Auto-cluster all faces" style="font-size:10px;padding:2px 6px;color:var(--amber)">Cluster</button>
         <button class="btn-ghost" id="btnRecognizeAll" title="Recognize known people in all photos" style="font-size:10px;padding:2px 6px">Recognize</button>
         <button class="btn-ghost" id="btnFixMixed" title="Move faces between two persons based on which centroid they're closer to (cleans up mis-clustered people)" style="font-size:10px;padding:2px 6px;color:var(--amber)">Fix mixed</button>
-        <button class="btn-ghost" id="btnNewPerson" title="Add new person" style="font-size:14px;padding:0 4px">+</button>
+        <!-- v1.5.239 — "+ New person" button removed. It opened a native
+             browser prompt (ugly "tauri.localhost says…" dialog) and
+             persons are already created naturally via the face-assign
+             popup or batch_assign_person. Kept the no-op stub so any
+             dead click handler binding doesn't crash. -->
+        <button class="btn-ghost" id="btnNewPerson" style="display:none"></button>
         <span id="peopleChevron" style="font-size:10px;transition:transform .2s;display:inline-block" onclick="sbToggle('peopleBody','peopleChevron');event.stopPropagation()">▼</span>
       </div>
     </div>
@@ -12804,14 +12809,12 @@ function initFaceRecognition() {
     }
   };
 
-  // New person button
-  $('btnNewPerson').onclick = () => {
-    const name = prompt('Person name:');
-    if (!name || !name.trim()) return;
-    invoke('create_person', { name: name.trim() })
-      .then(() => { toast('Person added', 'success'); refreshPersonsSidebar(); })
-      .catch(e => toast('Error: ' + e, 'error'));
-  };
+  // v1.5.239 — "+ New person" handler is now a no-op (the button
+  // itself is hidden). Native prompt() popups feel like browser
+  // chrome inside a polished app, so we removed the entry point.
+  // People rows still appear automatically when the user names a
+  // face via the assign popup or via batch_assign_person.
+  $('btnNewPerson').onclick = () => {};
 
   // Cluster faces button
   $('btnClusterFaces').onclick = async () => {
@@ -18046,46 +18049,48 @@ async function batchPerson(){
     }
   }catch(e){toast('Person assign failed: '+e,'error');}
 }
-// v1.5.228 — Inverse of batchPerson. Removes a person association
-// from selected photos: unassigns face_regions that link the person
-// and drops the matching face-kind tag. Defaults the person name
-// from the current search filter when it's `person:Name`, so the
-// common flow "filter by person → select wrong-tagged photos →
-// untag" is two clicks.
+// v1.5.228 — Remove a person association from selected photos. The
+// face_regions that link the person get unassigned + the matching
+// face-kind tag is dropped.
+//
+// v1.5.239 — Native prompt() removed. The flow only makes sense
+// when the user is already viewing a person-filtered set:
+//   * Search input contains `person:Name` → grab Name silently,
+//     show a one-tap toastAction confirm, run on click.
+//   * No person filter active → bail with a hint telling the user
+//     to filter by the person first. Refusing to ask for a name
+//     via a popup is better than asking via a popup we know users
+//     hate.
 async function batchUnperson(){
-  if(selectedIds.size===0){ toast('Nothing selected','info'); return; }
-  // Sniff a name from `person:XYZ` in the active search if present.
-  let presetName = '';
+  if(selectedIds.size === 0){ toast('Nothing selected', 'info'); return; }
+  let name = '';
   try{
     const q = ($('searchInput')?.value || '').trim();
     const m = q.match(/person:([^\s]+)/i);
-    if(m) presetName = m[1].replace(/^[\"']|[\"']$/g, '');
-  } catch(_) {}
-  // Show existing names as a hint so a quick rename-correction doesn't
-  // require the user to remember the exact spelling.
-  let existing = [];
-  try{ existing = await invoke('get_persons'); } catch(_) { existing = []; }
-  const names = (existing||[]).map(p=>p.name).filter(Boolean);
-  const hint = names.length
-    ? `Existing: ${names.slice(0,12).join(', ')}${names.length>12?'…':''}`
-    : '';
-  const name = prompt(
-    `Remove which person from ${selectedIds.size} photo${selectedIds.size===1?'':'s'}?\n\n${hint}`,
-    presetName
-  );
-  if(!name || !name.trim()) return;
-  const ids = [...selectedIds];
-  try{
-    const r = await invoke('batch_remove_person', { photoIds: ids, personName: name.trim() });
-    const bits = [];
-    bits.push(`${r.tags_removed} tag${r.tags_removed===1?'':'s'} removed`);
-    if(r.faces_unassigned > 0) bits.push(`${r.faces_unassigned} face${r.faces_unassigned===1?'':'s'} unassigned`);
-    toast(`✕ "${r.person_name}" cleared from ${r.photos_touched} photo${r.photos_touched===1?'':'s'} · ${bits.join(' · ')}`, 'success');
-    loadPhotos(); refreshStats();
-    try{ typeof refreshPersonsSidebar === 'function' && refreshPersonsSidebar(); } catch(_) {}
-  } catch(e){
-    toast('Un-person failed: ' + e, 'error');
+    if(m) name = m[1].replace(/^[\"']|[\"']$/g, '');
+  } catch(_){}
+  if(!name){
+    toast('Filter by a person first (search "person:Name"), then select the wrong-tagged photos and try again.', 'info');
+    return;
   }
+  const ids = [...selectedIds];
+  const n = ids.length;
+  toastAction(
+    `Remove "${_esc(name)}" from ${n} photo${n===1?'':'s'}?`,
+    'warn', 'Un-person',
+    async () => {
+      try{
+        const r = await invoke('batch_remove_person', { photoIds: ids, personName: name });
+        const bits = [`${r.tags_removed} tag${r.tags_removed===1?'':'s'} removed`];
+        if(r.faces_unassigned > 0) bits.push(`${r.faces_unassigned} face${r.faces_unassigned===1?'':'s'} unassigned`);
+        toast(`✕ "${r.person_name}" cleared from ${r.photos_touched} photo${r.photos_touched===1?'':'s'} · ${bits.join(' · ')}`, 'success');
+        loadPhotos(); refreshStats();
+        try{ typeof refreshPersonsSidebar === 'function' && refreshPersonsSidebar(); } catch(_){}
+      } catch(e){
+        toast('Un-person failed: ' + e, 'error');
+      }
+    }
+  );
 }
 async function batchVault(){
   if(selectedIds.size===0){toast('Nothing selected','info');return;}
