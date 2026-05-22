@@ -2026,18 +2026,12 @@ select.tb-select:focus{border-color:var(--red-dark)}
            in a follow-up.
       -->
       <div id="mtpCleanup" style="display:none">
-        <div id="mtpDoneSummary" style="font-size:13px;color:var(--text2);margin-bottom:16px;padding:10px 12px;background:var(--bg2);border-radius:6px"></div>
-        <div style="padding:16px 18px;background:var(--bg2);border:1px solid var(--border);border-radius:8px">
-          <div style="font-size:14px;font-weight:700;color:var(--cream);margin-bottom:8px">📥 Import done</div>
-          <div style="font-size:12px;color:var(--text2);line-height:1.55">
-            Your imported photos are now in the library. RetinaTag doesn't
-            remove photos from the iPhone — Apple restricts that over USB
-            on recent iOS, and trying anyway just gave silent failures or
-            wrong "iCloud Photos likely on" warnings.<br><br>
-            To free space on the phone, open the iPhone's own
-            <b>Photos</b> app and delete the imported items from there.
-          </div>
-        </div>
+        <!-- v1.5.243 — Single-line import summary. The earlier panel
+             dumped a paragraph about Apple delete restrictions on
+             every successful import which had nothing to do with the
+             import flow once the delete UI was gone. Now we just
+             confirm the count + close. -->
+        <div id="mtpDoneSummary" style="font-size:14px;color:var(--cream);padding:14px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;text-align:center;font-weight:600"></div>
         <!-- Hidden no-op stubs (kept until the JS callers are pruned). -->
         <div id="mtpCleanupStatus" style="display:none"></div>
         <div id="mtpCleanupStatusIcon" style="display:none"></div>
@@ -6007,18 +6001,28 @@ async function showMtpCleanupOptions(r) {
   const status = document.getElementById('mtpCleanupStatus');
   if (status) status.style.display = 'none';
 
-  let breakdown = '';
-  if (r.skipped > 0) {
-    const bits = [];
-    if (r.skip_dup  > 0) bits.push(`${r.skip_dup} already in library`);
-    if (r.skip_dest > 0) bits.push(`${r.skip_dest} already in destination`);
-    if (r.skip_fail > 0) bits.push(`<span style="color:var(--danger,var(--red))">${r.skip_fail} failed to download</span>`);
-    if (bits.length) breakdown = `<div style="margin-top:6px;font-size:11px;color:var(--text3)">Skipped: ${bits.join(' · ')}</div>`;
+  // v1.5.243 — Boil the summary down to a single sentence the user
+  // can absorb in one glance. Three real shapes:
+  //   • copied > 0:    "✓ N photos imported · M already in library"
+  //   • copied = 0, skipped > 0: "All N photos already in your library"
+  //   • everything 0:  "Nothing to import"
+  // Failures (rare) get a separate red line so they don't get lost
+  // in the success copy.
+  let headline;
+  if(r.copied > 0){
+    headline = `✓ <b>${r.copied}</b> photo${r.copied === 1 ? '' : 's'} imported`;
+    if(r.skipped > 0){
+      headline += ` <span style="color:var(--text3);font-weight:400">· ${r.skipped} already in library</span>`;
+    }
+  } else if(r.skipped > 0){
+    headline = `All <b>${r.skipped}</b> photo${r.skipped === 1 ? '' : 's'} were already in your library`;
+  } else {
+    headline = 'Nothing to import';
   }
-  const headline = (r.copied === 0 && r.skipped > 0)
-    ? `✅ All <b>${r.skipped}</b> ${r.skipped === 1 ? 'item' : 'items'} on the phone are already in your library.`
-    : `✅ Import complete: <b>${r.copied}</b> copied, <b>${r.skipped}</b> skipped (${r.total} total).`;
-  $('mtpDoneSummary').innerHTML = headline + breakdown;
+  if(r.skip_fail > 0){
+    headline += `<div style="margin-top:6px;font-size:11px;color:var(--danger,var(--red));font-weight:400">${r.skip_fail} failed to download — phone may have locked mid-import</div>`;
+  }
+  $('mtpDoneSummary').innerHTML = headline;
   loadPhotos(); refreshStats(); refreshFolders();
   // v1.5.238 — Phone-delete branch removed. We always land on the
   // "Import done" panel; the user closes the modal via the footer.
@@ -18177,35 +18181,49 @@ async function batchDelete(){
   console.log('[batchDelete] modal returned', ok);
   if(!ok) return;
   toast(`Deleting ${ids.length} photo${ids.length===1?'':'s'}…`, 'info');
+  // v1.5.243 — Snapshot names BEFORE the delete so we can show what
+  // actually went. Without this the user gets a "5 deleted" toast
+  // with no idea WHICH 5 — the view either refreshed too fast (their
+  // complaint pre-v1.5.243) or didn't refresh at all (pre-v1.5.242).
+  const namesByPriority = selected.map(s => s.filename).filter(Boolean);
   try{
     const n = await invoke('delete_photos', { photoIds: ids, deleteFile: true });
     console.log('[batchDelete] invoke returned', n);
     if(n === 0){
       toast('Delete returned 0 — DB rows unchanged. Check %LOCALAPPDATA%\\RetinaTag\\delete-photos.log for the reason.', 'error');
-    } else {
-      toast(`✓ Moved ${n.toLocaleString()} photo${n===1?'':'s'} to Recycle Bin`, 'success');
+      return;
     }
-    selectedIds.clear(); updateSelectionUI();
-    // v1.5.242 — Refresh whatever view the user is actually looking at.
-    // batchDelete used to only call loadPhotos() (the gallery grid). On
-    // Timeline / Calendar / Cleanup / Map views that left the deleted
-    // photos visible — their DB rows + files were gone but the view's
-    // local DOM still rendered them, with thumb URLs pointing at now-
-    // missing cache files. We refresh by current view + clear the
-    // shared thumbCache so no surviving blob URL gets reused.
-    try{ if(typeof thumbCache !== 'undefined' && thumbCache && thumbCache.clear) thumbCache.clear(); } catch(_){}
-    await loadPhotos();
-    try{
-      if(typeof curView !== 'undefined'){
-        if(curView === 'timeline'    && typeof loadTimeline    === 'function') await loadTimeline();
-        if(curView === 'calendar'    && typeof loadCalendar    === 'function') await loadCalendar();
-        if(curView === 'cleanup'     && typeof loadCleanup     === 'function') await loadCleanup();
-        if(curView === 'map'         && typeof initMap         === 'function') initMap();
-        if(curView === 'duplicates'  && typeof loadDuplicates  === 'function') await loadDuplicates();
-        if(curView === 'dashboard'   && typeof loadDashboard   === 'function') await loadDashboard();
-      }
-    } catch(_){}
+    // v1.5.243 — Auto-refresh removed. Show a sticky toast with the
+    // filename list of what was just deleted so the user can see
+    // what they did, plus a "Refresh" action when they're ready to
+    // re-render the view. Stats/folders refresh silently (those are
+    // counters, not visual cards). Selection is also kept until
+    // they hit Refresh so they can re-confirm by eye what was
+    // chosen.
     try{ refreshStats && refreshStats(); refreshFolders && refreshFolders(); } catch(_){}
+    const previewNames = namesByPriority.slice(0, 3).join(', ');
+    const more = namesByPriority.length > 3 ? ` +${namesByPriority.length - 3} more` : '';
+    const summary = `✓ Deleted ${n.toLocaleString()} · ${_esc(previewNames)}${more}`;
+    if(typeof toastAction === 'function'){
+      toastAction(summary, 'success', 'Refresh view', async () => {
+        try{ if(typeof thumbCache !== 'undefined' && thumbCache && thumbCache.clear) thumbCache.clear(); } catch(_){}
+        selectedIds.clear(); updateSelectionUI();
+        await loadPhotos();
+        try{
+          if(typeof curView !== 'undefined'){
+            if(curView === 'timeline'    && typeof loadTimeline    === 'function') await loadTimeline();
+            if(curView === 'calendar'    && typeof loadCalendar    === 'function') await loadCalendar();
+            if(curView === 'cleanup'     && typeof loadCleanup     === 'function') await loadCleanup();
+            if(curView === 'map'         && typeof initMap         === 'function') initMap();
+            if(curView === 'duplicates'  && typeof loadDuplicates  === 'function') await loadDuplicates();
+            if(curView === 'dashboard'   && typeof loadDashboard   === 'function') await loadDashboard();
+          }
+        } catch(_){}
+      });
+    } else {
+      // Fallback if toastAction is missing — keep behaviour useful.
+      toast(summary, 'success');
+    }
   } catch(e){
     console.error('[batchDelete] invoke threw', e);
     toast('Delete failed: ' + (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)), 'error');
