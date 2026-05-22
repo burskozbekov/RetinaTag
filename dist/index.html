@@ -16869,9 +16869,12 @@ function _lbFacesRender(){
   // whether we're at 1× or 3×.
   const displayW = Math.max(1, rect.width / Math.max(0.01, _lbZoom));
   const scaleNat = nw / displayW;
-  const sw = 2.5 * scaleNat;          // 2.5 px stroke
-  const swHover = 4 * scaleNat;        // a little thicker on hover feel
-  const labelFont = 14 * scaleNat;     // 14 px label
+  // v1.5.230 — Slightly bolder stroke + label sits AT the top edge of the
+  // face box (anchored, not floating above) so the user sees the rect AS
+  // the face boundary and the label as part of the same unit. Apple
+  // Photos style.
+  const sw = 3 * scaleNat;             // 3 px stroke (was 2.5)
+  const labelFont = 13 * scaleNat;     // 13 px label
   const labelPad = 5 * scaleNat;
   const labelStroke = 0.5 * scaleNat;
 
@@ -16881,12 +16884,12 @@ function _lbFacesRender(){
     const named = f.person_id && f.person_id > 0;
     const skipped = f.person_id === -1;
     // Green = unknown (click to name). Blue = already named. Grey = skipped.
-    const stroke = named   ? 'rgba(90,170,255,.92)'
-                : skipped  ? 'rgba(150,150,150,.55)'
+    const stroke = named   ? 'rgba(90,170,255,.95)'
+                : skipped  ? 'rgba(180,180,180,.70)'
                 :            'rgba(90,220,110,.95)';
-    const labelBg = named  ? 'rgba(30,80,150,.88)'
-                : skipped  ? 'rgba(60,60,60,.85)'
-                :            'rgba(18,70,30,.9)';
+    const labelBg = named  ? 'rgba(30,80,150,.92)'
+                : skipped  ? 'rgba(60,60,60,.88)'
+                :            'rgba(18,70,30,.92)';
     const label = named ? (f.person_name || 'Named') : (skipped ? 'Skipped' : '');
     let labelMarkup = '';
     if(label){
@@ -16894,11 +16897,20 @@ function _lbFacesRender(){
       // per char for system-ui). Good enough for a visual background box.
       const approxW = label.length * labelFont * 0.55 + 2 * labelPad;
       const approxH = labelFont + 2 * labelPad;
-      // Place the pill above the face if there's room; else inside the top.
-      const ly = f.y1 - approxH - labelPad*0.6 > 0 ? f.y1 - approxH - labelPad*0.6 : f.y1 + labelPad*0.4;
+      // v1.5.230 — Anchor the label to the face box, not above it. We
+      // sit the label so its BOTTOM edge coincides with the face top
+      // edge (visually attached, no gap). If the face is near the top
+      // of the photo and there isn't room above, flip the label to
+      // sit INSIDE the face at the top.
+      const ly = (f.y1 - approxH) > 0
+        ? (f.y1 - approxH + sw * 0.5)   // attach to face top edge, slight overlap
+        : (f.y1 + sw * 0.5);            // no room above → tuck inside
+      // Clamp label x so it doesn't run off the right edge of the image
+      // on faces near the right side.
+      const lx = Math.min(f.x1, nw - approxW - sw);
       labelMarkup = `
-        <rect x="${f.x1}" y="${ly}" width="${approxW}" height="${approxH}" rx="${labelPad*0.7}" ry="${labelPad*0.7}" fill="${labelBg}" stroke="${stroke}" stroke-width="${labelStroke}"/>
-        <text x="${f.x1 + labelPad}" y="${ly + approxH - labelPad*0.8}" fill="rgba(255,255,255,.96)" font-size="${labelFont}" font-family="system-ui, -apple-system, sans-serif" font-weight="600">${_lbEscXml(label)}</text>`;
+        <rect x="${lx}" y="${ly}" width="${approxW}" height="${approxH}" rx="${labelPad*0.7}" ry="${labelPad*0.7}" fill="${labelBg}" stroke="${stroke}" stroke-width="${labelStroke}"/>
+        <text x="${lx + labelPad}" y="${ly + approxH - labelPad*0.85}" fill="rgba(255,255,255,.97)" font-size="${labelFont}" font-family="system-ui, -apple-system, sans-serif" font-weight="600">${_lbEscXml(label)}</text>`;
     }
     // v1.5.41 — The previous fix (presentation attribute pointer-events="all")
     // didn't work because the parent SVG's inline `pointer-events:none` style
