@@ -810,24 +810,40 @@ where
                     for i in 0..count {
                         let pv = PROPVARIANT::new();
                         if res.GetAt(i, &pv).is_ok() {
-                            // Reach into the underlying PROPVARIANT to
-                            // distinguish VT_ERROR (per-object failure)
-                            // from anything else. windows-rs exposes the
-                            // raw C union via `.as_raw()`; VARENUM is a
-                            // plain u16 with VT_ERROR == 0x000A.
+                            // v1.5.236 — CORRECT per-object result parsing.
+                            // Per the WPD spec the result collection ALWAYS
+                            // returns PROPVARIANTs of type VT_ERROR (0x000A);
+                            // the actual success/fail signal is in the
+                            // `scode` (HRESULT) field. scode == S_OK (0)
+                            // means that object was successfully deleted —
+                            // scode != 0 means a real per-object failure.
+                            // The old code blindly counted every VT_ERROR
+                            // as failed, which is why deletes that ACTUALLY
+                            // succeeded (returning VT_ERROR + S_OK = 0)
+                            // were misreported as "Phone refused" — leading
+                            // to the false iCloud-Photos diagnosis for
+                            // users whose iCloud was off and whose photos
+                            // had in fact been removed from the device.
                             let raw = pv.as_raw();
                             let vt: u16 = raw.Anonymous.Anonymous.vt;
                             if vt == 0x000A {
-                                chunk_failed += 1;
-                                if errors.len() < 4 {
-                                    let hr: i32 =
-                                        raw.Anonymous.Anonymous.Anonymous.scode;
-                                    errors.push(format!(
-                                        "HRESULT 0x{:08x}",
-                                        hr as u32
-                                    ));
+                                let hr: i32 =
+                                    raw.Anonymous.Anonymous.Anonymous.scode;
+                                if hr == 0 {
+                                    chunk_deleted += 1;
+                                } else {
+                                    chunk_failed += 1;
+                                    if errors.len() < 4 {
+                                        errors.push(format!(
+                                            "HRESULT 0x{:08x}",
+                                            hr as u32
+                                        ));
+                                    }
                                 }
                             } else {
+                                // Non-VT_ERROR shouldn't happen for Delete
+                                // results, but if it does we treat it as a
+                                // success (e.g., VT_EMPTY some drivers emit).
                                 chunk_deleted += 1;
                             }
                         } else {

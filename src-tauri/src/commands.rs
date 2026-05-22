@@ -3187,6 +3187,30 @@ pub async fn mtp_import(
                 } else {
                     obj.name.clone()
                 };
+                // v1.5.236 — Emit progress at the TOP of every iteration
+                // regardless of whether this item ends up copied or
+                // skipped. The previous version only emitted from the
+                // copy path so a long run of fast-skips ("already in
+                // library") left the UI stuck at "Starting import…"
+                // for the entire skip burst. Throttled to every 5th
+                // iteration so we don't spam the WebView.
+                if i % 5 == 0 || i + 1 == total {
+                    let skipped_so_far = skip_dest + skip_dup + skip_fail;
+                    ah.emit(
+                        "mtp-import-progress",
+                        serde_json::json!({
+                            "device": device_id_clone,
+                            "current": filename,
+                            "done": i + 1,
+                            "total": total,
+                            "copied": copied,
+                            "skipped": skipped_so_far,
+                            "skip_dest": skip_dest,
+                            "skip_dup": skip_dup,
+                            "skip_fail": skip_fail,
+                        }),
+                    ).ok();
+                }
 
                 // v1.5.153 — Two-path placement. FAST path: WPD knows the
                 // capture date → place directly into the bucket so we can
