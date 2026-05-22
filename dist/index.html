@@ -1161,7 +1161,10 @@ select.tb-select:focus{border-color:var(--red-dark)}
     </div>
     <div class="search-box">
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input type="text" id="searchInput" placeholder="Search photos…" title="Operators: tag:cat &nbsp;person:Name &nbsp;folder:family &nbsp;in:trip2024 &nbsp;year:2020-2023 &nbsp;before:2024 &nbsp;after:2010 &nbsp;date:today/yesterday/this-week/this-month/this-year/last-week/last-month/last-year &nbsp;rating:>=4 &nbsp;fav:true &nbsp;media:video &nbsp;ext:jpg · &quot;exact phrase&quot; · -word excludes · -tag:night excludes a tag · cat* prefix · OR explicit · Click ? for full help · Ctrl+F to focus">
+      <input type="text" id="searchInput" placeholder="Search photos…"
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+        name="rt_search_no_autofill"
+        title="Operators: tag:cat &nbsp;person:Name &nbsp;folder:family &nbsp;in:trip2024 &nbsp;year:2020-2023 &nbsp;before:2024 &nbsp;after:2010 &nbsp;date:today/yesterday/this-week/this-month/this-year/last-week/last-month/last-year &nbsp;rating:>=4 &nbsp;fav:true &nbsp;media:video &nbsp;ext:jpg · &quot;exact phrase&quot; · -word excludes · -tag:night excludes a tag · cat* prefix · OR explicit · Click ? for full help · Ctrl+F to focus">
       <span class="search-hint" id="searchHint"></span>
       <!-- v1.5.57 — Right-side icons rearranged so they don't crowd the
            placeholder. When the box is empty, only ? shows on the right
@@ -7135,26 +7138,15 @@ function _renderRecentSearches(){
         return `<span class="recent-chip" data-q="${_esc(q)}" data-i="${i}"><span>${_esc(q)}</span>${cnt}<span class="rc-x" data-del="${i}" title="Remove">×</span></span>`;
       }).join('')+`</div>`;
   }
-  // Discovery section — top library-wide tags. Loaded async then injected
-  // so the panel paints immediately. Clicking a discovery tag fills the
-  // input and runs the search.
-  box.innerHTML = quickPills + savedSection + recentSection +
-    `<div id="rsDiscover" style="display:none"></div>`+
-    `<div class="rs-label" style="opacity:.6;margin-top:6px;font-size:9px;letter-spacing:.5px"><span>Operators · click ? for full list</span></div>`+
-    `<div style="font-size:10.5px;color:var(--text3);padding:4px 8px;line-height:1.5">`+
-    `<code>tag:</code> <code>person:</code> <code>in:</code> <code>year:2020-2023</code> <code>before:2024</code> <code>rating:>=4</code> · <code>"phrase"</code> · <code>-word</code> · <code>cat*</code></div>`;
-  // Lazy-load top tags. We keep a tiny session cache so reopening the
-  // dropdown doesn't re-hit the backend each time.
-  if(!window._discoverTagsCache){
-    invoke('get_all_tags', { prefix: null }).then(rows=>{
-      if(!Array.isArray(rows)) return;
-      // rows: [(tag, count)]; backend already sorts by count desc.
-      window._discoverTagsCache = rows.slice(0,12);
-      _renderDiscoverChips();
-    }).catch(()=>{});
-  }else{
-    _renderDiscoverChips();
-  }
+  // v1.5.240 — Search dropdown trimmed. The "Discover · Top Tags"
+  // and "Operators · click ? for full list" sections were nice on
+  // paper but made the focus panel feel busy and overlapped with
+  // browser autofill suggestions on the user's machine. The full
+  // operator reference still lives behind the ? button next to the
+  // search input; top tags are a single click away in the Dashboard.
+  // We keep only Quick filters + Saved + Recent — the three things
+  // that actually change what a focus tap should do.
+  box.innerHTML = quickPills + savedSection + recentSection;
   box.style.display='block';
   box.querySelectorAll('.recent-chip').forEach(el=>{
     el.onmousedown=e=>{
