@@ -604,6 +604,28 @@ pub struct DeleteOutcome {
     pub icloud_block_suspected: bool,
 }
 
+/// v1.5.234 — Verifier: ask WPD whether the object still exists. We use
+/// `IPortableDeviceProperties::GetValues` for the cheapest possible
+/// "does this object_id resolve?" probe — it returns an Err with
+/// E_WPD_OBJECTNOTFOUND once the iPhone has really removed the file.
+/// Ok return = the object is still there → Delete silently no-op'd.
+///
+/// Why this matters: when iCloud Photos is enabled on iOS, the iPhone
+/// advertises its storage as `read-only-without-object-deletion`. Apple's
+/// WPD driver still accepts the Delete() call and returns S_OK per object
+/// in the results collection, so the deletion looks successful from above.
+/// Re-enumeration is the only honest signal that the file actually went
+/// away. This helper does the minimum work needed for that signal: a
+/// single property fetch per id, no full re-listing of the device.
+unsafe fn object_still_exists(
+    props: &IPortableDeviceProperties,
+    keys: &IPortableDeviceKeyCollection,
+    id: &str,
+) -> bool {
+    let id_wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+    props.GetValues(PCWSTR(id_wide.as_ptr()), keys).is_ok()
+}
+
 /// v1.5.220 — Chunked delete with progress callback.
 ///
 /// Why chunked: a single WPD `Content::Delete()` over hundreds of objects
@@ -659,6 +681,26 @@ where
         let device = open_device(device_id)?;
         let content: IPortableDeviceContent =
             device.Content().map_err(|e| format!("Content: {e}"))?;
+        // v1.5.234 — Set up the verifier once. Properties + a single
+        // tiny key collection (just OBJECT_ID + ORIGINAL_FILE_NAME)
+        // is enough to ask "does this id resolve?" cheaply.
+        let verify_props: IPortableDeviceProperties = content
+            .Properties()
+            .map_err(|e| format!("Properties: {e}"))?;
+        let verify_keys: IPortableDeviceKeyCollection = CoCreateInstance(
+            &PortableDeviceKeyCollection,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+        .map_err(|e| format!("CoCreateInstance(verify keys): {e}"))?;
+        let _ = verify_keys.Add(&WPD_OBJECT_ID);
+        let _ = verify_keys.Add(&WPD_OBJECT_ORIGINAL_FILE_NAME);
+        // v1.5.234 — Silent-failure tally across the run. If we see
+        // even one verified deletion AND no silent failures, the
+        // device is well-behaved. The "everything silently no-ops"
+        // pattern is the iCloud-Photos signature.
+        let mut silent_failures = 0usize;
+        let mut verified_real_deletes = 0usize;
         for (chunk_idx, chunk) in object_ids.chunks(CHUNK).enumerate() {
             // Fresh collection per chunk — reusing the same one across
             // chunks led to Add() failures on some Android drivers and
@@ -732,6 +774,60 @@ where
                     }
                 }
             }
+            // v1.5.234 — VERIFY that the items we think we deleted are
+            // actually gone. Apple's WPD driver returns success codes
+            // (top-level S_OK + per-object VT_EMPTY in results) on
+            // iCloud-Photos-enabled phones even when nothing is removed.
+            // The only honest signal is re-probing the object. We
+            // sample up to 3 ids per chunk (first / middle / last of
+            // the "supposedly deleted" subset) to keep the overhead
+            // bounded — at 1 GetValues per id and ~10 ms per call,
+            // 3 probes per 20-item chunk adds ~30 ms per chunk on
+            // top of the ~1-3 s WPD spends per chunk. Cheap.
+            if chunk_deleted > 0 {
+                // Build the "supposed deletions" subset matching the
+                // per-object inspection above; if no per-object results
+                // were produced, treat the whole chunk as supposed-OK.
+                let supposed: Vec<&String> = chunk.iter().collect();
+                let mut probes_to_check: Vec<&String> = Vec::new();
+                if let Some(first) = supposed.first() { probes_to_check.push(first); }
+                if supposed.len() > 2 {
+                    probes_to_check.push(&supposed[supposed.len() / 2]);
+                }
+                if supposed.len() > 1 {
+                    if let Some(last) = supposed.last() {
+                        if !probes_to_check.iter().any(|p| std::ptr::eq(*p, *last)) {
+                            probes_to_check.push(last);
+                        }
+                    }
+                }
+                let mut probe_total = 0usize;
+                let mut probe_still_there = 0usize;
+                for id in probes_to_check {
+                    probe_total += 1;
+                    if object_still_exists(&verify_props, &verify_keys, id) {
+                        probe_still_there += 1;
+                    }
+                }
+                if probe_total > 0 && probe_still_there == probe_total {
+                    // EVERY probed id is still on the device — this
+                    // chunk's "success" was a lie. Reclassify as
+                    // failed and count it for the heuristic.
+                    silent_failures += chunk_deleted;
+                    failed += chunk_deleted;
+                    chunk_deleted = 0;
+                    if errors.len() < 4 {
+                        errors.push(format!(
+                            "Phone reported OK but objects still exist (chunk {})",
+                            chunk_idx + 1
+                        ));
+                    }
+                } else if probe_still_there == 0 {
+                    verified_real_deletes += chunk_deleted;
+                }
+                // Partial-probe results (some gone, some not) we accept
+                // as-is — flaky iPhones sometimes lag by a tick.
+            }
             deleted += chunk_deleted;
             failed += chunk_failed;
             let last_err = errors.last().map(|s| s.as_str());
@@ -742,11 +838,22 @@ where
             // iPhones is iCloud Photos being enabled (the storage is
             // advertised as read-only-without-deletion). Bail out
             // instead of grinding through hundreds more doomed chunks.
-            if chunk_idx >= 1 && deleted == 0 && failed >= CHUNK * 2 {
+            //
+            // v1.5.234 — Same heuristic now fires on SILENT failures
+            // too: if WPD claims success but verification proved the
+            // files are still on the device, that's the same problem.
+            if chunk_idx >= 1
+                && verified_real_deletes == 0
+                && (failed >= CHUNK * 2 || silent_failures >= CHUNK * 2)
+            {
                 icloud_block_suspected = true;
                 if errors.len() < 4 {
                     errors.push(
-                        "Phone refused first 40 deletes — iCloud Photos may be on".to_string(),
+                        if silent_failures > 0 {
+                            "Phone reports OK but files don't actually delete — iCloud Photos likely enabled".to_string()
+                        } else {
+                            "Phone refused first 40 deletes — iCloud Photos may be on".to_string()
+                        }
                     );
                 }
                 break;
