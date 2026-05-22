@@ -1681,26 +1681,29 @@ pub async fn start_tagging(
 fn run_write_xmp_all_inline(db_arc: &std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>) -> Result<usize, String> {
     let all_xmp: Vec<xmp::XmpData> = {
         let conn = db_arc.lock().map_err(|_| "db lock")?;
-        let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>)> = {
+        let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>, bool, Option<String>)> = {
             let mut s = conn.prepare(
                 "SELECT id, path, COALESCE(width,0), COALESCE(height,0),
                         COALESCE(rating,0), COALESCE(favorite,0),
-                        description, estimated_location, date_taken
+                        description, estimated_location, date_taken,
+                        COALESCE(private,0), vault_oid
                  FROM photos"
             ).map_err(|e| e.to_string())?;
-            let v: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>)> =
+            let v: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>, bool, Option<String>)> =
                 s.query_map([], |r| Ok((
                     r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
                     r.get(4)?,
                     { let fav: i32 = r.get(5)?; fav != 0 },
                     r.get(6)?, r.get(7)?, r.get(8)?,
+                    { let p: i32 = r.get(9)?; p != 0 },
+                    r.get(10)?,
                 ))).map_err(|e| e.to_string())?
                 .filter_map(|r| r.ok())
                 .collect();
             v
         };
         let mut result = Vec::with_capacity(photo_rows.len());
-        for (id, path, width, height, rating, favorite, description, location, date_taken) in photo_rows {
+        for (id, path, width, height, rating, favorite, description, location, date_taken, private, vault_oid) in photo_rows {
             // v1.5.56 — Bind .collect() to a local before letting the
             // prepare_cached statement drop. Inline collect at end of
             // block tripped E0597 (temporary outlives the prepare's
@@ -1749,6 +1752,8 @@ fn run_write_xmp_all_inline(db_arc: &std::sync::Arc<std::sync::Mutex<rusqlite::C
                 img_width: width, img_height: height,
                 faces,
                 date_taken,
+                private,
+                vault_oid,
             });
         }
         result
@@ -2188,12 +2193,13 @@ pub async fn write_xmp_for_photo(
         let conn = state.db.lock().map_err(|_| "db lock")?;
 
         // ── Core photo fields ────────────────────────────────────────────────
-        let (path, width, height, rating, favorite, description, location, date_taken): (
-            String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>,
+        let (path, width, height, rating, favorite, description, location, date_taken, private, vault_oid): (
+            String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>, bool, Option<String>,
         ) = conn.query_row(
             "SELECT path, COALESCE(width,0), COALESCE(height,0),
                     COALESCE(rating,0), COALESCE(favorite,0),
-                    description, estimated_location, date_taken
+                    description, estimated_location, date_taken,
+                    COALESCE(private,0), vault_oid
              FROM photos WHERE id = ?1",
             rusqlite::params![photo_id],
             |r| Ok((
@@ -2201,6 +2207,8 @@ pub async fn write_xmp_for_photo(
                 r.get(3)?,
                 { let v: i32 = r.get(4)?; v != 0 },
                 r.get(5)?, r.get(6)?, r.get(7)?,
+                { let p: i32 = r.get(8)?; p != 0 },
+                r.get(9)?,
             )),
         ).map_err(|e| e.to_string())?;
 
@@ -2259,6 +2267,8 @@ pub async fn write_xmp_for_photo(
             img_height: height,
             faces,
             date_taken,
+            private,
+            vault_oid,
         }
     };
 
@@ -2279,11 +2289,12 @@ pub async fn write_xmp_all(
         let conn = state.db.lock().map_err(|_| "db lock")?;
 
         // ── All tagged photos ────────────────────────────────────────────────
-        let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>)> = {
+        let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>, bool, Option<String>)> = {
             let mut s = conn.prepare(
                 "SELECT id, path, COALESCE(width,0), COALESCE(height,0),
                         COALESCE(rating,0), COALESCE(favorite,0),
-                        description, estimated_location, date_taken
+                        description, estimated_location, date_taken,
+                        COALESCE(private,0), vault_oid
                  FROM photos"
             ).map_err(|e| e.to_string())?;
             let v: Vec<_> = s.query_map([], |r| Ok((
@@ -2291,6 +2302,8 @@ pub async fn write_xmp_all(
                 r.get(4)?,
                 { let fav: i32 = r.get(5)?; fav != 0 },
                 r.get(6)?, r.get(7)?, r.get(8)?,
+                { let p: i32 = r.get(9)?; p != 0 },
+                r.get(10)?,
             )))
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
@@ -2299,7 +2312,7 @@ pub async fn write_xmp_all(
         };
 
         let mut result = Vec::with_capacity(photo_rows.len());
-        for (id, path, width, height, rating, favorite, description, location, date_taken) in photo_rows {
+        for (id, path, width, height, rating, favorite, description, location, date_taken, private, vault_oid) in photo_rows {
 
             // Tags
             let tags: Vec<String> = {
@@ -2360,6 +2373,8 @@ pub async fn write_xmp_all(
                     img_height: height,
                     faces,
                     date_taken,
+                    private,
+                    vault_oid,
                 });
             }
         }
@@ -3359,17 +3374,38 @@ pub async fn mtp_import(
                 // entries because split('-') couldn't see the slashes.
                 // Normalize once at the boundary so the rest of the
                 // pipeline doesn't have to defend.
-                let date_taken = obj.date_created.as_deref().map(|s| {
+                //
+                // v1.5.233 — WPD-mtime priority swap for the
+                // "iPhone Messages video" failure. WPD's date_created
+                // / date_modified for a video that arrived via
+                // Messages reports the SAVE-TO-CAMERA-ROLL time, not
+                // the original capture. Real capture date is preserved
+                // in the file's mtime on the phone (which Windows
+                // copies through verbatim). We now read EXIF from
+                // the just-copied file first (catches photos that
+                // carry their original DateTimeOriginal — the common
+                // case for actual camera shots) and fall back to the
+                // file mtime when EXIF is empty. The WPD-reported
+                // date is the absolute LAST resort, since for
+                // Messages videos it's effectively today's date.
+                let wpd_date = obj.date_created.as_deref().map(|s| {
                     let mut t = s.replace('/', "-");
-                    // Some pipelines also write "2025-09-15:14:30:00" —
-                    // colon between date and time instead of a space.
-                    // ISO accepts space; rewrite the first colon at
-                    // position 10 (right after YYYY-MM-DD) to a space.
                     if t.len() > 10 && t.as_bytes().get(10) == Some(&b':') {
                         t.replace_range(10..11, " ");
                     }
                     t
                 });
+                let exif_date = crate::exif_reader::read_exif(&src_str)
+                    .ok()
+                    .and_then(|e| e.date_taken)
+                    .filter(|s| !s.trim().is_empty());
+                let mtime_date = std::fs::metadata(&src_str).ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Local> = t.into();
+                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                    });
+                let date_taken = exif_date.or(mtime_date).or(wpd_date);
 
                 let new_photo = db::NewPhoto {
                     path: &src_str,
@@ -9551,7 +9587,8 @@ pub async fn batch_add_tags_with_xmp(
             let row = conn.query_row(
                 "SELECT path, COALESCE(width,0), COALESCE(height,0),
                         COALESCE(rating,0), COALESCE(favorite,0),
-                        description, estimated_location, date_taken
+                        description, estimated_location, date_taken,
+                        COALESCE(private,0), vault_oid
                  FROM photos WHERE id = ?1",
                 rusqlite::params![id],
                 |r| {
@@ -9563,10 +9600,12 @@ pub async fn batch_add_tags_with_xmp(
                     let description: Option<String> = r.get(5)?;
                     let location: Option<String> = r.get(6)?;
                     let date_taken: Option<String> = r.get(7)?;
-                    Ok((path, width, height, rating, favorite, description, location, date_taken))
+                    let private: bool = { let v: i32 = r.get(8)?; v != 0 };
+                    let vault_oid: Option<String> = r.get(9)?;
+                    Ok((path, width, height, rating, favorite, description, location, date_taken, private, vault_oid))
                 },
             );
-            let (path, width, height, rating, favorite, description, location, date_taken) = match row {
+            let (path, width, height, rating, favorite, description, location, date_taken, private, vault_oid) = match row {
                 Ok(v) => v,
                 Err(_) => continue,
             };
@@ -9629,6 +9668,8 @@ pub async fn batch_add_tags_with_xmp(
                 img_height: height,
                 faces,
                 date_taken,
+                private,
+                vault_oid,
             });
         }
         result
@@ -14378,6 +14419,18 @@ pub struct XmpImportResult {
     pub new_descriptions: usize,
     pub new_ratings: usize,
     pub new_favorites: usize,
+    /// v1.5.232 — Counts the rows where photoshop:DateCreated /
+    /// exif:DateTimeOriginal / xmp:CreateDate in a sidecar gave us a
+    /// date_taken value the DB didn't already have. Mac writes those
+    /// after its date sync passes; reading them on PC closes the
+    /// file-system date round-trip.
+    pub new_dates: usize,
+    /// v1.5.232 — `<retinatag:Private>true</retinatag:Private>` rows
+    /// flipped to photos.private = 1 on this pass.
+    pub new_private: usize,
+    /// v1.5.232 — `<retinatag:VaultOid>...` rows that wrote
+    /// photos.vault_oid for the first time.
+    pub new_vault_oids: usize,
 }
 
 #[tauri::command]
@@ -14412,6 +14465,9 @@ pub async fn import_xmp_sidecars(
             new_descriptions: 0,
             new_ratings: 0,
             new_favorites: 0,
+            new_dates: 0,
+            new_private: 0,
+            new_vault_oids: 0,
         };
 
         // Batch DB writes — open a fresh transaction every 500 rows so a
@@ -14482,6 +14538,61 @@ pub async fn import_xmp_sidecars(
                         result.new_favorites += 1;
                     }
                 }
+                // v1.5.232 — date_taken from photoshop:DateCreated /
+                // exif:DateTimeOriginal / xmp:CreateDate. The sidecar
+                // emits the XMP-canonical "YYYY-MM-DDTHH:MM:SS"; the
+                // DB stores "YYYY-MM-DD HH:MM:SS" (space separator)
+                // throughout, so swap the T for a space at index 10
+                // before writing. Only overwrite when the DB row has
+                // no date_taken (NULL or empty) — we don't want a
+                // stale sidecar clobbering a fresh EXIF read.
+                if let Some(raw_date) = xmp.date_taken.as_deref() {
+                    let mut iso = raw_date.trim().to_string();
+                    if iso.len() > 10 && iso.as_bytes().get(10) == Some(&b'T') {
+                        iso.replace_range(10..11, " ");
+                    }
+                    let updated = txn.execute(
+                        "UPDATE photos SET date_taken = ?2
+                          WHERE id = ?1
+                            AND (date_taken IS NULL OR date_taken = '')",
+                        rusqlite::params![id, iso],
+                    ).unwrap_or(0);
+                    if updated > 0 {
+                        result.new_dates += 1;
+                    }
+                }
+                // v1.5.232 — retinatag:Private flips photos.private.
+                // Only flip ON when the XMP says Private=true. Mac
+                // also writes Private=false on un-vault to remove
+                // the membership flag; honour both directions but
+                // only count flip-on as "new_private".
+                if let Some(is_private) = xmp.private {
+                    let n = txn.execute(
+                        "UPDATE photos SET private = ?2 WHERE id = ?1 AND private != ?2",
+                        rusqlite::params![id, if is_private { 1 } else { 0 }],
+                    ).unwrap_or(0);
+                    if n > 0 && is_private {
+                        result.new_private += 1;
+                    }
+                }
+                // v1.5.232 — retinatag:VaultOid → photos.vault_oid.
+                // Only set when the column is currently NULL; Mac and
+                // PC compute the same SHA-256 of the original bytes so
+                // an existing oid is already correct.
+                if let Some(oid) = xmp.vault_oid.as_deref() {
+                    let trimmed = oid.trim();
+                    if !trimmed.is_empty() {
+                        let n = txn.execute(
+                            "UPDATE photos SET vault_oid = ?2
+                              WHERE id = ?1
+                                AND (vault_oid IS NULL OR vault_oid = '')",
+                            rusqlite::params![id, trimmed],
+                        ).unwrap_or(0);
+                        if n > 0 {
+                            result.new_vault_oids += 1;
+                        }
+                    }
+                }
             }
             drop(tag_stmt);
             drop(mark_tagged_stmt);
@@ -14496,6 +14607,9 @@ pub async fn import_xmp_sidecars(
                     || xmp.description.is_some()
                     || xmp.rating.is_some()
                     || xmp.label.is_some()
+                    || xmp.date_taken.is_some()
+                    || xmp.private.is_some()
+                    || xmp.vault_oid.is_some()
                 {
                     result.with_sidecar += 1;
                     pending.push((*id, xmp));

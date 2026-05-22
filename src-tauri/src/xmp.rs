@@ -18,6 +18,16 @@ pub struct XmpData {
     /// DateTimeOriginal, xmp:CreateDate) so any reader picks it up.
     /// None = omit the tags entirely (skip date fields).
     pub date_taken: Option<String>,
+    /// v1.5.232 — Vault membership for the shared SMB vault. When the
+    /// row's `private = 1` in the DB the writer emits
+    /// `<retinatag:Private>true</retinatag:Private>` so a second
+    /// machine that mounts the same library + reads the sidecar
+    /// flips its own private flag without a DB round-trip.
+    pub private: bool,
+    /// v1.5.232 — Companion oid for the encrypted blob — written when
+    /// non-empty so the second machine knows which .rtenc to fetch
+    /// under `<library_root>/.retinatag-vault/objects/<oid[0:2]>/<oid>.rtenc`.
+    pub vault_oid: Option<String>,
 }
 
 pub struct XmpFace {
@@ -249,6 +259,28 @@ pub fn build_xmp_string(data: &XmpData) -> String {
         }
         _ => String::new(),
     };
+    // v1.5.232 — Shared-vault membership in retinatag: namespace.
+    // We emit Private+VaultOid even when private=false IF the row has
+    // an oid (so a future "un-vault" round-trip propagates the flip).
+    let vault_xml = {
+        let oid_part = match &data.vault_oid {
+            Some(o) if !o.trim().is_empty() =>
+                format!("\n      <retinatag:VaultOid>{}</retinatag:VaultOid>", xml(o.trim())),
+            _ => String::new(),
+        };
+        let private_part = if data.private {
+            "\n      <retinatag:Private>true</retinatag:Private>".to_string()
+        } else if !oid_part.is_empty() {
+            // Row had an oid before but is no longer private — explicit
+            // false so the other machine flips OFF too. Without this
+            // the receiver would keep its old private=1 because the
+            // XmpRead.private field defaults to None.
+            "\n      <retinatag:Private>false</retinatag:Private>".to_string()
+        } else {
+            String::new()
+        };
+        format!("{}{}", private_part, oid_part)
+    };
     let faces_xml = if !data.faces.is_empty() && data.img_width > 0 && data.img_height > 0 {
         let items: String = data.faces.iter().map(|f| format!(
             "        <rdf:li>\n          <rdf:Description mwg-rs:Name=\"{}\" mwg-rs:Type=\"Face\">\n            <mwg-rs:Area>\n              <rdf:Description\n                stArea:x=\"{:.6}\"\n                stArea:y=\"{:.6}\"\n                stArea:w=\"{:.6}\"\n                stArea:h=\"{:.6}\"\n                stArea:unit=\"normalized\"/>\n            </mwg-rs:Area>\n          </rdf:Description>\n        </rdf:li>",
@@ -270,6 +302,7 @@ pub fn build_xmp_string(data: &XmpData) -> String {
       xmlns:Iptc4xmpCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
       xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
       xmlns:exif="http://ns.adobe.com/exif/1.0/"
+      xmlns:retinatag="http://retinatag.app/xmp/1.0/"
       xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
       xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#"
       xmlns:stDim="http://ns.adobe.com/xmp/sType/Dimensions#">
@@ -282,7 +315,7 @@ pub fn build_xmp_string(data: &XmpData) -> String {
         </rdf:Bag></lr:hierarchicalSubject>
       <Iptc4xmpCore:Keywords><rdf:Bag>
 {tag_xml}
-        </rdf:Bag></Iptc4xmpCore:Keywords>{rating_xml}{label_xml}{desc_xml}{loc_xml}{date_xml}{faces_xml}
+        </rdf:Bag></Iptc4xmpCore:Keywords>{rating_xml}{label_xml}{desc_xml}{loc_xml}{date_xml}{vault_xml}{faces_xml}
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>"#
@@ -367,6 +400,8 @@ pub fn write_xmp_sidecar(photo_path: &str, tags: &[String]) -> Result<String> {
     write_xmp_full(&XmpData {
         photo_path: photo_path.to_string(),
         date_taken: None,
+        private: false,
+        vault_oid: None,
         tags: tags.to_vec(),
         rating: 0,
         favorite: false,
@@ -430,6 +465,25 @@ pub struct XmpRead {
     /// surface Mac-named photos as proper face rows, not just tag
     /// strings.
     pub faces: Vec<XmpReadFace>,
+    /// v1.5.232 — Capture date from any of the three Adobe-standard
+    /// tags PC's writer emits (and Mac's reader expects). First match
+    /// wins, in priority order: photoshop:DateCreated → exif:DateTimeOriginal
+    /// → xmp:CreateDate. Stored verbatim as the XMP wrote it (typically
+    /// "YYYY-MM-DDTHH:MM:SS"); the importer normalises to the DB shape
+    /// "YYYY-MM-DD HH:MM:SS" downstream.
+    pub date_taken: Option<String>,
+    /// v1.5.232 — `<retinatag:Private>true</retinatag:Private>` flag from
+    /// the shared-vault cross-sync. When true, the importer should set
+    /// photos.private = 1 so the photo lives behind the vault PIN even
+    /// if it landed on this machine via a folder scan and not via
+    /// vault_add_paths.
+    pub private: Option<bool>,
+    /// v1.5.232 — `<retinatag:VaultOid>...` companion to the Private
+    /// flag. Carries the SHA-256-hex oid that names the encrypted blob
+    /// under <library_root>/.retinatag-vault/objects/<oid[0:2]>/<oid>.rtenc.
+    /// Importer writes this to photos.vault_oid so the gallery can
+    /// fetch the right bytes through decrypt_oid_to_bytes.
+    pub vault_oid: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -712,7 +766,19 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
 
     // Second pass for the element-form rating/label (the first pass
     // only catches the attribute form). Cheap because the doc is small.
-    if out.rating.is_none() || out.label.is_none() {
+    //
+    // v1.5.232 — Same pass also captures the date tags and the
+    // RetinaTag-private vault flags. They all share the
+    // "<*:Name>text</*:Name>" shape so they fit the current
+    // current_tag machinery; we just widen the predicate.
+    //
+    // Date priority (first non-empty wins): photoshop:DateCreated →
+    // exif:DateTimeOriginal → xmp:CreateDate. We track them in a
+    // little local map so the priority order is independent of the
+    // order tags appear in the XMP.
+    let mut date_candidates: std::collections::HashMap<&'static str, String> =
+        std::collections::HashMap::new();
+    {
         let mut reader2 = Reader::from_str(xml);
         reader2.config_mut().trim_text(true);
         let mut current_tag: Option<Vec<u8>> = None;
@@ -721,11 +787,14 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
             match reader2.read_event_into(&mut buf2) {
                 Ok(Event::Start(e)) => {
                     let name = e.name().as_ref().to_vec();
-                    if ends_with(&name, b"Rating") || ends_with(&name, b"Label") {
-                        current_tag = Some(name);
-                    } else {
-                        current_tag = None;
-                    }
+                    let known = ends_with(&name, b"Rating")
+                        || ends_with(&name, b"Label")
+                        || ends_with(&name, b"DateCreated")
+                        || ends_with(&name, b"DateTimeOriginal")
+                        || ends_with(&name, b"CreateDate")
+                        || ends_with(&name, b"Private")
+                        || ends_with(&name, b"VaultOid");
+                    current_tag = if known { Some(name) } else { None };
                 }
                 Ok(Event::Text(t)) => {
                     if let Some(tag) = &current_tag {
@@ -738,6 +807,26 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
                             if !s.is_empty() {
                                 out.label = Some(s);
                             }
+                        } else if ends_with(tag, b"DateCreated") {
+                            if !s.is_empty() {
+                                date_candidates.entry("photoshop").or_insert(s);
+                            }
+                        } else if ends_with(tag, b"DateTimeOriginal") {
+                            if !s.is_empty() {
+                                date_candidates.entry("exif").or_insert(s);
+                            }
+                        } else if ends_with(tag, b"CreateDate") {
+                            if !s.is_empty() {
+                                date_candidates.entry("xmp").or_insert(s);
+                            }
+                        } else if ends_with(tag, b"Private") && out.private.is_none() {
+                            // Accept "true"/"false" (case-insensitive) and "1"/"0".
+                            let v = s.to_ascii_lowercase();
+                            out.private = Some(v == "true" || v == "1");
+                        } else if ends_with(tag, b"VaultOid") && out.vault_oid.is_none() {
+                            if !s.is_empty() {
+                                out.vault_oid = Some(s);
+                            }
                         }
                     }
                 }
@@ -747,6 +836,16 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
                 _ => {}
             }
             buf2.clear();
+        }
+    }
+
+    // Resolve the date by priority: photoshop > exif > xmp.
+    if out.date_taken.is_none() {
+        for key in ["photoshop", "exif", "xmp"] {
+            if let Some(v) = date_candidates.remove(key) {
+                out.date_taken = Some(v);
+                break;
+            }
         }
     }
 
