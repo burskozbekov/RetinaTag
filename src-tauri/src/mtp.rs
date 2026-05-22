@@ -942,13 +942,17 @@ where
                 && verified_real_deletes == 0
                 && (failed >= CHUNK * 2 || silent_failures >= CHUNK * 2)
             {
+                // v1.5.237 — Keep the flag name (icloud_block_suspected)
+                // for FE compatibility but the message no longer points
+                // only at iCloud — iOS 17/18 restricts MTP delete in
+                // many configurations even with iCloud Photos off.
                 icloud_block_suspected = true;
                 if errors.len() < 4 {
                     errors.push(
                         if silent_failures > 0 {
-                            "Phone reports OK but files don't actually delete — iCloud Photos likely enabled".to_string()
+                            "Phone reports OK but files don't actually delete (Apple WPD restriction on iOS 17/18, or iCloud Photos on)".to_string()
                         } else {
-                            "Phone refused first 40 deletes — iCloud Photos may be on".to_string()
+                            "Phone refused first 40 deletes (Apple WPD restriction or iCloud Photos)".to_string()
                         }
                     );
                 }

@@ -6157,16 +6157,39 @@ async function _mtpRunDeleteWithRetry(action, kindLabel, importResult) {
     // instead of just "all refused by phone" — the user CAN fix
     // this themselves by toggling the setting on the phone.
     if (icloudBlock) {
+      // v1.5.237 — Honest message. Two iPhone scenarios collapse into
+      // "phone silently refused every delete":
+      //   1. iCloud Photos ON → storage advertised read-only over USB.
+      //   2. iOS 17/18 with iCloud OFF → Apple progressively restricted
+      //      MTP delete and now silently no-ops it regardless of our
+      //      WPD client config (READ+WRITE, persistent IDs, all of it).
+      // The previous "iCloud Photos is most likely enabled" copy
+      // misdiagnosed (2) as (1) and sent users to toggle a setting
+      // that was already off. Reality: third-party tools that can
+      // actually delete (CopyTrans, iMazing, AnyTrans) use Apple's
+      // proprietary lockdownd / AMDS channel, not WPD. RetinaTag
+      // can't reach that channel from a Tauri/Rust app today. So we
+      // tell the user the truth + give them the practical workaround.
       _mtpSetCleanupStatus({
-        icon: '☁️',
-        text: 'Phone refused all deletions',
+        icon: '🍎',
+        text: 'iPhone refused to delete the photos',
         sub: (importLine ? importLine + '<br>' : '') +
-             '<span style="color:var(--amber)"><b>iCloud Photos is most likely enabled</b> on this iPhone. ' +
-             'iOS reports the camera roll as read-only over USB when iCloud Photos is on, ' +
-             'so RetinaTag can\'t remove the originals. Disable <b>Settings → Photos → Sync this iPhone</b> ' +
-             '(or <b>iCloud Photos</b> on older iOS) and try again. Your imported photos are safe in your library.</span>',
+             '<span style="color:var(--amber)">' +
+             'Apple has restricted photo deletion over USB on recent iOS. ' +
+             'WPD (the Windows protocol RetinaTag uses) says <b>"deleted"</b> ' +
+             'but the iPhone silently keeps the files. This affects every ' +
+             'third-party Windows tool that doesn\'t ship Apple\'s proprietary ' +
+             'lockdown driver.<br><br>' +
+             '<b>Two checks first:</b><br>' +
+             '&nbsp;• Settings → Photos → <b>Sync this iPhone</b> must be OFF<br>' +
+             '&nbsp;• Make sure <b>Apple Devices</b> (or iTunes) is installed and ' +
+             'running — its mobile-device service flips the iPhone into ' +
+             'writable mode for USB tools<br><br>' +
+             '<b>If those are fine and it still refuses:</b> delete via the iPhone\'s ' +
+             'own <b>Photos</b> app after confirming the import landed in your library. ' +
+             'Your imported photos are safe.</span>',
       });
-      toast('☁️ iPhone refused all deletes — iCloud Photos likely on', 'warn');
+      toast('🍎 iPhone refused deletes — Apple restricts MTP delete on recent iOS', 'warn');
       return;
     }
     const cleanBits = [`<b>${deletedN}</b> deleted from phone`];
