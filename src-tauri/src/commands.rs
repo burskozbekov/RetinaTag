@@ -3250,6 +3250,41 @@ pub async fn mtp_import(
                 for attempt in 0..=RETRY_DELAYS_MS.len() {
                     if attempt > 0 {
                         let delay_ms = RETRY_DELAYS_MS[attempt - 1];
+                        // v1.5.233 — Classify the last error so the UI
+                        // can show what actually happened instead of a
+                        // hard-coded "iPhone locked or busy" guess.
+                        // STG_E_ACCESSDENIED / 0x80070005 / "access
+                        // denied" / "locked" → genuine lock; 0x80070020
+                        // / "busy" / "sharing violation" → phone or
+                        // another app is holding the file; anything
+                        // else passes through verbatim so a USB cable
+                        // glitch or driver hiccup reads as such.
+                        let reason: String = {
+                            let lc = last_err.to_lowercase();
+                            if last_err.is_empty() {
+                                "Retrying…".to_string()
+                            } else if lc.contains("locked")
+                                || lc.contains("e_wpd_objectnotfound")
+                                || lc.contains("0x80070016")
+                                || lc.contains("0x80070005")
+                                || lc.contains("access denied")
+                            {
+                                "iPhone locked — unlock to continue".to_string()
+                            } else if lc.contains("0x80070020")
+                                || lc.contains("sharing violation")
+                                || lc.contains("busy")
+                            {
+                                "iPhone busy — waiting".to_string()
+                            } else if lc.contains("0x80070459")
+                                || lc.contains("device not")
+                                || lc.contains("invalid handle")
+                                || lc.contains("0x80070006")
+                            {
+                                "Device disconnected — reconnect cable".to_string()
+                            } else {
+                                format!("MTP error: {}", last_err)
+                            }
+                        };
                         ah.emit(
                             "mtp-import-waiting",
                             serde_json::json!({
@@ -3259,6 +3294,7 @@ pub async fn mtp_import(
                                 "max_attempts": RETRY_DELAYS_MS.len(),
                                 "wait_ms": delay_ms,
                                 "last_error": last_err.clone(),
+                                "reason": reason,
                             }),
                         ).ok();
                         std::thread::sleep(std::time::Duration::from_millis(delay_ms));

@@ -636,7 +636,9 @@ select.tb-select:focus{border-color:var(--red-dark)}
 @keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.05);opacity:.8}}
 
 /* ── Context menu ──────────────────────────────────────────────────── */
-#ctxMenu{position:fixed;z-index:250;background:var(--surface);border:1px solid var(--border2);
+/* v1.5.233 — bumped to 10100 so the menu floats above the lightbox
+   (z-index 10000) when the user right-clicks the expanded image. */
+#ctxMenu{position:fixed;z-index:10100;background:var(--surface);border:1px solid var(--border2);
   border-radius:var(--radius);padding:5px 0;min-width:180px;box-shadow:var(--shadow);display:none}
 #ctxMenu.open{display:block}
 .ctx-item{padding:7px 14px;font-size:12px;color:var(--text2);cursor:pointer;display:flex;
@@ -1469,7 +1471,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <button onclick="lbNav(-1)" style="position:absolute;left:74px;top:50%;transform:translateY(-50%);width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:28px;cursor:pointer;line-height:1;z-index:5">&#8249;</button>
   <!-- Image / video — width clamped so the right toolbar (~80 px) stays
        outside the picture instead of floating over it. -->
-  <img id="lbImg" src="" style="width:calc(95vw - 80px);height:95vh;max-width:calc(95vw - 80px);max-height:95vh;object-fit:contain;border-radius:4px;display:block;transition:transform .15s ease-out;transform-origin:center center;cursor:default" alt="">
+  <img id="lbImg" src="" style="width:calc(95vw - 80px);height:95vh;max-width:calc(95vw - 80px);max-height:95vh;object-fit:contain;border-radius:4px;display:block;transition:transform .15s ease-out;transform-origin:center center;cursor:default" alt="" oncontextmenu="event.preventDefault(); event.stopPropagation(); if (window._lbCurrentPhoto) { showCtxMenu(event, window._lbCurrentPhoto.id, window._lbCurrentPhoto.path); } return false;">
   <video id="lbVideo" controls preload="metadata" style="width:calc(95vw - 80px);height:95vh;max-width:calc(95vw - 80px);max-height:95vh;object-fit:contain;border-radius:4px;display:none;background:#000" onclick="event.stopPropagation()"></video>
   <button onclick="lbNav(1)" style="position:absolute;right:74px;top:50%;transform:translateY(-50%);width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:28px;cursor:pointer;line-height:1;z-index:5">&#8250;</button>
   <div id="lbCounter" style="position:absolute;bottom:18px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.6);font-size:13px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:4px;z-index:5"><span id="lbCounterText"></span><div id="lbProgress" title="Click to jump · drag to scrub" style="width:160px;height:6px;padding:2px 0;background:transparent;border-radius:3px;cursor:pointer;position:relative"><div style="position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:2px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden"><div id="lbProgressFill" style="height:100%;width:0;background:rgba(255,255,255,.55);transition:width .18s ease"></div></div><div id="lbProgressHint" style="display:none;position:absolute;bottom:16px;left:0;transform:translateX(-50%);padding:3px 7px;background:rgba(0,0,0,.75);color:rgba(255,255,255,.95);font-size:10px;font-weight:600;border-radius:4px;pointer-events:none;white-space:nowrap;font-variant-numeric:tabular-nums"></div></div></div>
@@ -5970,8 +5972,14 @@ listen('mtp-import-waiting', ({payload:p})=>{
   if (!$('mtpProgress') || $('mtpProgress').style.display === 'none') return;
   const att = p.attempt|0, max = p.max_attempts|0;
   const secs = Math.round((p.wait_ms|0) / 1000);
+  // v1.5.233 — Show the backend's classified reason instead of a
+  // hardcoded "iPhone locked or busy". Falls back to that for older
+  // builds that don't emit a reason field yet.
+  const reason = (p.reason && String(p.reason).trim())
+    ? p.reason
+    : 'iPhone locked or busy';
   $('mtpProgressLabel').innerHTML =
-    `⏸ <span style="color:var(--amber)">iPhone locked or busy</span> — waiting ${secs}s before retry ${att}/${max}…`;
+    `⏸ <span style="color:var(--amber)">${_esc(reason)}</span> — waiting ${secs}s before retry ${att}/${max}…`;
 });
 
 listen('mtp-import-complete', ({payload:p})=>{
@@ -14407,6 +14415,22 @@ async function openLightbox(photoId) {
   const id = photoId || selectedId;
   if (!id) { toast('No photo selected','error'); return; }
   _lbCurrentId = id;
+  // v1.5.233 — Stash the currently-displayed photo's {id, path} on
+  // window so the lightbox's <img oncontextmenu> handler can call
+  // showCtxMenu with the exact same args the gallery thumbnails do.
+  // Lightbox nav (lbNav → openLightbox again) and the filename
+  // caption block below both already resolve the path; we mirror it
+  // here so the context-menu wiring stays a one-line lookup.
+  try {
+    const _ctxList = (typeof _lbList === 'function') ? _lbList() : photos;
+    const _ctxIdx  = _ctxList.findIndex(p => p.id === id);
+    const _ctxPhoto = _ctxIdx >= 0 ? _ctxList[_ctxIdx] : null;
+    window._lbCurrentPhoto = _ctxPhoto
+      ? { id: _ctxPhoto.id, path: _ctxPhoto.path || '' }
+      : { id, path: '' };
+  } catch(_) {
+    window._lbCurrentPhoto = { id, path: '' };
+  }
   const lb = document.getElementById('lightbox');
   const img = document.getElementById('lbImg');
   const counter = document.getElementById('lbCounter');
@@ -16625,6 +16649,10 @@ function closeLightbox() {
     vid.style.display = 'none';
   }
   _lbCurrentId = null;
+  // v1.5.233 — clear the context-menu photo reference so a stale
+  // entry can't leak into the next open or into any keyboard
+  // shortcut that asks "what's the current photo?"
+  window._lbCurrentPhoto = null;
   // Reset zoom
   _lbZoom = 1; _lbPanX = 0; _lbPanY = 0;
   const img = document.getElementById('lbImg');
