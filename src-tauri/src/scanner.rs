@@ -132,7 +132,21 @@ pub fn best_date_taken(path: &str) -> Option<String> {
 ///   • A `YYYY-MM-DD`, `YYYYMMDD`, or `YYYY` pattern in the filename
 /// Returned format matches the SQLite text date format used elsewhere
 /// (`YYYY-MM-DD HH:MM:SS`).
-fn extract_date_taken(path: &str) -> Option<String> {
+/// v1.5.244 — Canonical "what date was this photo taken?" resolver.
+/// Made `pub` so the MTP iPhone import path (commands.rs) can call
+/// the SAME logic the folder scanner uses — ensuring every entry
+/// point (watch-folder scan, drag-drop import, MTP import) writes
+/// date_taken from the same source-of-truth rules:
+///   1. Every EXIF date tag (DateTimeOriginal / Digitized / DateTime
+///      / GPSDateStamp).
+///   2. File mtime and ctime from the filesystem.
+///   3. YYYY-MM-DD-shaped tokens anywhere in the full path (folder
+///      hierarchies like \2003\2003_12_14\ rescue files whose EXIF
+///      was stripped).
+///   4. Clamp to the plausible window 1990-01-01 ≤ d ≤ now and pick
+///      the EARLIEST survivor. Capture is older than every later
+///      copy, re-save, or share.
+pub fn extract_date_taken(path: &str) -> Option<String> {
     use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 
     let mut candidates: Vec<NaiveDateTime> = Vec::with_capacity(8);

@@ -3435,37 +3435,25 @@ pub async fn mtp_import(
                 // Normalize once at the boundary so the rest of the
                 // pipeline doesn't have to defend.
                 //
-                // v1.5.233 — WPD-mtime priority swap for the
-                // "iPhone Messages video" failure. WPD's date_created
-                // / date_modified for a video that arrived via
-                // Messages reports the SAVE-TO-CAMERA-ROLL time, not
-                // the original capture. Real capture date is preserved
-                // in the file's mtime on the phone (which Windows
-                // copies through verbatim). We now read EXIF from
-                // the just-copied file first (catches photos that
-                // carry their original DateTimeOriginal — the common
-                // case for actual camera shots) and fall back to the
-                // file mtime when EXIF is empty. The WPD-reported
-                // date is the absolute LAST resort, since for
-                // Messages videos it's effectively today's date.
-                let wpd_date = obj.date_created.as_deref().map(|s| {
-                    let mut t = s.replace('/', "-");
-                    if t.len() > 10 && t.as_bytes().get(10) == Some(&b':') {
-                        t.replace_range(10..11, " ");
-                    }
-                    t
-                });
-                let exif_date = crate::exif_reader::read_exif(&src_str)
-                    .ok()
-                    .and_then(|e| e.date_taken)
-                    .filter(|s| !s.trim().is_empty());
-                let mtime_date = std::fs::metadata(&src_str).ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| {
-                        let dt: chrono::DateTime<chrono::Local> = t.into();
-                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
-                    });
-                let date_taken = exif_date.or(mtime_date).or(wpd_date);
+                // v1.5.244 — Defer the entire date-taken resolution to
+                // scanner::extract_date_taken so MTP iPhone imports use
+                // the SAME "oldest wins across EXIF + GPS + mtime +
+                // ctime + path-date" rule the folder scanner uses. Any
+                // gap fixed in scanner.rs from now on (or vice versa)
+                // automatically applies on both paths.
+                //
+                // WPD's reported date is kept as a final fallback ONLY
+                // for files where scanner couldn't dig up anything
+                // (very rare — would need a file with no EXIF AND
+                // somehow no mtime/ctime).
+                let date_taken = crate::scanner::extract_date_taken(&src_str)
+                    .or_else(|| obj.date_created.as_deref().map(|s| {
+                        let mut t = s.replace('/', "-");
+                        if t.len() > 10 && t.as_bytes().get(10) == Some(&b':') {
+                            t.replace_range(10..11, " ");
+                        }
+                        t
+                    }));
 
                 let new_photo = db::NewPhoto {
                     path: &src_str,
