@@ -10645,6 +10645,41 @@ pub async fn count_unknown_faces(state: tauri::State<'_, AppState>) -> Result<i6
 
 #[tauri::command]
 pub async fn delete_photos(photo_ids: Vec<i64>, delete_file: bool, state: tauri::State<'_, AppState>) -> Result<usize, String> {
+    // v1.5.241 — Diagnostic log appended to every delete attempt so
+    // future "delete didn't actually delete" reports come with a paper
+    // trail. Path mirrors mtp-delete.log; rolls at 256 KB. Failures
+    // here are silent — the log is best-effort.
+    fn dlog(msg: &str) {
+        use std::io::Write;
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let line = format!("[{}] {}\n", now, msg);
+        let path = match std::env::var("LOCALAPPDATA") {
+            Ok(p) => std::path::PathBuf::from(p)
+                .join("RetinaTag")
+                .join("delete-photos.log"),
+            Err(_) => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > 256 * 1024 {
+                let _ = std::fs::rename(&path, path.with_extension("log.old"));
+            }
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true).append(true).open(&path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+        eprintln!("[delete] {}", msg);
+    }
+    dlog(&format!(
+        "delete_photos start: ids={} delete_file={}",
+        photo_ids.len(),
+        delete_file
+    ));
+
     // Collect original paths + cached thumbnail paths BEFORE the DB delete.
     // Thumbnails live in app_data/thumbnails and are keyed by content hash —
     // if we don't remove them here they accumulate forever (leak).
@@ -10714,27 +10749,54 @@ pub async fn delete_photos(photo_ids: Vec<i64>, delete_file: bool, state: tauri:
                 // DB + thumbs (the user asked for delete) but record what
                 // failed so support can see why files might still be on
                 // disk after a "delete to recycle bin" action.
+                dlog(&format!(
+                    "recycle: {} paths queued, temp={}",
+                    orig_paths.len(),
+                    temp.display()
+                ));
                 match std::process::Command::new("powershell.exe")
                     .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
                     .creation_flags(0x08000000)
                     .output()
                 {
-                    Ok(out) if !out.status.success() => {
-                        eprintln!(
-                            "[delete] PowerShell recycle exited {:?}: stderr={}",
-                            out.status.code(),
-                            String::from_utf8_lossy(&out.stderr)
-                        );
+                    Ok(out) => {
+                        let stdout_s = String::from_utf8_lossy(&out.stdout);
+                        let stderr_s = String::from_utf8_lossy(&out.stderr);
+                        dlog(&format!(
+                            "powershell exit={:?} stdout_len={} stderr_len={}",
+                            out.status.code(), out.stdout.len(), out.stderr.len()
+                        ));
+                        if !stderr_s.trim().is_empty() {
+                            dlog(&format!("powershell stderr: {}", stderr_s.trim()));
+                        }
+                        if !stdout_s.trim().is_empty() {
+                            dlog(&format!("powershell stdout: {}", stdout_s.trim()));
+                        }
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[delete] PowerShell recycle failed to spawn: {} — files left on disk",
-                            e
-                        );
+                        dlog(&format!("powershell SPAWN FAILED: {} — files left on disk", e));
                     }
-                    _ => {}
+                }
+                // v1.5.241 — Verify each path is actually gone after PS.
+                // Files still on disk = silent PS failure; surface the
+                // count via the log so the user can see WHICH ones.
+                let mut still_there: Vec<&str> = Vec::new();
+                for (_, p) in &orig_paths {
+                    if std::path::Path::new(p).exists() {
+                        still_there.push(p);
+                    }
+                }
+                dlog(&format!(
+                    "post-recycle: {} of {} files still on disk",
+                    still_there.len(),
+                    orig_paths.len()
+                ));
+                for p in still_there.iter().take(10) {
+                    dlog(&format!("  STILL ON DISK: {}", p));
                 }
                 std::fs::remove_file(&temp).ok();
+            } else {
+                dlog("temp file write failed — recycle skipped");
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -10752,6 +10814,10 @@ pub async fn delete_photos(photo_ids: Vec<i64>, delete_file: bool, state: tauri:
     // Now re-acquire lock for DB deletion
     let conn = state.db.lock().map_err(|_| "db lock")?;
     let deleted = db::delete_photos_by_ids(&conn, &photo_ids).map_err(|e| e.to_string())?;
+    dlog(&format!(
+        "DB rows deleted: {} (asked for {})",
+        deleted, photo_ids.len()
+    ));
     Ok(deleted)
 }
 

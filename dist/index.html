@@ -18129,38 +18129,68 @@ function batchCompare(){
 /// Move the selected photos to the Recycle Bin after a confirmation dialog
 /// that lists the files. Uses the existing `delete_photos` Tauri command
 /// which recycles rather than hard-deletes, so users can restore by mistake.
+// v1.5.241 — Verbose logging on the batch-delete path. User reported
+// "Delete butonu basıyorum, confirm sonrası sessizlik" — i.e. the
+// confirm modal accepts, then nothing visible happens and the file
+// stays on disk. Possible silent-fail points:
+//   • photos.find() returns nothing for Timeline/Calendar context →
+//     "Photos not found in current view" toast (user might miss it).
+//   • invoke('delete_photos') returns n=0 silently.
+//   • PowerShell recycle silently fails — DB row gone, file still
+//     on disk, no error surfaced.
+// This version makes every branch noisy.
 async function batchDelete(){
-  if(selectedIds.size===0)return;
+  console.log('[batchDelete] start, selectedIds.size=', selectedIds.size);
+  if(selectedIds.size===0){
+    toast('Nothing selected', 'info');
+    return;
+  }
   const ids=[...selectedIds];
+  // v1.5.241 — Look up photo metadata from the same source the gallery
+  // is actually showing. _lbList() returns the Timeline/Calendar
+  // context list when one is active, falling back to the global
+  // gallery `photos` array otherwise. Without this a multi-select
+  // in Timeline view would yield 0 hits because the global `photos`
+  // is the gallery's set, not Timeline's.
+  const sourceList = (typeof _lbList === 'function') ? _lbList() : photos;
+  const byId = new Map((sourceList || []).map(p => [p.id, p]));
   const selected=[];
   let totalSize=0;
   for(const id of ids){
-    const p=photos.find(x=>x.id===id);
-    if(!p)continue;
-    // Map PhotoSummary to the shape _cuShowDeleteModal expects. We don't have
-    // is_invested/folder on PhotoSummary, so approximate: treat favorited or
-    // rated photos as invested (visual warning only — delete still proceeds
-    // on confirmation).
+    const p = byId.get(id) || (photos || []).find(x => x.id === id);
+    if(!p) continue;
     selected.push({
-      id:p.id,path:p.path,filename:p.filename,
-      size_bytes:p.size_bytes||0,
-      favorite:!!p.favorite,rating:p.rating||0,
+      id:p.id, path:p.path, filename:p.filename,
+      size_bytes: p.size_bytes || p.size || 0,
+      favorite:!!p.favorite, rating:p.rating||0,
       folder:(p.path||'').split(/[\\\/]/).slice(-2,-1)[0]||'',
-      is_invested:!!p.favorite||(p.rating||0)>=4||(p.tag_count||0)>0,
+      is_invested:!!p.favorite || (p.rating||0)>=4 || (p.tag_count||0)>0,
     });
-    totalSize+=p.size_bytes||0;
+    totalSize += p.size_bytes || p.size || 0;
   }
-  if(selected.length===0){toast('Photos not found in current view','error');return;}
+  console.log('[batchDelete] resolved', selected.length, 'of', ids.length, 'ids');
+  if(selected.length===0){
+    toast(`Couldn't resolve ${ids.length} selected photo${ids.length===1?'':'s'} — switch to Gallery view and try again`, 'error');
+    return;
+  }
   const ok=await _cuShowDeleteModal(selected,totalSize);
-  if(!ok)return;
+  console.log('[batchDelete] modal returned', ok);
+  if(!ok) return;
+  toast(`Deleting ${ids.length} photo${ids.length===1?'':'s'}…`, 'info');
   try{
-    const n=await invoke('delete_photos',{photoIds:ids,deleteFile:true});
-    toast('Moved '+n.toLocaleString()+' photo(s) to Recycle Bin','success');
-    selectedIds.clear();updateSelectionUI();
+    const n = await invoke('delete_photos', { photoIds: ids, deleteFile: true });
+    console.log('[batchDelete] invoke returned', n);
+    if(n === 0){
+      toast('Delete returned 0 — DB rows unchanged. Check %LOCALAPPDATA%\\RetinaTag\\delete-photos.log for the reason.', 'error');
+    } else {
+      toast(`✓ Moved ${n.toLocaleString()} photo${n===1?'':'s'} to Recycle Bin`, 'success');
+    }
+    selectedIds.clear(); updateSelectionUI();
     await loadPhotos();
-    try{refreshStats&&refreshStats();refreshFolders&&refreshFolders();}catch(_){}
-  }catch(e){
-    toast('Delete failed: '+e,'error');
+    try{ refreshStats && refreshStats(); refreshFolders && refreshFolders(); } catch(_){}
+  } catch(e){
+    console.error('[batchDelete] invoke threw', e);
+    toast('Delete failed: ' + (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)), 'error');
   }
 }
 
