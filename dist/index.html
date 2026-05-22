@@ -1933,30 +1933,20 @@ select.tb-select:focus{border-color:var(--red-dark)}
       <!-- Phase C: confirm import -->
       <div id="mtpConfirm" style="display:none">
         <div id="mtpSummary" style="font-size:13px;color:var(--text2);margin-bottom:14px;line-height:1.55;padding:10px 12px;background:var(--bg2);border-radius:6px"></div>
-        <!-- v1.5.197 — "After import" pre-selection. Mac sprint: the
-             post-import "Keep favorites, delete the rest" path was
-             buried in a toast that only showed up once import finished
-             — users didn't know the feature existed. Surfacing it
-             here as a radio group lets the user decide BEFORE they
-             commit, and showMtpCleanupOptions reads this selection
-             back to drive the appropriate confirm toast. -->
-        <div style="margin-bottom:10px;font-size:12px;font-weight:600;color:var(--text1)">
-          After import — what should happen on the phone?
-        </div>
-        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;padding:10px 12px;background:var(--bg2);border-radius:6px">
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text1);cursor:pointer">
-            <input type="radio" name="mtpAfter" value="keep" checked style="accent-color:var(--accent)" />
-            📱 Keep everything on phone <span style="color:var(--text3);font-size:11px">(default — phone untouched)</span>
-          </label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text1);cursor:pointer">
-            <input type="radio" name="mtpAfter" value="keepFavs" style="accent-color:var(--amber)" />
-            ⭐ Keep favorites, <b>delete the rest</b> <span style="color:var(--text3);font-size:11px">(frees phone space)</span>
-          </label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text1);cursor:pointer">
-            <input type="radio" name="mtpAfter" value="wipe" style="accent-color:var(--danger)" />
-            🗑️ <b style="color:var(--danger)">Delete everything from phone</b>
-          </label>
-        </div>
+        <!-- v1.5.238 — "After import" radio group removed.
+             Apple has progressively restricted MTP delete on iOS;
+             on recent iOS (17/18) WPD's Delete() silently no-ops
+             regardless of what the client requests. The only
+             reliable way to remove photos from an iPhone is via
+             the iPhone's own Photos app or via Apple's proprietary
+             lockdown channel (CopyTrans / iMazing / iTunes). We
+             can't reach that channel from a Tauri/Rust app today,
+             so promising "Delete from phone" in the UI was a
+             broken promise that confused users. Default behaviour
+             now: import copies, phone is always left untouched.
+             Hidden no-op input keeps Phase E's value lookup happy
+             without showing anything to the user. -->
+        <input type="hidden" name="mtpAfter" value="keep">
         <div style="margin-bottom:10px;font-size:12px;font-weight:600;color:var(--text1)">Destination folder</div>
         <div style="display:flex;gap:8px;margin-bottom:8px">
           <input type="text" id="mtpDestDir" readonly placeholder="No folder selected" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);color:var(--cream);cursor:pointer;font-size:12px" />
@@ -2012,46 +2002,47 @@ select.tb-select:focus{border-color:var(--red-dark)}
         </div>
       </div>
 
-      <!-- Phase E: after import — cleanup options -->
-      <!-- v1.5.218 — Phase E redesign. Modal stays open through the
-           cleanup; status div is hidden until auto-cleanup runs, then
-           swaps the manual buttons out so the user sees one focused
-           progress message + final summary instead of "buttons … click
-           … modal closes … was that successful?". -->
+      <!-- Phase E: after import — done screen.
+           v1.5.238 — Cleanup options removed entirely. Apple has
+           progressively restricted MTP delete on iOS; on iOS 17/18
+           WPD's Delete() silently no-ops no matter what we ask for.
+           Keeping the cleanup UI was a broken promise — the user
+           saw "All done" or "iCloud Photos likely on" depending on
+           the bug du jour, but the phone always kept the files.
+           Honest path: import copies, modal closes, user deletes
+           via the iPhone's own Photos app if they want to free
+           space. The mtpCleanupStatus / mtpCleanupButtons /
+           btnMtpKeep / btnMtpKeepFavs / btnMtpWipe IDs are kept
+           as hidden no-op stubs so dead JS lookups don't crash
+           the renderer while we wind down the cleanup code paths
+           in a follow-up.
+      -->
       <div id="mtpCleanup" style="display:none">
         <div id="mtpDoneSummary" style="font-size:13px;color:var(--text2);margin-bottom:16px;padding:10px 12px;background:var(--bg2);border-radius:6px"></div>
-
-        <!-- Cleanup status — hidden until auto-cleanup runs.
-             v1.5.220 — real progress bar replaces the indefinite
-             "Cleaning up phone…" spinner. Backend emits a
-             mtp-delete-progress event after each 20-item chunk;
-             we redraw the fill + N / total + percentage. -->
-        <div id="mtpCleanupStatus" style="display:none;margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;text-align:center">
-          <div id="mtpCleanupStatusIcon" style="font-size:22px;margin-bottom:6px">🧹</div>
-          <div id="mtpCleanupStatusText" style="font-size:13px;color:var(--cream);font-weight:600">Cleaning up phone…</div>
-          <div id="mtpCleanupProgressWrap" style="display:none;margin:10px auto 4px;max-width:280px">
-            <div style="height:8px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden">
-              <div id="mtpCleanupProgressFill" style="height:100%;width:0%;background:linear-gradient(90deg,var(--red-dark),var(--red));border-radius:4px;transition:width .25s ease"></div>
-            </div>
-            <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums">
-              <span id="mtpCleanupProgressCount">0 / 0</span>
-              <span id="mtpCleanupProgressPct">0%</span>
-            </div>
+        <div style="padding:16px 18px;background:var(--bg2);border:1px solid var(--border);border-radius:8px">
+          <div style="font-size:14px;font-weight:700;color:var(--cream);margin-bottom:8px">📥 Import done</div>
+          <div style="font-size:12px;color:var(--text2);line-height:1.55">
+            Your imported photos are now in the library. RetinaTag doesn't
+            remove photos from the iPhone — Apple restricts that over USB
+            on recent iOS, and trying anyway just gave silent failures or
+            wrong "iCloud Photos likely on" warnings.<br><br>
+            To free space on the phone, open the iPhone's own
+            <b>Photos</b> app and delete the imported items from there.
           </div>
-          <div id="mtpCleanupStatusSub" style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5"></div>
         </div>
-
-        <!-- Manual buttons — only visible when no auto-cleanup in flight -->
-        <div id="mtpCleanupButtons">
-          <div style="font-size:12px;font-weight:600;color:var(--text1);margin-bottom:10px">What should I do with the photos on your phone?</div>
-          <div style="display:flex;flex-direction:column;gap:8px">
-            <button class="btn btn-secondary btn-block btn-sm" id="btnMtpKeep" style="text-align:left">📱 Keep on phone (delete nothing)</button>
-            <button class="btn btn-secondary btn-block btn-sm" id="btnMtpKeepFavs" style="text-align:left;border-color:var(--amber)">⭐ Keep favorites, <b>delete the rest from phone</b></button>
-            <button class="btn-danger btn-block btn-sm" id="btnMtpWipe" style="text-align:left">🗑️ <b>Delete all photos from phone</b></button>
-          </div>
-          <div style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.5">
-            Deletion on the phone is <b>permanent</b>. Only the photos you imported are safe in your library — make sure you copied everything you might need.
-          </div>
+        <!-- Hidden no-op stubs (kept until the JS callers are pruned). -->
+        <div id="mtpCleanupStatus" style="display:none"></div>
+        <div id="mtpCleanupStatusIcon" style="display:none"></div>
+        <div id="mtpCleanupStatusText" style="display:none"></div>
+        <div id="mtpCleanupProgressWrap" style="display:none"></div>
+        <div id="mtpCleanupProgressFill" style="display:none"></div>
+        <div id="mtpCleanupProgressCount" style="display:none"></div>
+        <div id="mtpCleanupProgressPct" style="display:none"></div>
+        <div id="mtpCleanupStatusSub" style="display:none"></div>
+        <div id="mtpCleanupButtons" style="display:none">
+          <button id="btnMtpKeep"></button>
+          <button id="btnMtpKeepFavs"></button>
+          <button id="btnMtpWipe"></button>
         </div>
       </div>
     </div>
@@ -6021,41 +6012,18 @@ async function showMtpCleanupOptions(r) {
     : `✅ Import complete: <b>${r.copied}</b> copied, <b>${r.skipped}</b> skipped (${r.total} total).`;
   $('mtpDoneSummary').innerHTML = headline + breakdown;
   loadPhotos(); refreshStats(); refreshFolders();
-
-  const afterEl = document.querySelector('input[name="mtpAfter"]:checked');
-  const after = afterEl ? afterEl.value : 'keep';
-  if (r.copied === 0 && r.skipped === 0) return;
-
-  if (after === 'keepFavs') {
-    _mtpRunDeleteWithRetry(
-      () => invoke('mtp_delete_non_favorites', { deviceId: _mtpState.activeDevice.id }),
-      'keepFavs', r
-    );
-    return;
-  }
-  if (after === 'wipe') {
-    const n = (r.copied + r.skipped) | 0;
-    toastAction(
-      `⚠ Pre-selected: WIPE phone (${n} items, including ⭐ favorites). Confirm?`,
-      'error', 'Wipe phone',
-      () => {
-        const ids = _mtpState.media.photos.map(p => p.id);
-        _mtpRunDeleteWithRetry(
-          () => invoke('mtp_delete', { deviceId: _mtpState.activeDevice.id, objectIds: ids }),
-          'wipe', r
-        );
-      }
-    );
-    return;
-  }
-  // after === 'keep' (default) — manual Phase E buttons stay visible.
+  // v1.5.238 — Phone-delete branch removed. We always land on the
+  // "Import done" panel; the user closes the modal via the footer.
+  // The mtp_delete / mtp_delete_non_favorites Tauri commands are
+  // still registered in case a future iteration adds the Apple
+  // lockdown channel — but nothing in the UI calls them anymore.
 }
 
-$('btnMtpKeep').onclick = () => {
-  _mtpUserActedOnCleanup = true;
-  $('mtpModal').classList.remove('open');
-  toast('Photos kept on phone', 'info');
-};
+// v1.5.238 — Delete-from-phone buttons are now hidden stubs (see
+// the Phase E HTML for why). The handlers are kept as no-ops so
+// the $() lookups don't throw if some legacy code path still
+// reaches them.
+$('btnMtpKeep').onclick = () => {};
 
 // v1.5.218 — Phase E status helpers. Replace the toast-only feedback
 // path with an in-modal status div that survives across re-lock
@@ -6249,37 +6217,13 @@ async function _mtpRunDeleteWithRetry(action, kindLabel, importResult) {
   attempt(false);
 }
 
-async function doKeepFavoritesDeleteRest(_skipConfirm) {
-  if (!_mtpState.activeDevice) return;
-  return _mtpRunDeleteWithRetry(
-    () => invoke('mtp_delete_non_favorites', { deviceId: _mtpState.activeDevice.id }),
-    'keepFavs'
-  );
-}
-
-$('btnMtpKeepFavs').onclick = () => {
-  _mtpUserActedOnCleanup = true;
-  doKeepFavoritesDeleteRest();
-};
-
-$('btnMtpWipe').onclick = () => {
-  _mtpUserActedOnCleanup = true;
-  if (!_mtpState.activeDevice || !_mtpState.media) return;
-  const count = _mtpState.media.photo_count + _mtpState.media.video_count;
-  // v1.5.205 — toastAction instead of native confirm() (ACL-rejected
-  // on this Tauri build). User can still cancel by ignoring the toast.
-  toastAction(
-    `⚠ Permanently delete ALL ${count} items from the phone? This includes ⭐ favorites and CANNOT be undone.`,
-    'error', 'Wipe phone',
-    () => {
-      const ids = _mtpState.media.photos.map(p => p.id);
-      _mtpRunDeleteWithRetry(
-        () => invoke('mtp_delete', { deviceId: _mtpState.activeDevice.id, objectIds: ids }),
-        'wipe'
-      );
-    }
-  );
-};
+// v1.5.238 — keepFavs / wipe handlers stripped to no-ops along with
+// the rest of the phone-delete UI. Backend commands stay registered
+// but unreachable from the gallery; if Apple ever re-opens MTP
+// delete on iOS, the work needed is "show the radio + restore
+// these onclicks", not a re-implementation.
+$('btnMtpKeepFavs').onclick = () => {};
+$('btnMtpWipe').onclick = () => {};
 
 $('btnMtpCancel').onclick = () => { _mtpStopRetry(); $('mtpModal').classList.remove('open'); };
 
