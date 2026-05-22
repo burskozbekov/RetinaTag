@@ -18186,7 +18186,25 @@ async function batchDelete(){
       toast(`✓ Moved ${n.toLocaleString()} photo${n===1?'':'s'} to Recycle Bin`, 'success');
     }
     selectedIds.clear(); updateSelectionUI();
+    // v1.5.242 — Refresh whatever view the user is actually looking at.
+    // batchDelete used to only call loadPhotos() (the gallery grid). On
+    // Timeline / Calendar / Cleanup / Map views that left the deleted
+    // photos visible — their DB rows + files were gone but the view's
+    // local DOM still rendered them, with thumb URLs pointing at now-
+    // missing cache files. We refresh by current view + clear the
+    // shared thumbCache so no surviving blob URL gets reused.
+    try{ if(typeof thumbCache !== 'undefined' && thumbCache && thumbCache.clear) thumbCache.clear(); } catch(_){}
     await loadPhotos();
+    try{
+      if(typeof curView !== 'undefined'){
+        if(curView === 'timeline'    && typeof loadTimeline    === 'function') await loadTimeline();
+        if(curView === 'calendar'    && typeof loadCalendar    === 'function') await loadCalendar();
+        if(curView === 'cleanup'     && typeof loadCleanup     === 'function') await loadCleanup();
+        if(curView === 'map'         && typeof initMap         === 'function') initMap();
+        if(curView === 'duplicates'  && typeof loadDuplicates  === 'function') await loadDuplicates();
+        if(curView === 'dashboard'   && typeof loadDashboard   === 'function') await loadDashboard();
+      }
+    } catch(_){}
     try{ refreshStats && refreshStats(); refreshFolders && refreshFolders(); } catch(_){}
   } catch(e){
     console.error('[batchDelete] invoke threw', e);
