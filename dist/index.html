@@ -16859,55 +16859,80 @@ function _lbFacesRender(){
   svg.setAttribute('viewBox', `0 0 ${nw} ${nh}`);
   svg.style.display = 'block';
 
-  // Stroke / font sizes expressed in image-natural pixels. Target a rendered
-  // thickness that looks the same regardless of how big the source photo is:
-  // the SVG is displayed at `displayW` CSS pixels, so a k-px stroke on
-  // screen needs (k * nw / displayW) in SVG units.
-  const rect = img.getBoundingClientRect();
-  // Pre-transform display size. getBoundingClientRect already reflects the
-  // scale transform; divide it out so stroke/label stay visually constant
-  // whether we're at 1× or 3×.
-  const displayW = Math.max(1, rect.width / Math.max(0.01, _lbZoom));
-  const scaleNat = nw / displayW;
-  // v1.5.230 — Slightly bolder stroke + label sits AT the top edge of the
-  // face box (anchored, not floating above) so the user sees the rect AS
-  // the face boundary and the label as part of the same unit. Apple
-  // Photos style.
-  const sw = 3 * scaleNat;             // 3 px stroke (was 2.5)
-  const labelFont = 13 * scaleNat;     // 13 px label
+  // v1.5.231 — Strokes and label sizes must look the same regardless of
+  // image aspect ratio. The old code used rect.width (the IMG element's
+  // CSS width, including letterbox gutters) as `displayW`. On portrait
+  // photos in a wide container the letterbox is huge — the actual
+  // displayed image is much narrower than the element — so strokes
+  // ended up ~half as thick on portrait shots vs landscape ones.
+  // Compute the REAL displayed dimensions from the natural AR and the
+  // element box (mirrors object-fit:contain's math) and scale off that.
+  const elRect = img.getBoundingClientRect();
+  const elW = Math.max(1, elRect.width  / Math.max(0.01, _lbZoom));
+  const elH = Math.max(1, elRect.height / Math.max(0.01, _lbZoom));
+  const elAR = elW / elH;
+  const imgAR = nw / nh;
+  let actualDw, actualDh;
+  if (imgAR > elAR) {
+    // Image is wider than container — fits to element width
+    actualDw = elW;
+    actualDh = elW / imgAR;
+  } else {
+    // Image is taller (or square) — fits to element height
+    actualDw = elH * imgAR;
+    actualDh = elH;
+  }
+  const scaleNat = nw / actualDw;
+  const sw = 3 * scaleNat;             // 3 CSS px stroke at 1× zoom
+  const labelFont = 13 * scaleNat;     // 13 CSS px label text
   const labelPad = 5 * scaleNat;
   const labelStroke = 0.5 * scaleNat;
+  // Don't draw the text label when the face is so small the label
+  // would dwarf or overhang it. Threshold in natural pixels (24 CSS
+  // px translated through scaleNat). Tiny faces still get the rect.
+  const MIN_LABEL_FACE_H_CSS = 24;
+  const minLabelFaceH = MIN_LABEL_FACE_H_CSS * scaleNat;
+  // Clamp the visual face rect to image bounds so a faulty bbox that
+  // pokes off-edge (y1 < 0 or y2 > nh) doesn't stretch the SVG. The
+  // DB row stays as-is — only the rendered rect is clamped.
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
   const parts = _lbFacesForCurrent.map(f => {
-    const w = Math.max(1, f.x2 - f.x1);
-    const h = Math.max(1, f.y2 - f.y1);
+    const x1 = clamp(f.x1, 0, nw);
+    const y1 = clamp(f.y1, 0, nh);
+    const x2 = clamp(f.x2, 0, nw);
+    const y2 = clamp(f.y2, 0, nh);
+    const w = Math.max(1, x2 - x1);
+    const h = Math.max(1, y2 - y1);
     const named = f.person_id && f.person_id > 0;
     const skipped = f.person_id === -1;
     // Green = unknown (click to name). Blue = already named. Grey = skipped.
     const stroke = named   ? 'rgba(90,170,255,.95)'
                 : skipped  ? 'rgba(180,180,180,.70)'
                 :            'rgba(90,220,110,.95)';
-    const labelBg = named  ? 'rgba(30,80,150,.92)'
-                : skipped  ? 'rgba(60,60,60,.88)'
-                :            'rgba(18,70,30,.92)';
-    const label = named ? (f.person_name || 'Named') : (skipped ? 'Skipped' : '');
+    // v1.5.231 — Only NAMED faces get a text label. The previous behaviour
+    // drew a "Skipped" pill for every skipped face, which on group shots
+    // meant 6+ identical noise badges all called "Skipped". The grey rect
+    // already carries that meaning; the badge was redundant clutter.
+    // Unknown (green) faces also stay label-less since they're "click me
+    // to assign" — the colour does the talking.
     let labelMarkup = '';
-    if(label){
-      // Measure roughly by character count (proportional font, approx 0.55em
-      // per char for system-ui). Good enough for a visual background box.
+    if (named && h >= minLabelFaceH) {
+      const label = f.person_name || 'Named';
+      const labelBg = 'rgba(30,80,150,.92)';
+      // Measure roughly by character count (proportional font, ~0.55em per
+      // char for system-ui). Good enough for a visual background box.
       const approxW = label.length * labelFont * 0.55 + 2 * labelPad;
       const approxH = labelFont + 2 * labelPad;
-      // v1.5.230 — Anchor the label to the face box, not above it. We
-      // sit the label so its BOTTOM edge coincides with the face top
-      // edge (visually attached, no gap). If the face is near the top
-      // of the photo and there isn't room above, flip the label to
-      // sit INSIDE the face at the top.
-      const ly = (f.y1 - approxH) > 0
-        ? (f.y1 - approxH + sw * 0.5)   // attach to face top edge, slight overlap
-        : (f.y1 + sw * 0.5);            // no room above → tuck inside
-      // Clamp label x so it doesn't run off the right edge of the image
-      // on faces near the right side.
-      const lx = Math.min(f.x1, nw - approxW - sw);
+      // Anchor the label to the face box, no gap. The label's bottom edge
+      // coincides with the face top edge (slight overlap on the stroke
+      // so it reads as one connected unit). When the face is near the
+      // top of the photo, tuck the label inside instead.
+      const ly = (y1 - approxH) > 0
+        ? (y1 - approxH + sw * 0.5)
+        : (y1 + sw * 0.5);
+      // Clamp label x so it never crosses the image edges.
+      const lx = clamp(x1, 0, Math.max(0, nw - approxW - sw));
       labelMarkup = `
         <rect x="${lx}" y="${ly}" width="${approxW}" height="${approxH}" rx="${labelPad*0.7}" ry="${labelPad*0.7}" fill="${labelBg}" stroke="${stroke}" stroke-width="${labelStroke}"/>
         <text x="${lx + labelPad}" y="${ly + approxH - labelPad*0.85}" fill="rgba(255,255,255,.97)" font-size="${labelFont}" font-family="system-ui, -apple-system, sans-serif" font-weight="600">${_lbEscXml(label)}</text>`;
@@ -16923,7 +16948,7 @@ function _lbFacesRender(){
     // sees the interactive affordance instead of the lightbox's zoom-out
     // cursor.
     return `<g data-face-id="${f.id}" style="pointer-events:auto;cursor:pointer" onclick="_lbFaceBoxClick(${f.id}, event)">
-        <rect x="${f.x1}" y="${f.y1}" width="${w}" height="${h}" fill="${stroke}" fill-opacity="0.001" stroke="${stroke}" stroke-width="${sw}" rx="${sw*1.8}" ry="${sw*1.8}" style="pointer-events:all;cursor:pointer"/>
+        <rect x="${x1}" y="${y1}" width="${w}" height="${h}" fill="${stroke}" fill-opacity="0.001" stroke="${stroke}" stroke-width="${sw}" rx="${sw*1.8}" ry="${sw*1.8}" style="pointer-events:all;cursor:pointer"/>
         ${labelMarkup}
       </g>`;
   }).join('');
