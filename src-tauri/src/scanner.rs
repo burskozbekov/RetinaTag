@@ -286,6 +286,47 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
         }
     }
 
+    // v1.5.262 — Also accept YYYY-MM (no day) patterns. Users sometimes
+    // organize like \Fotograflar\2016-10\foo.jpg where the day isn't
+    // encoded. Synthesize day=01 with noon time at the lowest quality
+    // (0 → same tier as YYYY-MM-DD). The earlier YYYY-MM-DD scanner
+    // would have already caught more specific matches; this only
+    // contributes when no fuller date hit was found upstream.
+    {
+        let bytes = path.as_bytes();
+        let mut i = 0;
+        while i + 7 <= bytes.len() {
+            let is_digit = |b: u8| b.is_ascii_digit();
+            if !(is_digit(bytes[i]) && is_digit(bytes[i+1]) && is_digit(bytes[i+2]) && is_digit(bytes[i+3])) {
+                i += 1;
+                continue;
+            }
+            let y: i32 = std::str::from_utf8(&bytes[i..i+4]).unwrap_or("0").parse().unwrap_or(0);
+            if !(1990..=2099).contains(&y) { i += 1; continue; }
+            let sep_ok = |b: u8| b == b'-' || b == b'_' || b == b':' || b == b'.';
+            if !sep_ok(bytes[i+4]) { i += 1; continue; }
+            if !(is_digit(bytes[i+5]) && is_digit(bytes[i+6])) { i += 1; continue; }
+            // If the next byte is ALSO a separator-digit-digit (full YYYY-MM-DD)
+            // skip — the earlier scanner already handled it.
+            if i + 10 <= bytes.len()
+                && sep_ok(bytes[i+7])
+                && is_digit(bytes[i+8]) && is_digit(bytes[i+9])
+            {
+                i += 10;
+                continue;
+            }
+            // Also skip if followed by another digit (could be year-only like 2016 or noise).
+            if i + 7 < bytes.len() && is_digit(bytes[i+7]) { i += 1; continue; }
+            let mm = std::str::from_utf8(&bytes[i+5..i+7]).unwrap_or("0").parse::<u32>().unwrap_or(0);
+            if (1..=12).contains(&mm) {
+                if let Some(date) = chrono::NaiveDate::from_ymd_opt(y, mm, 1) {
+                    candidates.push(Cand { dt: date.and_hms_opt(12, 0, 0).unwrap(), q: 0 });
+                }
+            }
+            i += 7;
+        }
+    }
+
     // Clamp to plausible window.
     let now = Utc::now().naive_utc();
     let earliest_plausible = chrono::NaiveDate::from_ymd_opt(1990, 1, 1)
