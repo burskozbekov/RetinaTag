@@ -8972,7 +8972,13 @@ function promoteBestInAllDupGroups() {
 async function deleteSingleDup(gi, pi) {
   const photo = _dupGroups[gi]?.photos[pi];
   if (!photo) return;
-  if (!confirm(`Delete "${photo.filename}"? (Sent to Recycle Bin)`)) return;
+  // v1.5.256 — in-app modal.
+  const ok = await confirmModal({
+    title:'Delete duplicate',
+    message:photo.filename+'\n→ Recycle Bin',
+    okLabel:'Delete', danger:true,
+  });
+  if(!ok) return;
   try {
     await invoke('delete_photos', { photoIds: [photo.id], deleteFile: true });
     _dupGroups[gi].photos.splice(pi, 1);
@@ -8993,7 +8999,13 @@ async function deleteDupGroup(gi) {
   const g = _dupGroups[gi];
   if (!g || g.photos.length < 2) return;
   const toDelete = g.photos.slice(1); // keep first
-  if (!confirm(`Delete ${toDelete.length} duplicate(s), keep "${g.photos[0].filename}"? (Sent to Recycle Bin)`)) return;
+  // v1.5.256 — in-app modal.
+  const ok = await confirmModal({
+    title:'Delete duplicates',
+    message:`Delete ${toDelete.length} · keep ${g.photos[0].filename}`,
+    okLabel:'Delete', danger:true,
+  });
+  if(!ok) return;
   try {
     await invoke('delete_photos', { photoIds: toDelete.map(p => p.id), deleteFile: true });
     _dupGroups[gi].photos = [g.photos[0]];
@@ -9010,7 +9022,13 @@ async function deleteAllDuplicates() {
   let totalDel = 0;
   for (const g of _dupGroups) totalDel += g.photos.length - 1;
   if (!totalDel) return;
-  if (!confirm(`Auto-clean: Delete ${totalDel} duplicate files across ${_dupGroups.length} groups?\n\nKeeps the first photo in each group. Files go to Recycle Bin.`)) return;
+  // v1.5.256 — in-app modal, no essay.
+  const ok = await confirmModal({
+    title:'Auto-clean duplicates',
+    message:`Delete ${totalDel} duplicates across ${_dupGroups.length} groups, keep first of each.\n→ Recycle Bin`,
+    okLabel:'Auto-clean', danger:true,
+  });
+  if(!ok) return;
   try {
     const allIds = [];
     for (const g of _dupGroups) {
@@ -9034,7 +9052,13 @@ async function smartMergeDupGroup(gi) {
   if (!g || g.photos.length < 2) return;
   const keeper = g.photos[0];
   const dupes = g.photos.slice(1);
-  if (!confirm(`Smart Merge: Consolidate tags/rating/favorite onto "${keeper.filename}" and delete ${dupes.length} duplicate(s)?\n\n(Files go to Recycle Bin. Metadata from all copies is preserved on the keeper.)`)) return;
+  // v1.5.256 — in-app modal.
+  const ok = await confirmModal({
+    title:'Smart merge group',
+    message:`Merge metadata onto ${keeper.filename} · delete ${dupes.length} dupes\n→ Recycle Bin`,
+    okLabel:'Merge', danger:true,
+  });
+  if(!ok) return;
   try {
     const res = await invoke('merge_duplicate_photos', {
       keeperId: keeper.id,
@@ -9059,7 +9083,13 @@ async function smartMergeAllDuplicates() {
   let totalDel = 0;
   for (const g of _dupGroups) totalDel += g.photos.length - 1;
   if (!totalDel) return;
-  if (!confirm(`Smart Merge ALL: Consolidate metadata onto the keeper of each of ${_dupGroups.length} groups and delete ${totalDel} duplicate(s)?\n\nFiles go to Recycle Bin. Tags, rating (max), favorite, and description from duplicates are preserved on each keeper.`)) return;
+  // v1.5.256 — in-app modal, trimmed text.
+  const ok = await confirmModal({
+    title:'Smart merge ALL',
+    message:`${_dupGroups.length} groups · delete ${totalDel} dupes · keep metadata on each keeper\n→ Recycle Bin`,
+    okLabel:'Merge all', danger:true,
+  });
+  if(!ok) return;
   let totalMerged = 0, totalTags = 0;
   try {
     // Process one group at a time — merge needs the DB lock per invocation.
