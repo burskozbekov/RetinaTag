@@ -15057,15 +15057,38 @@ async function openLightbox(photoId) {
     playBtn.id = 'lbPlayBtn';
     playBtn.innerHTML = '&#9654;';
     playBtn.title = 'Open in system video player';
-    // v1.5.37 — Moved off the top-right button bar (right:160px collided with
-    // lbInfoBtn at right:158px). Anchor to bottom-left, well clear of the
-    // counter at bottom-center and the slideshow button at top-left. Only
-    // visible while a video is loaded.
-    playBtn.style.cssText = 'position:absolute;bottom:18px;left:60px;padding:6px 12px;border-radius:14px;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:12px;cursor:pointer;display:none;z-index:5';
+    // v1.5.260 — Was at bottom-left where the native HTML5 video controls
+    // bar lives (~40-50 px tall, hosts play/scrub/timecode/volume), so the
+    // button covered the play affordance and "0:05 / 0:33" timecode.
+    // Move it UP and AWAY from the controls: top-left corner, beside the
+    // slideshow button. Photo counter handled separately below.
+    playBtn.style.cssText = 'position:absolute;top:14px;left:60px;padding:6px 12px;border-radius:14px;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:12px;cursor:pointer;display:none;z-index:5';
     playBtn.onmouseenter = () => { playBtn.style.background = 'rgba(255,255,255,.25)'; };
     playBtn.onmouseleave = () => { playBtn.style.background = 'rgba(255,255,255,.15)'; };
     playBtn.textContent = 'Open externally';
     lb.appendChild(playBtn);
+  }
+
+  // v1.5.260 — Shift photo-specific bottom UI out of the native video
+  // controls' way. Native <video controls> reserves ~40-50 px at the
+  // bottom for play/scrub/timecode/volume. lbCounter sat at bottom:18px
+  // (centre) and lbZoomBadge at bottom:18px (right) — both overlapped
+  // the controls, hiding the timecode and seek bar. We restore the
+  // photo defaults on the else branch below.
+  const lbCounterEl = document.getElementById('lbCounter');
+  const lbZoomBadgeEl = document.getElementById('lbZoomBadge');
+  if (isVideo) {
+    if (lbCounterEl) {
+      lbCounterEl.style.bottom = '';
+      lbCounterEl.style.top = '60px';
+    }
+    if (lbZoomBadgeEl) lbZoomBadgeEl.dataset.lbHiddenForVideo = '1';
+  } else {
+    if (lbCounterEl) {
+      lbCounterEl.style.top = '';
+      lbCounterEl.style.bottom = '18px';
+    }
+    if (lbZoomBadgeEl) delete lbZoomBadgeEl.dataset.lbHiddenForVideo;
   }
 
   if (isVideo) {
@@ -17314,7 +17337,10 @@ function _lbApplyTransform() {
   // (0.25×) already land on neat values at the user-visible level.
   const zb = document.getElementById('lbZoomBadge');
   if(zb){
-    if(_lbZoom === 1){
+    // v1.5.260 — Suppress badge entirely when a video is in the lightbox
+    // (zoom doesn't apply to <video>; badge would only collide with the
+    // native controls bar).
+    if(_lbZoom === 1 || zb.dataset.lbHiddenForVideo === '1'){
       zb.style.display = 'none';
     }else{
       zb.style.display = 'block';
