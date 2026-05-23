@@ -147,7 +147,7 @@ pub fn best_date_taken(path: &str) -> Option<String> {
 ///      the EARLIEST survivor. Capture is older than every later
 ///      copy, re-save, or share.
 pub fn extract_date_taken(path: &str) -> Option<String> {
-    use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+    use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone, Timelike, Utc};
 
     // v1.5.252 — Was picking the oldest *timestamp* across all candidates,
     // which meant the path-pattern's synthesized 12:00:00 always beat the
@@ -170,6 +170,26 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
     //   0 = path-pattern (YYYY-MM-DD in folder name) — synthesized 12:00:00
     #[derive(Clone)]
     struct Cand { dt: NaiveDateTime, q: u8 }
+
+    // v1.5.253 — Known camera / app placeholder dates. Photoshop and
+    // Instagram stamp 2001:01:01 00:00:00 into the EXIF DateTime tag
+    // of every photo they touch; older DOS-era cameras emit 1980:01:01;
+    // Unix epoch (1970:01:01) shows up on RAW imports where the
+    // converter lost the timestamp. These are never real capture
+    // dates — reject them so they don't poison the "oldest wins" race.
+    fn is_placeholder(dt: &NaiveDateTime) -> bool {
+        let d = dt.date();
+        let t = dt.time();
+        // Only treat as placeholder when paired with a midnight time;
+        // someone could legitimately have a photo taken on Jan 1 1980
+        // at, say, 14:23. Midnight + bad year = stub.
+        if t.hour() != 0 || t.minute() != 0 || t.second() != 0 { return false; }
+        let m = d.month();
+        let dd = d.day();
+        let y = d.year();
+        if m != 1 || dd != 1 { return false; }
+        matches!(y, 1970 | 1980 | 2000 | 2001 | 2002)
+    }
 
     let mut candidates: Vec<Cand> = Vec::with_capacity(8);
 
@@ -196,7 +216,9 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
                     let s = field.display_value().to_string();
                     let s = s.trim_matches('"').trim().to_string();
                     if let Some(dt) = FORMATS.iter().find_map(|f| NaiveDateTime::parse_from_str(&s, f).ok()) {
-                        candidates.push(Cand { dt, q: 3 });
+                        if !is_placeholder(&dt) {
+                            candidates.push(Cand { dt, q: 3 });
+                        }
                     }
                 }
             }
