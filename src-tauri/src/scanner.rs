@@ -232,6 +232,41 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
         }
     }
 
+    // v1.5.268 — Read XMP packets EMBEDDED in the JPEG's APP1 segment.
+    // Many photos (Facebook exports, Photoshop output) have empty
+    // legacy EXIF tags but carry the real capture date in
+    // xmp:CreateDate / photoshop:DateCreated / exif:DateTimeOriginal
+    // INSIDE the file. Without this Mac (which reads embedded XMP)
+    // gets the right date; PC (which only read EXIF IFD) didn't.
+    if let Ok(Some(xml)) = crate::xmp::read_xmp_from_jpeg(path) {
+        if let Ok(parsed) = crate::xmp::parse_xmp_xml(&xml) {
+            if let Some(dt_str) = parsed.date_taken.as_deref() {
+                // Accept both ISO-8601 (`2016-12-01T04:37:11`) and the
+                // colon-separated EXIF form. Strip a trailing Z or
+                // tz offset before parsing — naive is fine, we treat
+                // it as local-ish like the legacy EXIF path.
+                let s = dt_str.trim();
+                // Strip timezone suffix (Z, +03:00, -05:00…) by
+                // truncating after the seconds field. ISO-8601 form
+                // is "YYYY-MM-DDTHH:MM:SS" = 19 chars; longer strings
+                // tack on .frac and/or tz, which we don't need.
+                let trimmed = if s.len() >= 19 { &s[..19] } else { s };
+                // Try a handful of common shapes.
+                let candidates_fmt = [
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y:%m:%d %H:%M:%S",
+                ];
+                for fmt in candidates_fmt {
+                    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, fmt) {
+                        candidates.push(Cand { dt, q: 3 });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // v1.5.266 — filesystem mtime/ctime DROPPED as a date source.
     // User: "Bu fotolar çok eski" — the Gallery's "Newest" stack was
     // showing 10+ year old Facebook exports and Samsung phone copies

@@ -65,21 +65,77 @@ def gather_exif(path):
     try:
         with Image.open(path) as img:
             exif = img.getexif()
-            if not exif: return out
-            sources = [exif]
-            try:
-                ifd = exif.get_ifd(EXIF_IFD_TAG)
-                if ifd: sources.append(ifd)
-            except Exception:
-                pass
-            for src in sources:
-                for tid in EXIF_DATE_TAGS:
-                    if tid in src:
-                        dt = parse_exif_dt_str(src[tid])
-                        if dt and not is_placeholder(dt):
-                            out.append((dt, 3))
+            if exif:
+                sources = [exif]
+                try:
+                    ifd = exif.get_ifd(EXIF_IFD_TAG)
+                    if ifd: sources.append(ifd)
+                except Exception:
+                    pass
+                for src in sources:
+                    for tid in EXIF_DATE_TAGS:
+                        if tid in src:
+                            dt = parse_exif_dt_str(src[tid])
+                            if dt and not is_placeholder(dt):
+                                out.append((dt, 3))
     except Exception:
         pass
+    # v1.5.268 — Also scan for EMBEDDED XMP in the JPEG's APP1
+    # segment. Mac reads this; PIL's getexif() doesn't surface it.
+    # FB exports / Photoshop output / phone cameras stash the real
+    # capture date in xmp:CreateDate or photoshop:DateCreated here.
+    try:
+        if p.suffix.lower() in ('.jpg', '.jpeg', '.jpe'):
+            out.extend(_gather_xmp(path))
+    except Exception:
+        pass
+    return out
+
+# v1.5.268 — Strip the JPEG, find the XMP APP1 segment, pull out
+# xmp:CreateDate / photoshop:DateCreated / exif:DateTimeOriginal.
+import struct, re
+_RX_XMP_DATE = re.compile(
+    rb'<(?:xmp:CreateDate|photoshop:DateCreated|exif:DateTimeOriginal)>'
+    rb'(\d{4}[-:]\d{2}[-:]\d{2}[T ]\d{2}:\d{2}:\d{2})'
+)
+def _gather_xmp(path):
+    out = []
+    with open(path, 'rb') as f:
+        head = f.read(4 * 1024 * 1024)  # XMP almost always in first 4 MB
+    if head[:2] != b'\xff\xd8':
+        return out
+    i = 2
+    xmp_xml = None
+    while i < len(head) - 4 and head[i] == 0xff:
+        marker = head[i+1]
+        if marker in (0xd8, 0x00):
+            i += 2; continue
+        if marker == 0xda:  # SOS — image data starts; metadata done
+            break
+        seg_len = struct.unpack('>H', head[i+2:i+4])[0]
+        body = head[i+4 : i+2+seg_len]
+        if marker == 0xe1 and body.startswith(b'http://ns.adobe.com/xap/'):
+            # Skip the namespace ID + its trailing NUL.
+            nul = body.find(b'\x00')
+            if nul >= 0:
+                xmp_xml = body[nul+1:]
+            break
+        i += 2 + seg_len
+    if not xmp_xml:
+        return out
+    for m in _RX_XMP_DATE.finditer(xmp_xml):
+        raw = m.group(1).decode('ascii', errors='ignore')
+        # raw matches "YYYY[-:]MM[-:]DD[T ]HH:MM:SS" — slice positions
+        # are fixed regardless of which separator the producer chose.
+        try:
+            dt = datetime.datetime(
+                int(raw[0:4]),  int(raw[5:7]),  int(raw[8:10]),
+                int(raw[11:13]), int(raw[14:16]), int(raw[17:19]),
+            )
+            if not is_placeholder(dt):
+                out.append((dt, 3))
+        except (ValueError, IndexError):
+            pass
     return out
 
 # v1.5.266 — Path separators include \ and / so Windows + Unix paths

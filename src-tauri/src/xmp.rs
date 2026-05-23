@@ -395,6 +395,44 @@ pub fn embed_xmp_in_jpeg(jpeg_path: &str, xmp_str: &str) -> Result<()> {
     Ok(())
 }
 
+/// v1.5.268 — Extract the XMP packet that's EMBEDDED inside a JPEG's
+/// APP1 segment, returning the XML as a String. This is the counterpart
+/// to `embed_xmp_in_jpeg`: where that one writes, this one reads.
+///
+/// Many JPEGs (Facebook exports, Photoshop output, modern phone
+/// camera apps) carry their capture date in xmp:CreateDate or
+/// photoshop:DateCreated INSIDE the file (not just in a sidecar)
+/// while leaving the traditional EXIF DateTimeOriginal blank. The
+/// scanner needs this signal — without it those files fall through
+/// to "no real date" and the user sees them stamped with mtime.
+///
+/// Returns Ok(None) for non-JPEG, no-APP1-XMP, or any parse failure.
+pub fn read_xmp_from_jpeg(jpeg_path: &str) -> Result<Option<String>> {
+    use img_parts::{jpeg::Jpeg, jpeg::markers};
+    let path = Path::new(jpeg_path);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if !matches!(ext.as_str(), "jpg" | "jpeg" | "jpe") {
+        return Ok(None);
+    }
+    let raw = std::fs::read(path).context("read JPEG for XMP extract")?;
+    let jpeg = match Jpeg::from_bytes(raw.into()) {
+        Ok(j) => j,
+        Err(_) => return Ok(None),
+    };
+    for seg in jpeg.segments() {
+        if seg.marker() != markers::APP1 { continue; }
+        let body = seg.contents();
+        if !body.starts_with(XMP_NS_PREFIX) { continue; }
+        // Strip the namespace marker (incl. its trailing NUL).
+        let xmp_bytes = &body[XMP_NS_PREFIX.len()..];
+        // XMP is valid XML / UTF-8; lossy decode so malformed bytes
+        // don't kill the whole parse.
+        let s = String::from_utf8_lossy(xmp_bytes).into_owned();
+        return Ok(Some(s));
+    }
+    Ok(None)
+}
+
 /// Legacy wrapper — still used by write_xmp_batch (tags only).
 pub fn write_xmp_sidecar(photo_path: &str, tags: &[String]) -> Result<String> {
     write_xmp_full(&XmpData {
