@@ -5996,16 +5996,12 @@ $('btnImportDevice').onclick = async () => {
       return; // device-detected listener handles the modal
     }
 
-    // Nothing — show the explainer + manual folder fallback.
-    const pick = confirm(
-      'No iPhone/Android or USB device detected.\n\n' +
-      'Check:\n' +
-      '  • Is the iPhone connected via USB cable?\n' +
-      '  • Is the screen unlocked?\n' +
-      '  • If a "Trust This Computer" dialog appeared, did you tap Trust?\n' +
-      '  • Is iTunes / Apple Devices driver installed? (required for iPhone)\n\n' +
-      'Would you like to import manually from a local folder instead?'
-    );
+    // v1.5.259 — in-app modal. Was a 9-line checklist crammed into native confirm.
+    const pick = await confirmModal({
+      title:'No device found',
+      message:'Phone: cable connected, screen unlocked, "Trust This Computer" tapped, iTunes/Apple Devices driver installed.\n\nImport from a local folder instead?',
+      okLabel:'Pick folder',
+    });
     if (pick) {
       const src = await invoke('open_folder_dialog');
       if (!src) return;
@@ -6887,13 +6883,13 @@ $('btnScanFacesAll').onclick=async()=>{
       const tiers=await invoke('get_clip_status');
       const anyDownloaded=Array.isArray(tiers)&&tiers.some(t=>t.downloaded);
       if(!anyDownloaded){
-        const cont=confirm(
-          'CLIP models are not installed.\n\n'+
-          'Face scan will still work, but the painting/cartoon filter falls back '+
-          'to the older, weaker heuristic. For more accurate results, we recommend '+
-          'installing at least the "Fast" (~155 MB) tier under Settings → CLIP Models.\n\n'+
-          'Do you want to continue?'
-        );
+        // v1.5.259 — in-app modal, trimmed text.
+        const cont = await confirmModal({
+          title:'CLIP models not installed',
+          message:'Painting/cartoon filter will fall back to a weaker heuristic.\nInstall ≥ Fast (~155 MB) under Settings → CLIP Models for better accuracy.',
+          okLabel:'Continue anyway',
+          cancelLabel:'Go to Settings',
+        });
         if(!cont){
           btn.disabled=false;_updateFaceBtnLabel();
           // Jump straight into the CLIP section of Settings
@@ -7024,11 +7020,12 @@ $('btnScanFacesAll').onclick=async()=>{
         // v1.4.36: recovery path for over-aggressive auto-skip.
         // Flips every person_id=-1 back to NULL so the faces re-enter the
         // review queue. Named faces are untouched.
-        const confirmReset = confirm(
-          `Bring ${skippedCount.toLocaleString()} previously-skipped face(s) back into the review queue?\n\n`+
-          `Named faces stay named. Only the "skipped" flag is cleared.\n\n`+
-          `Use this if the auto-skip was too aggressive and hid faces you actually wanted to name.`
-        );
+        // v1.5.259 — in-app modal.
+        const confirmReset = await confirmModal({
+          title:`Bring ${skippedCount.toLocaleString()} skipped faces back`,
+          message:'Named faces stay named — only the "skipped" flag is cleared.',
+          okLabel:'Reset skipped',
+        });
         if (!confirmReset) {
           btn.disabled = false; _updateFaceBtnLabel();
           return;
@@ -10583,7 +10580,15 @@ async function _onXmpModeChange(mode){
 }
 // v1.5.59 — Cleanup helper: removes every .xmp sidecar in DB-known folders.
 async function doDeleteAllXmpSidecars(){
-  if(!confirm('Delete every .xmp sidecar file in your library folders?\n\nOriginal photos are NOT touched. Use this after switching to "Embed only" mode.')) return;
+  // v1.5.259 — in-app modal.
+  {
+    const ok = await confirmModal({
+      title:'Delete every .xmp sidecar',
+      message:'Original photos are untouched. Use this after switching to "Embed only" mode.',
+      okLabel:'Delete sidecars', danger:true,
+    });
+    if(!ok) return;
+  }
   toast('Removing .xmp sidecars…','info');
   try{
     const n = await invoke('delete_all_xmp_sidecars',{folder: null});
@@ -10682,18 +10687,22 @@ async function restoreMetadataSnapshot(){
     // Dry run first so the user can confirm.
     toast('Reading snapshot…','info');
     const dry=await invoke('import_metadata_snapshot',{inputPath:path,dryRun:true});
-    const msg=`Snapshot contains ${dry.photos_in_snapshot} photos.\n\n`
-      +`Local match by hash: ${dry.photos_matched} photo rows\n`
-      +`Not found locally: ${dry.photos_missing}\n\n`
-      +`Will apply:\n`
-      +`  ${dry.tags_added} tags\n`
-      +`  ${dry.descriptions_set} descriptions\n`
-      +`  ${dry.ratings_set} ratings\n`
-      +`  ${dry.favorites_set} favorites\n`
-      +`  ${dry.faces_bound} face bindings\n\n`
-      +`Apply these changes now?\n\n`
-      +`Note: existing tags won't be removed; only added.`;
-    if(!confirm(msg))return;
+    // v1.5.259 — in-app modal.
+    {
+      const bits = [];
+      if (dry.tags_added)        bits.push(`+${dry.tags_added} tags`);
+      if (dry.descriptions_set)  bits.push(`+${dry.descriptions_set} desc`);
+      if (dry.ratings_set)       bits.push(`+${dry.ratings_set} ratings`);
+      if (dry.favorites_set)     bits.push(`+${dry.favorites_set} favs`);
+      if (dry.faces_bound)       bits.push(`+${dry.faces_bound} faces`);
+      const msg = `Matched ${dry.photos_matched}/${dry.photos_in_snapshot} by hash · ${dry.photos_missing} missing\n\nWill apply: ${bits.join(', ') || 'nothing'}\nExisting tags are kept (only added).`;
+      const ok = await confirmModal({
+        title:'Restore metadata snapshot',
+        message:msg,
+        okLabel:'Apply',
+      });
+      if(!ok) return;
+    }
     const res=await invoke('import_metadata_snapshot',{inputPath:path,dryRun:false});
     toast(
       `✓ Restored: ${res.tags_added} tags, ${res.descriptions_set} desc, ${res.ratings_set} ratings, ${res.favorites_set} favs`,
@@ -11413,7 +11422,15 @@ $('btnSettings').onclick=openSettings;
 $('btnCloseSettings').onclick=()=>$('settingsModal').classList.remove('open');
 $('btnSettingsCancel').onclick=()=>$('settingsModal').classList.remove('open');
 $('btnRegenThumbs').onclick=async()=>{
-  if(!confirm('This will delete all cached thumbnails and regenerate them with correct orientation. Continue?'))return;
+  // v1.5.259 — in-app modal.
+  {
+    const ok = await confirmModal({
+      title:'Regenerate all thumbnails',
+      message:'Deletes the cached thumbnails and re-renders them with correct orientation.',
+      okLabel:'Regenerate',
+    });
+    if(!ok) return;
+  }
   try{
     const count=await invoke('regenerate_thumbnails');
     toast(`${count} thumbnails cleared — they will regenerate as you browse`,'success');
@@ -13299,7 +13316,12 @@ function initFaceRecognition() {
     const btn = $('btnScanFaces');
     const modelOk = await invoke('check_face_models').catch(() => false);
     if (!modelOk) {
-      const ok = confirm('Face detection models not downloaded.\n\nDownload now? (~5 MB)');
+      // v1.5.259 — in-app modal.
+      const ok = await confirmModal({
+        title:'Face detection models missing',
+        message:'Download now? (~5 MB)',
+        okLabel:'Download', width:380,
+      });
       if (!ok) return;
       btn.textContent = 'Downloading…';
       btn.disabled = true;
@@ -13336,7 +13358,12 @@ function initFaceRecognition() {
   $('btnClusterFaces').onclick = async () => {
     const modelOk = await invoke('check_face_models').catch(() => false);
     if (!modelOk) {
-      const ok = confirm('Face detection models not downloaded.\n\nDownload now? (~5 MB)');
+      // v1.5.259 — in-app modal.
+      const ok = await confirmModal({
+        title:'Face detection models missing',
+        message:'Download now? (~5 MB)',
+        okLabel:'Download', width:380,
+      });
       if (!ok) return;
       try {
         const btn = $('btnClusterFaces');
@@ -13899,10 +13926,12 @@ async function refreshFaceQueueStatus() {
     sLine.onclick = async () => {
       // Same confirm + reset flow used in the Face Scan Options dialog.
       const n = parseInt(sCnt?.textContent?.replace(/[^0-9]/g, '') || '0', 10);
-      const ok = confirm(
-        `Bring ${n.toLocaleString()} previously-skipped face(s) back into the review queue?\n\n`+
-        `Named faces stay named. Only the "skipped" flag is cleared.`
-      );
+      // v1.5.259 — in-app modal.
+      const ok = await confirmModal({
+        title:`Bring ${n.toLocaleString()} skipped faces back`,
+        message:'Named faces stay named — only the "skipped" flag is cleared.',
+        okLabel:'Reset skipped',
+      });
       if (!ok) return;
       try {
         const reverted = await invoke('reset_all_skipped_faces');
@@ -18545,7 +18574,15 @@ async function saveAllClustersAsCollections(){
   let clusters=[];
   try{clusters=await invoke('get_gps_clusters');}catch(e){toast('Error: '+e,'error');return;}
   if(!clusters||!clusters.length){toast('No clusters to save','info');return;}
-  if(!confirm(`Create ${clusters.length} collection${clusters.length===1?'':'s'} — one per cluster?\n\nEach collection will be named after the cluster's location label. You can rename or delete them later.`))return;
+  // v1.5.259 — in-app modal.
+  {
+    const ok = await confirmModal({
+      title:`Save ${clusters.length} cluster${clusters.length===1?'':'s'} as collections`,
+      message:'One per cluster, named after the location label. Rename later if needed.',
+      okLabel:'Save',
+    });
+    if(!ok) return;
+  }
 
   const orig=btn.textContent;btn.disabled=true;
   let ok=0, fail=0;
@@ -18583,10 +18620,18 @@ async function saveAllFoldersAsCollections(){
     const folders=await invoke('get_folders').catch(()=>null);
     if(folders)folderCount=folders.length;
   }catch(_){}
-  const msg=folderCount>0
-    ? `Create up to ${folderCount} collection${folderCount===1?'':'s'} — one per folder?\n\nEach collection is named after the folder's last 1-2 path segments. Folders whose name matches an existing collection are skipped. You can rename or delete them later.`
-    : `Create a collection for each folder in your library?\n\nEach collection is named after the folder path. Existing collections with the same name are skipped.`;
-  if(!confirm(msg))return;
+  // v1.5.259 — in-app modal.
+  {
+    const msg = folderCount>0
+      ? `${folderCount} folder${folderCount===1?'':'s'}. Each becomes a collection named after the last 1-2 path segments. Name collisions are skipped.`
+      : 'Each library folder becomes a collection (named after its path). Name collisions are skipped.';
+    const ok = await confirmModal({
+      title:'Folders → collections',
+      message:msg,
+      okLabel:'Create',
+    });
+    if(!ok) return;
+  }
   const orig=btn?btn.textContent:'';
   if(btn){btn.disabled=true;btn.textContent='…';}
   try{
