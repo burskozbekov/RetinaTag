@@ -167,8 +167,78 @@ def gather_path(path):
             pass
     return out
 
+def _gather_mp4(path):
+    """v1.5.272 — Pull moov/mvhd creation_time out of MP4/MOV/M4V."""
+    p = Path(path)
+    if p.suffix.lower() not in ('.mp4', '.mov', '.m4v', '.m4a', '.qt'):
+        return []
+    MAC_TO_UNIX = 2_082_844_800
+    try:
+        with open(path, 'rb') as f:
+            file_len = p.stat().st_size
+            # Find moov at top level.
+            pos = 0
+            moov = None  # (data_start, data_end)
+            while pos + 8 <= file_len:
+                f.seek(pos)
+                head = f.read(8)
+                if len(head) < 8: break
+                size32 = int.from_bytes(head[:4], 'big')
+                kind = head[4:8]
+                hdr_extra = 0
+                if size32 == 1:
+                    ext = f.read(8)
+                    atom_size = int.from_bytes(ext, 'big')
+                    hdr_extra = 8
+                elif size32 == 0:
+                    atom_size = file_len - pos
+                else:
+                    atom_size = size32
+                if atom_size < 8: break
+                if kind == b'moov':
+                    moov = (pos + 8 + hdr_extra, pos + atom_size)
+                    break
+                pos += atom_size
+            if not moov: return []
+            # Find mvhd inside moov.
+            p2, end = moov
+            while p2 + 8 <= end:
+                f.seek(p2)
+                head = f.read(8)
+                if len(head) < 8: break
+                size32 = int.from_bytes(head[:4], 'big')
+                kind = head[4:8]
+                hdr_extra = 0
+                if size32 == 1:
+                    ext = f.read(8)
+                    atom_size = int.from_bytes(ext, 'big')
+                    hdr_extra = 8
+                elif size32 == 0:
+                    atom_size = end - p2
+                else:
+                    atom_size = size32
+                if atom_size < 8: break
+                if kind == b'mvhd':
+                    f.seek(p2 + 8 + hdr_extra)
+                    ver_flags = f.read(4)
+                    if len(ver_flags) < 4: return []
+                    if ver_flags[0] == 1:
+                        secs = int.from_bytes(f.read(8), 'big', signed=True)
+                    else:
+                        secs = int.from_bytes(f.read(4), 'big')
+                    if secs == 0: return []
+                    unix = secs - MAC_TO_UNIX
+                    if not (0 <= unix <= 4_133_980_800): return []
+                    dt = datetime.datetime.fromtimestamp(unix)
+                    if is_placeholder(dt): return []
+                    return [(dt, 3)]
+                p2 += atom_size
+    except Exception:
+        pass
+    return []
+
 def best_date_for(path):
-    cands = gather_exif(path) + gather_path(path)
+    cands = gather_exif(path) + gather_path(path) + _gather_mp4(path)
     cands = [(dt, q) for dt, q in cands if FLOOR <= dt <= NOW]
     if not cands:
         return None  # NULL

@@ -267,6 +267,27 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
         }
     }
 
+    // v1.5.272 — Read QuickTime / MP4 creation_time from the moov/mvhd
+    // atom for video files. iPhone .MOV recordings carry the real
+    // capture timestamp here even though they have no EXIF IFD; WPD
+    // on Windows reports a misleading "added to Photos library" date
+    // instead. Without this PC was bucketing 2025-04 videos into
+    // 2026-05 import folders.
+    {
+        let lc_ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        if matches!(lc_ext.as_str(), "mp4" | "mov" | "m4v" | "m4a" | "qt") {
+            if let Some(dt) = read_mp4_creation_time(path) {
+                if !is_placeholder(&dt) {
+                    candidates.push(Cand { dt, q: 3 });
+                }
+            }
+        }
+    }
+
     // v1.5.266 — filesystem mtime/ctime DROPPED as a date source.
     // User: "Bu fotolar çok eski" — the Gallery's "Newest" stack was
     // showing 10+ year old Facebook exports and Samsung phone copies
@@ -777,4 +798,106 @@ fn scan_folder_parallel(
     }).ok();
 
     Ok(ScanComplete { new_files, skipped, total, folder })
+}
+
+/// v1.5.272 — Walk a QuickTime/MP4 file looking for the moov/mvhd atom
+/// and pull `creation_time` out of it. Returns NaiveDateTime in local
+/// wall-clock (the mvhd field is seconds since Mac epoch 1904-01-01,
+/// nominally UTC; we treat it as local-ish like the EXIF path does so
+/// the bucketing math agrees with the rest of the pipeline).
+///
+/// Atom layout we care about:
+///   ftyp  ...
+///   moov   ← container
+///     mvhd  v0 = 100 bytes payload, v1 = 112
+///       version (1 byte) + flags (3 bytes)
+///       v0: 4-byte creation_time, 4-byte modification_time, …
+///       v1: 8-byte creation_time, 8-byte modification_time, …
+///
+/// We don't fully parse the file — just enough to skip to `moov`, then
+/// inside `moov` skip to `mvhd`. Refuses files > 256 MB of metadata
+/// scan as a cheap DoS guard (real moov is rarely > 1 MB).
+fn read_mp4_creation_time(path: &str) -> Option<chrono::NaiveDateTime> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // Mac epoch: 1904-01-01 00:00:00 UTC. Unix epoch is 1970-01-01.
+    // Difference in seconds (66 years incl. 17 leap days).
+    const MAC_TO_UNIX_OFFSET: i64 = 2_082_844_800;
+
+    let mut f = std::fs::File::open(path).ok()?;
+    // Find the moov atom at the top level.
+    let mut pos: u64 = 0;
+    let file_len = f.metadata().ok()?.len();
+    let mut head = [0u8; 8];
+    let mut moov_range: Option<(u64, u64)> = None; // (data_start, data_end_exclusive)
+    while pos + 8 <= file_len {
+        f.seek(SeekFrom::Start(pos)).ok()?;
+        if f.read_exact(&mut head).is_err() { break; }
+        let size32 = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as u64;
+        let kind = [head[4], head[5], head[6], head[7]];
+        let (atom_size, header_extra) = if size32 == 1 {
+            // 64-bit size in next 8 bytes.
+            let mut buf = [0u8; 8];
+            if f.read_exact(&mut buf).is_err() { break; }
+            (u64::from_be_bytes(buf), 8u64)
+        } else if size32 == 0 {
+            // 0 = atom extends to EOF.
+            (file_len - pos, 0)
+        } else {
+            (size32, 0)
+        };
+        if atom_size < 8 { break; }
+        let data_start = pos + 8 + header_extra;
+        let data_end = pos + atom_size;
+        if &kind == b"moov" {
+            moov_range = Some((data_start, data_end));
+            break;
+        }
+        pos = data_end;
+    }
+    let (mut p, end) = moov_range?;
+    // Walk children of moov, find mvhd.
+    while p + 8 <= end {
+        f.seek(SeekFrom::Start(p)).ok()?;
+        if f.read_exact(&mut head).is_err() { break; }
+        let size32 = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as u64;
+        let kind = [head[4], head[5], head[6], head[7]];
+        let (atom_size, header_extra) = if size32 == 1 {
+            let mut buf = [0u8; 8];
+            if f.read_exact(&mut buf).is_err() { break; }
+            (u64::from_be_bytes(buf), 8u64)
+        } else if size32 == 0 {
+            (end - p, 0)
+        } else {
+            (size32, 0)
+        };
+        if atom_size < 8 { break; }
+        if &kind == b"mvhd" {
+            // version (1) + flags (3), then timestamps.
+            f.seek(SeekFrom::Start(p + 8 + header_extra)).ok()?;
+            let mut ver_flags = [0u8; 4];
+            f.read_exact(&mut ver_flags).ok()?;
+            let secs: i64 = if ver_flags[0] == 1 {
+                let mut buf = [0u8; 8];
+                f.read_exact(&mut buf).ok()?;
+                i64::from_be_bytes(buf)
+            } else {
+                let mut buf = [0u8; 4];
+                f.read_exact(&mut buf).ok()?;
+                u32::from_be_bytes(buf) as i64
+            };
+            // 0 = unset; some encoders leave it blank.
+            if secs == 0 { return None; }
+            let unix_secs = secs - MAC_TO_UNIX_OFFSET;
+            // Clamp to plausible window so a corrupted atom can't
+            // produce a date in the year 1820 or 2275.
+            if !(0..=4_133_980_800).contains(&unix_secs) { return None; }
+            let dt = chrono::DateTime::<chrono::Local>::from(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs as u64),
+            );
+            return Some(dt.naive_local());
+        }
+        p += atom_size;
+    }
+    None
 }

@@ -3270,8 +3270,15 @@ pub async fn mtp_import(
                 // then read EXIF + mtime from the file itself and pick a
                 // real year/month. Either way: the file NEVER lands in
                 // "Unknown/Unknown/" anymore.
+                //
+                // v1.5.272 — Videos NEVER take the fast path. iPhone's
+                // MTP exposes "date added to Photos library" as
+                // date_created for video objects, NOT the actual capture
+                // time. A clip shot April 2025 then imported May 2026
+                // would land in 2026/05-May. Force slow path so the
+                // moov/mvhd creation_time inside the file wins.
                 let (opt_year, opt_month_folder) = parse_mtp_date_bucket(obj.date_created.as_deref());
-                let use_fast_path = opt_year != "Unknown";
+                let use_fast_path = opt_year != "Unknown" && !obj.is_video;
 
                 let target_dir = if use_fast_path {
                     dest_root.join(&opt_year).join(&opt_month_folder)
