@@ -18135,10 +18135,22 @@ function _updatePhotoCountTooltip(){
   el.title = parts.join(' · ');
 }
 async function batchRate(){
-  const r=prompt('Rating (0-5, or -1 for reject):');
-  if(r===null)return;
-  const rating=parseInt(r);
-  if(isNaN(rating)||rating<-1||rating>5){toast('Invalid rating','error');return;}
+  // v1.5.250 — in-app modal; -1 maps to "reject" star bucket.
+  const r = await inputModal({
+    title:'Rate selection',
+    message:'Stars 0–5, or -1 to reject:',
+    type:'number',
+    placeholder:'0–5',
+    okLabel:'Apply',
+    width:380,
+    validate:v=>{
+      const n=parseInt(v,10);
+      if(isNaN(n)||n<-1||n>5) return 'Use a value between -1 and 5';
+      return null;
+    },
+  });
+  if(r===null) return;
+  const rating = parseInt(r,10);
   await invoke('batch_set_rating',{photoIds:[...selectedIds],rating});
   toast('Rated '+selectedIds.size+' photos','success');loadPhotos();
 }
@@ -18147,14 +18159,21 @@ async function batchFav(){
   toast(selectedIds.size+' photos favorited','success');loadPhotos();
 }
 async function batchTag(){
-  const raw=prompt(
-    'Enter tag(s) to add to '+selectedIds.size+' photos.\n'+
-    'Separate multiple tags with commas.\n\n'+
-    'Example: sonisphere 2010, concert, metallica\n\n'+
-    'Tags are saved to the database AND written to an XMP sidecar file '+
-    'next to each photo (readable by Lightroom, Bridge, DigiKam).'
-  );
-  if(!raw)return;
+  // v1.5.250 — was a 4-paragraph essay in a native prompt(). Now a single
+  // input line with the count in the title; the XMP-sidecar / Lightroom
+  // detail belongs in docs, not in every dialog.
+  const raw = await inputModal({
+    title:'Add tags to '+selectedIds.size+' photo'+(selectedIds.size===1?'':'s'),
+    message:'Separate with commas:',
+    placeholder:'sunset, concert, family',
+    okLabel:'Add',
+    validate:v=>{
+      const list=(v||'').split(',').map(s=>s.trim()).filter(Boolean);
+      if(list.length===0) return 'Enter at least one tag';
+      return null;
+    },
+  });
+  if(raw===null)return;
   const tags=raw.split(',').map(t=>t.trim().toLowerCase()).filter(t=>t.length>0);
   if(tags.length===0){toast('No valid tags','error');return;}
   const ids=[...selectedIds];
@@ -18914,7 +18933,13 @@ const CMD_PALETTE_ACTIONS = [
   }},
   {id:'a-bulk-tag', title:'Add Tags to Selection…',hint:'Add the same tag(s) to every selected photo',kw:'bulk tag add batch selection',run:async()=>{
       if(!selectedIds||selectedIds.size===0){ toast('Select photos first','info'); return; }
-      const raw=prompt(`Tag(s) to add to the ${selectedIds.size} selected photos. Separate with commas:`,'');
+      // v1.5.250 — in-app modal.
+      const raw=await inputModal({
+        title:'Add tags to '+selectedIds.size+' photo'+(selectedIds.size===1?'':'s'),
+        message:'Separate with commas:',
+        placeholder:'sunset, concert, family',
+        okLabel:'Add',
+      });
       if(raw==null) return;
       const tags=String(raw).split(',').map(s=>s.trim()).filter(Boolean);
       if(!tags.length){ toast('No tags entered','info'); return; }
