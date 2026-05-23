@@ -555,6 +555,22 @@ pub fn init_db(path: &str) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_gcp_photo ON gps_cluster_photos(photo_id);"
     ).ok();
 
+    // v1.5.265 — Paired iOS devices for the iPhone Companion / LAN
+    // sync feature. The bearer TOKEN itself never lands in the DB —
+    // we only store its SHA-256 hash, so a DB leak doesn't grant
+    // anyone live API access. `last_seen_at` is bumped on every
+    // /api/upload that authenticates with the token.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS paired_devices (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_name   TEXT    NOT NULL,
+            token_hash    TEXT    NOT NULL UNIQUE,
+            created_at    TEXT    NOT NULL,
+            last_seen_at  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_paired_token ON paired_devices(token_hash);"
+    ).ok();
+
     // Scan history log: one row per scan attempt, lets the user audit what
     // happened and when. Written from commands.rs after scan_folder_impl
     // returns (both success and error paths).
