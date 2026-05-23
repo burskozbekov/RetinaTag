@@ -10596,11 +10596,16 @@ async function restoreMetadataSnapshot(){
     // plugin, and the folder picker is already wired up.
     const folder=await invoke('open_folder_dialog');
     if(!folder)return;
-    const fname=prompt(
-      'Snapshot filename in that folder:\n(e.g. RetinaTag_metadata_20260420.json)',
-      'RetinaTag_metadata.json'
-    );
-    if(!fname)return;
+    // v1.5.255 — in-app modal.
+    const fname=await inputModal({
+      title:'Snapshot filename',
+      message:'In '+folder,
+      defaultValue:'RetinaTag_metadata.json',
+      placeholder:'RetinaTag_metadata.json',
+      okLabel:'Read',
+      validate:v=>(v||'').trim() ? null : 'Filename required',
+    });
+    if(fname===null)return;
     const path=folder+'\\'+fname.trim();
 
     // Dry run first so the user can confirm.
@@ -11546,12 +11551,15 @@ async function _sharedVaultStartSetup(){
   }
   if(probe.vault_found){
     // Pre-existing vault — collect the existing PIN.
-    const pin = prompt(
-      `Found an existing shared vault at:\n${root}\n\n` +
-      `It already holds ${probe.blob_count.toLocaleString()} encrypted file${probe.blob_count===1?'':'s'}.\n\n` +
-      `Enter the PIN to connect this machine to it:`
-    );
-    if(!pin) return;
+    // v1.5.255 — was a native prompt, now a password-type modal.
+    const pin = await inputModal({
+      title:'Connect to existing vault',
+      message:`At ${root}\n${probe.blob_count.toLocaleString()} encrypted file${probe.blob_count===1?'':'s'}.\n\nEnter PIN:`,
+      type:'password',
+      okLabel:'Connect',
+      validate:v=>(v||'').length>=1 ? null : 'PIN required',
+    });
+    if(pin===null) return;
     try {
       // Persist root via setup path — but the existing wrapped-key.bin
       // is intact, so we need a "setup-existing" branch. The current
@@ -11568,12 +11576,23 @@ async function _sharedVaultStartSetup(){
     } catch(e) { toast('Setup failed: ' + e, 'error'); }
     return;
   }
-  // Fresh setup
-  const pin1 = prompt(`Set a PIN for the new shared vault at:\n${root}\n\nMin 6 chars. Don't lose this — there's no recovery in Phase 1.`);
-  if(!pin1) return;
-  if(pin1.length < 6){ toast('PIN must be at least 6 characters', 'error'); return; }
-  const pin2 = prompt('Confirm the PIN.');
-  if(pin1 !== pin2){ toast('PINs did not match — try again', 'error'); return; }
+  // Fresh setup — v1.5.255 — two sequential password modals.
+  const pin1 = await inputModal({
+    title:'Create vault PIN',
+    message:`At ${root}\nMin 6 chars · No recovery in Phase 1 — don't lose it.`,
+    type:'password',
+    okLabel:'Next',
+    validate:v=>(v||'').length>=6 ? null : 'PIN must be at least 6 characters',
+  });
+  if(pin1===null) return;
+  const pin2 = await inputModal({
+    title:'Confirm PIN',
+    message:'Type the same PIN again:',
+    type:'password',
+    okLabel:'Create vault',
+    validate:v=>v===pin1 ? null : 'PINs did not match',
+  });
+  if(pin2===null) return;
   try {
     await invoke('shared_vault_setup', { libraryRoot: root, pin: pin1 });
     toast(`✅ Shared vault created at ${root}. Unlocked.`, 'success');
@@ -11584,8 +11603,16 @@ async function _sharedVaultStartSetup(){
 }
 
 async function _sharedVaultPromptUnlock(){
-  const pin = prompt('Enter the shared vault PIN:');
-  if(!pin) return;
+  // v1.5.255 — password modal.
+  const pin = await inputModal({
+    title:'Unlock vault',
+    message:'Enter PIN:',
+    type:'password',
+    okLabel:'Unlock',
+    width:380,
+    validate:v=>(v||'').length>=1 ? null : 'PIN required',
+  });
+  if(pin===null) return;
   try {
     const r = await invoke('shared_vault_unlock', { pin });
     if(r.ok){
@@ -18583,11 +18610,15 @@ async function batchVault(){
 }
 async function batchRemoveTag(){
   if(selectedIds.size===0){toast('Nothing selected','info');return;}
-  const raw=prompt(
-    'Tag(s) to remove from '+selectedIds.size+' photos.\n'+
-    'Comma-separated. Case-insensitive. No-op for photos that don\'t have the tag.'
-  );
-  if(!raw)return;
+  // v1.5.255 — in-app modal, minimal text.
+  const raw=await inputModal({
+    title:'Remove tags from '+selectedIds.size+' photo'+(selectedIds.size===1?'':'s'),
+    message:'Separate with commas. No-op if the tag isn\'t set.',
+    placeholder:'sunset, blur',
+    okLabel:'Remove',
+    validate:v=>(v||'').split(',').some(t=>t.trim()) ? null : 'Enter at least one tag',
+  });
+  if(raw===null)return;
   const tags=raw.split(',').map(t=>t.trim().toLowerCase()).filter(t=>t.length>0);
   if(!tags.length){toast('No valid tags','error');return;}
   const ids=[...selectedIds];
