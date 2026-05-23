@@ -3308,6 +3308,133 @@ function toastUndo(msg, type='success'){
   toastAction(msg, type, '↶ Undo', ()=>{ if(typeof doUndo==='function') doUndo(); });
 }
 
+// v1.5.247 — in-app modal replacement for the awful native `tauri.localhost says`
+// prompt(). Returns a Promise<string|null>. Resolves to null on Cancel / Esc /
+// overlay-click. Validation hook lets callers reject (e.g. empty / too-short)
+// without closing the dialog.
+//
+// Usage:
+//   const v = await inputModal({ title:'Rename', defaultValue:'foo' });
+//   if (v===null) return; // user cancelled
+//
+// Options:
+//   title         — dialog header
+//   message       — body text shown above the input
+//   defaultValue  — prefilled value
+//   placeholder   — input placeholder
+//   hint          — small grey footer text
+//   okLabel       — primary button label (default 'OK')
+//   cancelLabel   — secondary button label (default 'Cancel')
+//   type          — 'text' | 'password' | 'number'
+//   multiline     — render as textarea; Ctrl+Enter submits
+//   validate      — fn(value) -> errorString | null
+//   width         — px (default 460)
+function inputModal(opts){
+  const o = Object.assign({
+    title:'', message:'', defaultValue:'', placeholder:'', hint:'',
+    okLabel:'OK', cancelLabel:'Cancel', type:'text',
+    multiline:false, validate:null, width:460,
+  }, opts || {});
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay open';
+    // Above lightbox (10000) + ctxMenu (10100) + assignFace stack (10200).
+    overlay.style.zIndex = '10300';
+
+    const box = document.createElement('div');
+    box.className = 'modal-box';
+    box.style.width = o.width + 'px';
+
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const h2 = document.createElement('h2');
+    h2.textContent = o.title || '';
+    head.appendChild(h2);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+    body.style.cssText = 'padding:18px 24px 8px';
+    if(o.message){
+      const m = document.createElement('div');
+      m.style.cssText = 'margin-bottom:12px;color:var(--text2);font-size:13px;white-space:pre-wrap';
+      m.textContent = o.message;
+      body.appendChild(m);
+    }
+
+    const input = o.multiline
+      ? document.createElement('textarea')
+      : document.createElement('input');
+    if(!o.multiline) input.type = o.type;
+    input.value = o.defaultValue || '';
+    input.placeholder = o.placeholder || '';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.style.cssText = 'width:100%;padding:10px 12px;background:var(--card2,#1a1414);'
+      + 'border:1px solid var(--border2);border-radius:8px;color:var(--cream);'
+      + 'font-size:14px;box-sizing:border-box;outline:none';
+    if(o.multiline){ input.style.minHeight = '90px'; input.style.resize='vertical'; }
+    body.appendChild(input);
+
+    const err = document.createElement('div');
+    err.style.cssText = 'color:var(--red-light,#e0552c);font-size:12px;margin-top:6px;min-height:14px';
+    body.appendChild(err);
+
+    if(o.hint){
+      const h = document.createElement('div');
+      h.style.cssText = 'color:var(--text3);font-size:11px;margin-top:8px';
+      h.textContent = o.hint;
+      body.appendChild(h);
+    }
+
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    foot.style.cssText = 'padding:12px 20px 18px;display:flex;justify-content:flex-end;gap:8px';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-secondary btn-sm';
+    cancelBtn.textContent = o.cancelLabel;
+
+    const okBtn = document.createElement('button');
+    okBtn.className = 'btn btn-primary btn-sm';
+    okBtn.textContent = o.okLabel;
+
+    foot.appendChild(cancelBtn);
+    foot.appendChild(okBtn);
+    box.appendChild(head);
+    box.appendChild(body);
+    box.appendChild(foot);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    let done = false;
+    function close(value){
+      if(done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      try{ overlay.remove(); }catch(_){}
+      resolve(value);
+    }
+    function tryOk(){
+      const v = input.value;
+      if(o.validate){
+        const e = o.validate(v);
+        if(e){ err.textContent = e; input.focus(); return; }
+      }
+      close(v);
+    }
+    okBtn.onclick = tryOk;
+    cancelBtn.onclick = () => close(null);
+    overlay.addEventListener('mousedown', ev => { if(ev.target===overlay) close(null); });
+    function onKey(ev){
+      if(ev.key==='Escape'){ ev.preventDefault(); ev.stopPropagation(); close(null); }
+      else if(ev.key==='Enter' && !o.multiline){ ev.preventDefault(); tryOk(); }
+      else if(ev.key==='Enter' && o.multiline && (ev.ctrlKey||ev.metaKey)){ ev.preventDefault(); tryOk(); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(()=>{ try{ input.focus(); if(input.select) input.select(); }catch(_){}}, 30);
+  });
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmt=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
 const fmtB=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
@@ -13420,10 +13547,24 @@ function showDeletePersonMenu(e, p) {
   document.body.appendChild(menu);
   menu.querySelector('#_renamePersonBtn').onclick = async () => {
     menu.remove();
-    const newName = prompt('New name for "' + p.name + '":', p.name);
-    if (!newName || newName.trim() === '' || newName === p.name) return;
+    // v1.5.247 — no more `tauri.localhost says` prompt; in-app modal.
+    const newName = await inputModal({
+      title: 'Rename person',
+      message: 'New name for "' + p.name + '":',
+      defaultValue: p.name,
+      placeholder: 'e.g. Buğra',
+      okLabel: 'Rename',
+      validate: v => {
+        const t = (v||'').trim();
+        if (!t) return 'Name is required';
+        if (t.length > 64) return 'Name is too long';
+        return null;
+      },
+    });
+    if (newName === null) return;
+    const trimmed = newName.trim();
+    if (trimmed === p.name) return;
     try {
-      const trimmed = newName.trim();
       await invoke('rename_person', { personId: p.id, newName: trimmed });
       toast('Renamed to "' + trimmed + '"', 'success');
       refreshPersonsSidebar();
