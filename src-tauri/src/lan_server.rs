@@ -1,27 +1,30 @@
 //! v1.5.266 — LAN HTTP server impl (axum). Parity with Mac v1.5.242.
+//! v1.5.269 — adds /api/upload (multipart file ingest).
 //!
-//! Exposes a small surface so the shared iOS app can discover the
-//! desktop (via Bonjour, see lan_bonjour) and pair with it:
+//! Exposes the surface the shared iOS app needs to (1) discover the
+//! desktop via Bonjour, (2) pair with a 6-digit code, and (3) upload
+//! photos directly:
 //!
 //!   GET  /api/ping             — version / platform / hostname
 //!   POST /api/pair/complete    — { code, device_name } → { token }
-//!
-//! /api/upload (multipart, 2 GB body, stream-to-disk) is the next
-//! atom — pulled out to keep this release small. Nothing in this
-//! file is wired into the running app yet; the `run_server` entry
-//! point will be invoked from setup() in a follow-up release.
+//!   POST /api/upload           — multipart, requires Authorization:
+//!                                  Bearer <token>. File is bucketed
+//!                                  into <inbox>/<YYYY>/<YYYY_MM>/
+//!                                  using scanner::extract_date_taken.
 
 #![allow(dead_code)]
 
 use axum::{
-    extract::State,
-    http::StatusCode,
+    body::Bytes,
+    extract::{DefaultBodyLimit, Multipart, State},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post},
     Router,
 };
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -30,8 +33,11 @@ use tokio::task::JoinHandle;
 /// so the iOS client doesn't have to hard-code it.
 pub const PORT: u16 = 9876;
 
-/// Shared state handed to every handler. Just the DB for now;
-/// future iterations may add the inbox-path, settings, etc.
+/// 2 GB max body. Matches Mac. Plenty for a single ProRAW frame or
+/// short 4K clip; an iOS app uploading a longer movie should chunk.
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+/// Shared state handed to every handler.
 #[derive(Clone)]
 pub struct ServerState {
     pub db: Arc<Mutex<Connection>>,
@@ -45,6 +51,8 @@ pub async fn run_server(db: Arc<Mutex<Connection>>) -> Result<JoinHandle<()>, St
     let app: Router = Router::new()
         .route("/api/ping", get(ping))
         .route("/api/pair/complete", post(pair_complete))
+        .route("/api/upload", post(upload))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
     let bind = format!("0.0.0.0:{}", PORT);
     let listener = TcpListener::bind(&bind)
@@ -80,9 +88,6 @@ struct PairCompleteRequest {
 #[derive(Serialize)]
 struct PairCompleteResponse {
     device_id: i64,
-    /// Plaintext bearer; the desktop never sees it after this point
-    /// (we only persisted the SHA-256). The iOS app stores it in
-    /// Keychain.
     token:     String,
 }
 
@@ -102,6 +107,187 @@ async fn pair_complete(
         .into_response(),
         Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
     }
+}
+
+// ── /api/upload ─────────────────────────────────────────────────────────
+#[derive(Serialize)]
+struct UploadResponse {
+    ok:           bool,
+    saved_path:   String,
+    bytes:        usize,
+    bucket_year:  i32,
+    bucket_month: u32,
+}
+
+/// Pulls the Bearer token from the Authorization header, hashes it,
+/// looks up via lan_pairing::verify_token. Returns the device id on
+/// success, None on any header or token miss.
+fn auth_device_id(headers: &HeaderMap, conn: &Connection) -> Option<i64> {
+    let raw = headers.get("authorization")?.to_str().ok()?;
+    let bearer = raw.strip_prefix("Bearer ").or_else(|| raw.strip_prefix("bearer "))?;
+    crate::lan_pairing::verify_token(conn, bearer.trim())
+}
+
+/// %USERPROFILE%\Pictures\RetinaTag-iOS-Inbox\
+fn default_inbox() -> PathBuf {
+    if let Some(p) = dirs::picture_dir() {
+        return p.join("RetinaTag-iOS-Inbox");
+    }
+    // Fallback to CWD if no pictures dir is exposed by the OS.
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("RetinaTag-iOS-Inbox")
+}
+
+/// Sanitize a filename to ascii-safe + drop path components. iOS sends
+/// "IMG_1234.HEIC"-style names; we still defend against ../etc/passwd
+/// just in case.
+fn safe_filename(raw: &str) -> String {
+    let stem = Path::new(raw).file_name().and_then(|s| s.to_str()).unwrap_or("upload");
+    let cleaned: String = stem
+        .chars()
+        .filter(|c| !matches!(*c, '\\' | '/' | '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    if cleaned.trim().is_empty() {
+        "upload.bin".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Add the inbox dir as a watch folder if it isn't one already. Best-
+/// effort: errors are logged to stderr, not propagated to the client.
+fn ensure_inbox_is_watch_folder(conn: &Connection, inbox: &Path) {
+    let path_str = inbox.to_string_lossy().to_string();
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO watch_folders (path, auto_tag, enabled, created_at) \
+         VALUES (?1, 0, 1, ?2)",
+        rusqlite::params![&path_str, chrono::Local::now().to_rfc3339()],
+    );
+}
+
+async fn upload(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    mut mp: Multipart,
+) -> impl IntoResponse {
+    // 1. Authenticate.
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        if auth_device_id(&headers, &conn).is_none() {
+            return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
+        }
+    }
+
+    // 2. Pull the first file part. iOS app sends one upload per
+    //    request; this loop is just a defensive walker.
+    let mut filename: Option<String> = None;
+    let mut bytes:    Option<Bytes>  = None;
+    loop {
+        let field = match mp.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None)    => break,
+            Err(e)      => return (StatusCode::BAD_REQUEST, format!("multipart: {e}")).into_response(),
+        };
+        let name = field.name().map(|s| s.to_string()).unwrap_or_default();
+        if name == "file" || filename.is_none() {
+            if let Some(fname) = field.file_name() {
+                filename = Some(safe_filename(fname));
+            }
+            match field.bytes().await {
+                Ok(b)  => { bytes = Some(b); break; }
+                Err(e) => return (StatusCode::BAD_REQUEST, format!("read body: {e}")).into_response(),
+            }
+        }
+    }
+    let body  = match bytes    { Some(b) => b, None => return (StatusCode::BAD_REQUEST, "no file field").into_response() };
+    let fname = filename.unwrap_or_else(|| "upload.bin".to_string());
+
+    // 3. Write the file to a temp path inside the inbox first; we'll
+    //    move it into its date bucket once we've extracted the date.
+    let inbox = default_inbox();
+    if let Err(e) = std::fs::create_dir_all(&inbox) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir inbox: {e}")).into_response();
+    }
+    let tmp_path = inbox.join(format!(".upload-{}.tmp", std::process::id()));
+    if let Err(e) = tokio::fs::write(&tmp_path, &body).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("write tmp: {e}")).into_response();
+    }
+
+    // 4. Decide the date bucket. extract_date_taken reads EXIF + XMP +
+    //    path patterns (and v1.5.266+ skips mtime), so we get an
+    //    authoritative date from the file's own metadata or the
+    //    iOS-side filename. If neither yields anything we fall
+    //    back to the current local year/month.
+    use chrono::Datelike;
+    let tmp_str = tmp_path.to_string_lossy().to_string();
+    let (year, month) = {
+        let parsed = crate::scanner::extract_date_taken(&tmp_str);
+        if let Some(dt) = parsed
+            .as_deref()
+            .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok())
+        {
+            (dt.year(), dt.month())
+        } else {
+            let now = chrono::Local::now();
+            (now.year(), now.month())
+        }
+    };
+
+    let bucket = inbox.join(format!("{:04}", year)).join(format!("{:04}_{:02}", year, month));
+    if let Err(e) = std::fs::create_dir_all(&bucket) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir bucket: {e}")).into_response();
+    }
+
+    // 5. Pick a non-clashing destination filename. If "IMG_1234.HEIC"
+    //    already exists, suffix with -1, -2, ...
+    let final_path = pick_unique_path(&bucket, &fname);
+    if let Err(e) = std::fs::rename(&tmp_path, &final_path) {
+        // Cross-volume rename can fail with EXDEV; fall back to copy+remove.
+        if let Err(e2) = std::fs::copy(&tmp_path, &final_path) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("move file: {} / {}", e, e2)).into_response();
+        }
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    // 6. Auto-add the inbox as a watch folder so the scanner picks
+    //    these up without the user touching Settings.
+    {
+        let conn = state.db.lock().ok();
+        if let Some(conn) = conn {
+            ensure_inbox_is_watch_folder(&conn, &inbox);
+        }
+    }
+
+    Json(UploadResponse {
+        ok:           true,
+        saved_path:   final_path.to_string_lossy().to_string(),
+        bytes:        body.len(),
+        bucket_year:  year,
+        bucket_month: month,
+    })
+    .into_response()
+}
+
+/// Find a path inside `dir` that doesn't already exist, using `base`
+/// as the start. "IMG.HEIC", "IMG-1.HEIC", "IMG-2.HEIC", …
+fn pick_unique_path(dir: &Path, base: &str) -> PathBuf {
+    let first = dir.join(base);
+    if !first.exists() { return first; }
+    let (stem, ext) = match base.rfind('.') {
+        Some(i) => (&base[..i], &base[i..]),
+        None    => (base, ""),
+    };
+    for n in 1..10_000 {
+        let candidate = dir.join(format!("{}-{}{}", stem, n, ext));
+        if !candidate.exists() { return candidate; }
+    }
+    // Astronomically unlikely; just stomp on the original.
+    first
 }
 
 /// Best-effort hostname lookup. Returns "unknown" on any failure so
