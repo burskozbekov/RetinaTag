@@ -3874,21 +3874,43 @@ async function loadCollectionPhotos(col){
   }
 }
 
-$('btnNewCollection').onclick=()=>{
-  const name=prompt('Collection name:');
-  if(!name)return;
-  const isSmartChoice=confirm('Create as Smart Collection? (auto-fills based on rules)\n\nOK = Smart, Cancel = Manual');
-  if(isSmartChoice){
-    const tagVal=prompt('Tag filter (e.g. "sunset"):');
-    if(!tagVal)return;
-    const rules=JSON.stringify([{field:'tag',operator:'contains',value:tagVal}]);
-    invoke('create_collection',{name,collectionType:'smart',rulesJson:rules}).then(()=>{
-      toast('Smart collection created','success');refreshCollections();
-    }).catch(e=>toast('Error: '+e,'error'));
-  }else{
-    invoke('create_collection',{name,collectionType:'manual',rulesJson:null}).then(()=>{
-      toast('Collection created','success');refreshCollections();
-    }).catch(e=>toast('Error: '+e,'error'));
+$('btnNewCollection').onclick=async()=>{
+  // v1.5.254 — three-step sequence (name → type → optional rule) now
+  // all in-app. Was three back-to-back native dialogs.
+  const name=await inputModal({
+    title:'New collection',
+    message:'Name:',
+    placeholder:'e.g. Family 2024',
+    okLabel:'Next',
+    validate:v=>(v||'').trim() ? null : 'Name is required',
+  });
+  if(name===null) return;
+  const type=await chooseModal({
+    title:'Collection type',
+    options:[
+      {value:'manual',label:'Manual',hint:'Add photos by hand'},
+      {value:'smart', label:'Smart', hint:'Auto-fills from rules'},
+    ],
+  });
+  if(type===null) return;
+  let rulesJson=null;
+  if(type==='smart'){
+    const tagVal=await inputModal({
+      title:'Smart rule',
+      message:'Photos with tag containing:',
+      placeholder:'e.g. sunset',
+      okLabel:'Create',
+      validate:v=>(v||'').trim() ? null : 'Tag value is required',
+    });
+    if(tagVal===null) return;
+    rulesJson=JSON.stringify([{field:'tag',operator:'contains',value:tagVal.trim()}]);
+  }
+  try{
+    await invoke('create_collection',{name:name.trim(),collectionType:type,rulesJson});
+    toast(type==='smart'?'Smart collection created':'Collection created','success');
+    refreshCollections();
+  }catch(e){
+    toast('Error: '+e,'error');
   }
 };
 
@@ -11707,13 +11729,17 @@ $('btnExtractColors').onclick=async()=>{
 // library. Double-confirm (native + typed phrase) before calling because this
 // is irreversible: XMP sidecars are not rewritten, only the DB state.
 $('btnClearAllTags').onclick=async()=>{
-  if(!confirm('This will delete EVERY tag on EVERY photo. This action is IRREVERSIBLE.\n\nAre you sure you want to continue?')) return;
-  const typed=prompt('Type "DELETE" (uppercase) to confirm:','');
-  if(typed==null) return;
-  if(typed.trim().toUpperCase()!=='DELETE'){
-    toast('Cancelled — confirmation text did not match.','info');
-    return;
-  }
+  // v1.5.254 — was a native confirm() then a native prompt() asking
+  // the user to type DELETE. Now a single in-app modal where the
+  // primary button stays disabled until the word is typed correctly.
+  const typed=await inputModal({
+    title:'Clear ALL tags',
+    message:'This will delete every tag on every photo. Irreversible.\nType DELETE to confirm:',
+    placeholder:'DELETE',
+    okLabel:'Clear all tags',
+    validate:v=>((v||'').trim().toUpperCase()==='DELETE') ? null : 'Type the word DELETE (uppercase)',
+  });
+  if(typed===null) return;
   const btn=$('btnClearAllTags');
   const orig=btn.innerHTML;
   btn.disabled=true;btn.innerHTML='🗑 Deleting…';
@@ -19498,10 +19524,22 @@ const CMD_PALETTE_ACTIONS = [
   {id:'g-s',        title:'Grid: Small',       hint:'Tight, small thumbs',       kw:'grid density small tight',   run:()=>setGridDensity('s')},
   {id:'g-m',        title:'Grid: Medium',      hint:'Default',                   kw:'grid density medium default',run:()=>setGridDensity('m')},
   {id:'g-l',        title:'Grid: Large',       hint:'Large, fewer photos',       kw:'grid density large big',     run:()=>setGridDensity('l')},
-  {id:'ss-speed',   title:'Slideshow Speed…',  hint:'Interval in seconds',       kw:'slideshow interval speed time',run:()=>{
+  {id:'ss-speed',   title:'Slideshow Speed…',  hint:'Interval in seconds',       kw:'slideshow interval speed time',run:async()=>{
       const cur=parseFloat(localStorage.getItem('slideshow_interval_s')||'5');
-      const v=prompt('Slideshow interval (seconds, 1-30):', String(cur));
-      if(v!=null && v!=='') setSlideshowInterval(v);
+      const v=await inputModal({
+        title:'Slideshow interval',
+        message:'Seconds per slide:',
+        defaultValue:String(cur),
+        type:'number',
+        okLabel:'Set',
+        width:380,
+        validate:val=>{
+          const n=parseFloat(val);
+          if(isNaN(n)||n<1||n>30) return 'Use a value between 1 and 30';
+          return null;
+        },
+      });
+      if(v!==null && v!=='') setSlideshowInterval(v);
   }},
 ];
 
