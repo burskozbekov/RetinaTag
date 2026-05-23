@@ -10949,7 +10949,11 @@ $('btnFixSideways').onclick=async()=>{
   }catch(e){ console.warn('progress listener failed:',e); }
   try{
     const res=await invoke('fix_sideways_thumbnails');
-    toast(`Fixed ${res.fixed} sideways thumbnail(s) out of ${res.checked} checked`,'success');
+    // v1.5.246 — surface panic count if any row blew up (rogue EXIF, etc).
+    const tail = res.panicked > 0
+      ? ` · ${res.panicked} skipped (see fix-sideways.log)`
+      : '';
+    toast(`Fixed ${res.fixed} sideways thumbnail(s) out of ${res.checked} checked${tail}`,'success');
     thumbCache=new Map();renderGrid();
   }catch(e){
     toast('Fix failed: '+e,'error');

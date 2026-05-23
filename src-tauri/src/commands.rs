@@ -1473,6 +1473,13 @@ pub async fn regenerate_thumbnails(
 /// requested, they regenerate with the correct rotation applied.
 ///
 /// Returns (checked, fixed).
+///
+/// v1.5.246 — Hardened so a single weird EXIF file can't crash the
+/// worker thread. Every per-row operation is wrapped in
+/// catch_unwind. On a panic we just log + skip the file and keep
+/// going. Also writes a forensic log to %LOCALAPPDATA%/RetinaTag/
+/// fix-sideways.log so the next crash is debuggable instead of
+/// silent.
 #[tauri::command]
 pub async fn fix_sideways_thumbnails(
     app_handle: tauri::AppHandle,
@@ -1481,7 +1488,32 @@ pub async fn fix_sideways_thumbnails(
     use tauri::Emitter;
     let thumbs_dir = state.thumbnails_dir.clone();
 
-    // Pull path+hash for every photo so we can map thumbnail filename → source.
+    fn flog(msg: &str) {
+        use std::io::Write;
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let line = format!("[{}] {}\n", now, msg);
+        let path = match std::env::var("LOCALAPPDATA") {
+            Ok(p) => std::path::PathBuf::from(p)
+                .join("RetinaTag")
+                .join("fix-sideways.log"),
+            Err(_) => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > 256 * 1024 {
+                let _ = std::fs::rename(&path, path.with_extension("log.old"));
+            }
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true).append(true).open(&path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+        eprintln!("[thumb-fix] {}", msg);
+    }
+
     let rows: Vec<(i64, String, String)> = {
         let conn = state.db.lock().map_err(|_| "db lock")?;
         let mut stmt = conn
@@ -1496,45 +1528,54 @@ pub async fn fix_sideways_thumbnails(
     };
 
     let total = rows.len();
+    flog(&format!("fix_sideways start: total={}", total));
+
     let result = tokio::task::spawn_blocking(move || {
         let mut checked = 0u32;
         let mut fixed = 0u32;
+        let mut panicked = 0u32;
         let mut last_emit = std::time::Instant::now();
 
-        for (_id, path, hash) in &rows {
+        for (id, path, hash) in &rows {
             checked += 1;
 
-            // Cache file uses first 24 chars of hash, per get_or_create_thumbnail.
-            let cache_name = thumbnail::thumb_cache_name(&hash);
-            let cache_path = thumbs_dir.join(&cache_name);
-            if !cache_path.exists() {
-                continue;
-            }
-
-            // Only JPEG/TIFF files carry EXIF Orientation. Skip HEIC/video
-            // (their thumbnail is already rotated via WPF/ffmpeg) and RAW
-            // (varies — leave those alone to avoid a ton of reads).
-            let ext = std::path::Path::new(path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let worth_checking = matches!(
-                ext.as_str(),
-                "jpg" | "jpeg" | "jpe" | "tif" | "tiff" | "png"
-            );
-            if !worth_checking {
-                continue;
-            }
-
-            let orientation = crate::thumbnail::get_exif_orientation(path);
-            if orientation != 1 {
-                if std::fs::remove_file(&cache_path).is_ok() {
-                    fixed += 1;
+            // v1.5.246 — catch_unwind so one rogue file (corrupt EXIF,
+            // weird HEIC, long path on a flaky drive) can't kill the
+            // whole pass.
+            let row_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let cache_name = thumbnail::thumb_cache_name(hash);
+                let cache_path = thumbs_dir.join(&cache_name);
+                if !cache_path.exists() {
+                    return false;
+                }
+                let ext = std::path::Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if !matches!(
+                    ext.as_str(),
+                    "jpg" | "jpeg" | "jpe" | "tif" | "tiff" | "png"
+                ) {
+                    return false;
+                }
+                let orientation = crate::thumbnail::get_exif_orientation(path);
+                if orientation != 1 {
+                    if std::fs::remove_file(&cache_path).is_ok() {
+                        return true;
+                    }
+                }
+                false
+            }));
+            match row_result {
+                Ok(true)  => { fixed += 1; }
+                Ok(false) => {}
+                Err(_) => {
+                    panicked += 1;
+                    flog(&format!("PANIC on id={} path={}", id, path));
                 }
             }
 
-            // Progress ping every ~500ms.
             if last_emit.elapsed() >= std::time::Duration::from_millis(500) {
                 app_handle
                     .emit(
@@ -1547,19 +1588,29 @@ pub async fn fix_sideways_thumbnails(
                     )
                     .ok();
                 last_emit = std::time::Instant::now();
+                if checked % 5000 == 0 {
+                    flog(&format!("progress: checked={} fixed={} panicked={}",
+                        checked, fixed, panicked));
+                }
             }
         }
-
-        (checked, fixed)
+        (checked, fixed, panicked)
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        flog(&format!("worker join failed: {}", e));
+        e.to_string()
+    })?;
 
-    let (checked, fixed) = result;
-    eprintln!("[thumb-fix] checked {} / fixed {}", checked, fixed);
+    let (checked, fixed, panicked) = result;
+    flog(&format!(
+        "fix_sideways done: checked={} fixed={} panicked={}",
+        checked, fixed, panicked
+    ));
     Ok(serde_json::json!({
         "checked": checked,
         "fixed": fixed,
+        "panicked": panicked,
         "total": total,
     }))
 }
