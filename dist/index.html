@@ -7458,6 +7458,31 @@ $('searchInput').addEventListener('blur',()=>{
   // Delay so clicks on a chip register before the panel hides
   setTimeout(()=>{const r=$('recentSearches');if(r)r.style.display='none';},180);
 });
+// v1.5.271 — ESC closes the Quick Filters / Recent / Saved suggestion
+// dropdown. User: "yav bu çıkmasın ya da esc e basınca kapansın! çok
+// sinir bozucu öneri menüsü". Blur alone wasn't enough — sometimes
+// the user wants the panel gone without losing the cursor (e.g. they
+// just opened it accidentally on a slash-key focus). ESC also blurs
+// the input so a second ESC tap doesn't re-open it.
+$('searchInput').addEventListener('keydown', e => {
+  if(e.key === 'Escape'){
+    const r = document.getElementById('recentSearches');
+    if(r) r.style.display = 'none';
+    try{ e.target.blur(); }catch(_){}
+    e.stopPropagation();
+  }
+});
+// Global click-outside: any click that isn't inside the search box
+// kills the dropdown. Belt-and-suspenders with the blur listener
+// above — covers the case where blur doesn't fire (e.g. focused
+// element removed from DOM).
+document.addEventListener('mousedown', e => {
+  const r = document.getElementById('recentSearches');
+  if(!r || r.style.display === 'none') return;
+  const sb = document.querySelector('.search-box');
+  if(sb && sb.contains(e.target)) return;
+  r.style.display = 'none';
+}, true);
 // ── Recent searches (localStorage, max 8) ───────────────────────────────────
 // Queries of ≥2 chars are pushed to the top after any successful search. The
 // list shows under the search box when it's focused & empty, letting the user
