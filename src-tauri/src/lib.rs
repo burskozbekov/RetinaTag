@@ -206,6 +206,13 @@ mod device_monitor;
 mod tray;
 #[cfg(windows)]
 mod mtp;
+// v1.5.264 — LAN sync foundation (deps + stubs only; real impl in
+// follow-up small releases per the user's "no v1.5.76 big-bang"
+// rule). See pc-status.txt at D:\Fotograflar\.retinatag-coord\ for
+// the iPhone Companion spec the Mac side already implements.
+mod lan_pairing;
+mod lan_server;
+mod lan_bonjour;
 
 pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,

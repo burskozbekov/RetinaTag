@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.263"
+version = "1.5.264"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -57,6 +57,21 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 dirs = "5"
 tauri-plugin-drag = "2.1"
 tauri-plugin-notification = "2"
+
+# v1.5.264 — Foundation for iPhone Companion (LAN sync). Mac landed
+# this earlier (v1.5.242) and the spec lives in pc-status.txt /
+# mac-status.txt at D:\Fotograflar\.retinatag-coord\. PC parity goal:
+# advertise the same Bonjour service + accept the same /api/upload
+# so the shared iOS app finds + talks to both desktops identically.
+# This release only adds deps + empty module shells so the next few
+# small releases can land the actual logic without a single "big
+# bang" change like v1.5.76. axum/tower/tower-http/mdns-sd build
+# clean on Windows; no runtime cost until lib.rs::setup wires the
+# server in.
+axum = { version = "0.7", features = ["multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["limit", "trace"] }
+mdns-sd = "0.11"
 
 # v1.5.104 — XMP sidecar reading. Mac side writes .xmp files alongside
 # photos on the shared volume; Windows scan never imported them so
