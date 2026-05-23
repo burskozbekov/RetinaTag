@@ -15248,20 +15248,48 @@ async function openLightbox(photoId) {
     const cached = thumbCache.get(id);
     img.src = cached || '';
     spinner.style.display = 'block';
-    try {
-      const b64 = await invoke('get_photo_full', {photoId: id});
-      if (_lbCurrentId === id) {
-        // v1.5.30 — Re-render face bounding boxes once the full-res image is
-        // loaded, so the SVG viewBox has the correct naturalWidth/Height.
-        img.onload = () => {
-          if(_lbFaceBoxesOn && _lbCurrentId === id) _lbFacesRender();
-        };
-        img.src = 'data:image/jpeg;base64,' + b64;
+    // v1.5.261 — Fast path: for browser-native formats let WebView2
+    // decode the file directly via asset://. Skips the Rust round-trip
+    // that decoded → resized to 2560 → re-encoded JPEG → base64 →
+    // data-URL parse. On a typical 6-12 MP JPEG that's 200-600 ms saved
+    // and several MB less peak RAM. Slow path stays for HEIC, RAW, and
+    // vault-encrypted blobs (browser can't decode those).
+    const path = (photo && photo.path) || '';
+    const lc = path.toLowerCase();
+    const ext = lc.includes('.') ? lc.split('.').pop() : '';
+    const browserNative = ['jpg','jpeg','png','gif','webp','avif','bmp'].includes(ext);
+    const isVault = lc.endsWith('.rtenc');
+    if (browserNative && !isVault) {
+      img.onload = () => {
+        if(_lbCurrentId === id && _lbFaceBoxesOn) _lbFacesRender();
+        spinner.style.display = 'none';
+      };
+      img.onerror = () => {
+        // Browser couldn't decode (corrupt / weird subtype). Fall back.
+        spinner.style.display = 'none';
+        invoke('get_photo_full', {photoId: id})
+          .then(b64 => { if(_lbCurrentId === id) img.src = 'data:image/jpeg;base64,' + b64; })
+          .catch(e => toast('Failed to load photo: ' + e, 'error'));
+      };
+      try {
+        img.src = convertFileSrc(path);
+      } catch(_) {
+        spinner.style.display = 'none';
       }
-    } catch(err) {
-      toast('Failed to load photo: ' + err, 'error');
-    } finally {
-      spinner.style.display = 'none';
+    } else {
+      try {
+        const b64 = await invoke('get_photo_full', {photoId: id});
+        if (_lbCurrentId === id) {
+          img.onload = () => {
+            if(_lbFaceBoxesOn && _lbCurrentId === id) _lbFacesRender();
+          };
+          img.src = 'data:image/jpeg;base64,' + b64;
+        }
+      } catch(err) {
+        toast('Failed to load photo: ' + err, 'error');
+      } finally {
+        spinner.style.display = 'none';
+      }
     }
   }
   // v1.5.30 — If the face-box overlay is turned on, eagerly load face data
