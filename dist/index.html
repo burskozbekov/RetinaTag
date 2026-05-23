@@ -3435,6 +3435,86 @@ function inputModal(opts){
   });
 }
 
+// v1.5.248 — in-app replacement for the native confirm() dialog. Returns
+// Promise<bool>: true on OK, false on Cancel / Esc / overlay-click. Same
+// styling vocabulary as inputModal.
+//
+// Options:
+//   title           — header
+//   message         — body text (multi-line ok, preserved with white-space:pre-wrap)
+//   okLabel         — primary button label (default 'OK')
+//   cancelLabel     — secondary button label (default 'Cancel')
+//   danger          — if true, primary button uses btn-danger styling
+//   width           — px (default 440)
+function confirmModal(opts){
+  const o = Object.assign({
+    title:'', message:'', okLabel:'OK', cancelLabel:'Cancel',
+    danger:false, width:440,
+  }, opts || {});
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay open';
+    overlay.style.zIndex = '10300';
+    const box = document.createElement('div');
+    box.className = 'modal-box';
+    box.style.width = o.width + 'px';
+
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const h2 = document.createElement('h2');
+    h2.textContent = o.title || '';
+    head.appendChild(h2);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+    body.style.cssText = 'padding:18px 24px 16px';
+    if(o.message){
+      const m = document.createElement('div');
+      m.style.cssText = 'color:var(--text2);font-size:13px;white-space:pre-wrap;line-height:1.5';
+      m.textContent = o.message;
+      body.appendChild(m);
+    }
+
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    foot.style.cssText = 'padding:0 20px 18px;display:flex;justify-content:flex-end;gap:8px';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-secondary btn-sm';
+    cancelBtn.textContent = o.cancelLabel;
+
+    const okBtn = document.createElement('button');
+    okBtn.className = 'btn ' + (o.danger ? 'btn-danger' : 'btn-primary') + ' btn-sm';
+    okBtn.textContent = o.okLabel;
+
+    foot.appendChild(cancelBtn);
+    foot.appendChild(okBtn);
+    box.appendChild(head);
+    box.appendChild(body);
+    box.appendChild(foot);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    let done = false;
+    function close(v){
+      if(done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      try{ overlay.remove(); }catch(_){}
+      resolve(v);
+    }
+    okBtn.onclick = () => close(true);
+    cancelBtn.onclick = () => close(false);
+    overlay.addEventListener('mousedown', ev => { if(ev.target===overlay) close(false); });
+    function onKey(ev){
+      if(ev.key==='Escape'){ ev.preventDefault(); ev.stopPropagation(); close(false); }
+      else if(ev.key==='Enter'){ ev.preventDefault(); close(true); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(()=>{ try{ okBtn.focus(); }catch(_){}}, 30);
+  });
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmt=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
 const fmtB=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
@@ -10425,21 +10505,54 @@ function renderTagMgmt(tags){
       $('btnTagMgmt').click();
     };
     item.querySelector('[data-action="rename"]').onclick=async()=>{
-      const newName=prompt('Rename "'+t.tag+'" to:',t.tag);
-      if(!newName||newName===t.tag)return;
-      await invoke('rename_tag_global',{oldName:t.tag,newName:newName.trim().toLowerCase()});
+      // v1.5.248 — in-app modal, not the native shell prompt.
+      const newName=await inputModal({
+        title:'Rename tag',
+        message:'Rename "'+t.tag+'" to:',
+        defaultValue:t.tag,
+        okLabel:'Rename',
+        validate:v=>{
+          const x=(v||'').trim();
+          if(!x) return 'Tag name is required';
+          if(x.length>64) return 'Too long';
+          return null;
+        },
+      });
+      if(newName===null) return;
+      const next=newName.trim().toLowerCase();
+      if(next===t.tag) return;
+      await invoke('rename_tag_global',{oldName:t.tag,newName:next});
       toast('Renamed','success');
       await _afterTagMutation();
     };
     item.querySelector('[data-action="merge"]').onclick=async()=>{
-      const target=prompt('Merge "'+t.tag+'" into which tag?');
-      if(!target)return;
+      const target=await inputModal({
+        title:'Merge tag',
+        message:'Merge "'+t.tag+'" into which tag?',
+        placeholder:'target tag name',
+        okLabel:'Merge',
+        hint:'All photos with "'+t.tag+'" will be re-tagged with the target.',
+        validate:v=>{
+          const x=(v||'').trim();
+          if(!x) return 'Target tag is required';
+          if(x.toLowerCase()===t.tag) return 'Source and target are the same';
+          return null;
+        },
+      });
+      if(target===null) return;
       await invoke('merge_tags',{source:t.tag,target:target.trim().toLowerCase()});
       toast('Merged','success');
       await _afterTagMutation();
     };
     item.querySelector('[data-action="delete"]').onclick=async()=>{
-      if(!confirm('Delete tag "'+t.tag+'" from all '+t.count+' photos?'))return;
+      const ok=await confirmModal({
+        title:'Delete tag',
+        message:'Delete tag "'+t.tag+'" from all '+t.count+' photos?\n\nThis cannot be undone.',
+        okLabel:'Delete',
+        cancelLabel:'Keep',
+        danger:true,
+      });
+      if(!ok) return;
       await invoke('delete_tag_global',{tag:t.tag});
       toast('Deleted','success');
       await _afterTagMutation();
