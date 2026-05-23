@@ -3818,7 +3818,15 @@ async function exportCollectionToFolder(col){
   if(!col.photo_count){toast('Collection is empty.','info');return;}
   const dest=await invoke('open_folder_dialog').catch(()=>null);
   if(!dest)return;
-  if(!confirm(`Copy all ${col.photo_count} photos from "${col.name}" to:\n${dest}\n\nExisting files will NOT be overwritten — collisions get -1, -2, … suffixes.`))return;
+  // v1.5.257 — in-app modal, trimmed essay.
+  {
+    const ok = await confirmModal({
+      title:'Export collection',
+      message:`Copy ${col.photo_count} photo${col.photo_count===1?'':'s'} from "${col.name}" to:\n${dest}\n\nCollisions get -1, -2 … suffixes.`,
+      okLabel:'Copy',
+    });
+    if(!ok) return;
+  }
 
   const t0=Date.now();
   toast(`Exporting "${col.name}" — 0/${col.photo_count}…`,'info');
@@ -5020,9 +5028,15 @@ function renderTags(tags,pid){
 // toastAction so the user gets a one-click "Tag now" shortcut to kick off the
 // actual AI run — otherwise the photo sits in "pending" until the main Tag
 // button is clicked manually.
-function _detailRetag(){
+async function _detailRetag(){
   if(!selectedId){ toast('Select a photo first','info'); return; }
-  if(!confirm('This will clear existing tags and re-tag this photo. Continue?')) return;
+  // v1.5.257 — in-app modal.
+  const ok = await confirmModal({
+    title:'Re-tag photo',
+    message:'Existing tags will be cleared.',
+    okLabel:'Re-tag', danger:true,
+  });
+  if(!ok) return;
   const sid = selectedId;
   invoke('retag_photo',{photoId:sid}).then(()=>{
     // Optimistically clear the tag cloud so the UI reflects the pending state.
@@ -5315,7 +5329,13 @@ document.querySelectorAll('.ctx-item').forEach(item=>{
     if(a==='addcol')addToCollectionPrompt(ctxPhotoId);
     if(a==='findsim')findSimilarPhotos(ctxPhotoId);
     if(a==='retag'){
-      if(!confirm('This will clear existing tags and re-tag this photo. Continue?'))return;
+      // v1.5.257 — in-app modal.
+      const ok = await confirmModal({
+        title:'Re-tag photo',
+        message:'Existing tags will be cleared.',
+        okLabel:'Re-tag', danger:true,
+      });
+      if(!ok) return;
       try{
         await invoke('retag_photo',{photoId:ctxPhotoId});
         toast('Photo queued for re-tag. Click "Tag with AI" to start.','info');
@@ -5422,8 +5442,13 @@ function rotatePhoto(delta){
 
 async function deleteCurrentPhoto(){
   if(!selectedId){toast('Select a photo first','warn');return;}
-  const ok=confirm('Move this photo to the Recycle Bin?');
-  if(!ok)return;
+  // v1.5.257 — in-app modal.
+  const ok = await confirmModal({
+    title:'Delete photo',
+    message:'→ Recycle Bin',
+    okLabel:'Delete', danger:true, width:380,
+  });
+  if(!ok) return;
   try{
     const id=selectedId;
     await invoke('delete_photos',{photoIds:[id],deleteFile:true});
@@ -6741,7 +6766,15 @@ async function relinkMissingFile(photoId){
   }
 }
 async function removeMissingFromLibrary(photoId){
-  if(!confirm('This will remove the library entry (disk untouched). Continue?')) return;
+  // v1.5.257 — in-app modal.
+  {
+    const ok = await confirmModal({
+      title:'Remove from library',
+      message:'Disk file is untouched. Only the DB entry is removed.',
+      okLabel:'Remove',
+    });
+    if(!ok) return;
+  }
   try{
     await invoke('delete_photos',{photoIds:[photoId], deleteFile:false});
     toast('Removed','success');
@@ -6755,7 +6788,15 @@ async function removeMissingFromLibrary(photoId){
 }
 async function removeAllMissingFromLibrary(){
   if(!_missingCache.length) return;
-  if(!confirm(`This will remove the library entries for ${_missingCache.length} missing files (disk untouched). Continue?`)) return;
+  // v1.5.257 — in-app modal.
+  {
+    const ok = await confirmModal({
+      title:'Remove missing entries',
+      message:`Remove ${_missingCache.length} library entries for files no longer on disk.`,
+      okLabel:'Remove',
+    });
+    if(!ok) return;
+  }
   const ids=_missingCache.map(m=>m.id);
   try{
     await invoke('delete_photos',{photoIds:ids, deleteFile:false});
@@ -13957,7 +13998,15 @@ function showDeletePersonMenu(e, p) {
   };
   menu.querySelector('#_delPersonBtn').onclick = async () => {
     menu.remove();
-    if (!confirm('Delete "' + p.name + '"? Their faces will become unassigned.')) return;
+    // v1.5.257 — in-app modal.
+    {
+      const ok = await confirmModal({
+        title:'Delete person',
+        message:'"'+p.name+'" — their faces will become unassigned.',
+        okLabel:'Delete', danger:true,
+      });
+      if(!ok) return;
+    }
     await invoke('delete_person', { personId: p.id }).catch(() => {});
     refreshPersonsSidebar();
     if (selectedId) loadFacesForPhoto(selectedId);
