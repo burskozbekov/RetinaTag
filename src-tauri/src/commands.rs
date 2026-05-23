@@ -3341,6 +3341,45 @@ pub async fn mtp_import(
                     skip_fail += 1;
                     continue;
                 }
+                // v1.5.245 — Verify the copy actually wrote real bytes
+                // before we let a DB row land. iPhone MTP transfers can
+                // claim success after a partial / interrupted stream
+                // and leave a 0-byte (or short) file on disk. Without
+                // this check we used to insert a photos row whose path
+                // pointed at unreadable garbage — and the gallery
+                // showed it as a blank "▶ VID" tile that never got a
+                // thumbnail. We require the file to exist AND its size
+                // to either match obj.size OR be at least 1 KB (some
+                // drivers report obj.size as 0 for HEIC; we accept any
+                // non-trivially-small file in that case).
+                match std::fs::metadata(&dest_path) {
+                    Ok(meta) => {
+                        let on_disk = meta.len();
+                        let expected = obj.size;
+                        let acceptable = if expected > 0 {
+                            on_disk == expected
+                        } else {
+                            on_disk >= 1024
+                        };
+                        if !acceptable {
+                            eprintln!(
+                                "copy_object {} size mismatch: on_disk={} expected={} — discarding",
+                                obj.id, on_disk, expected
+                            );
+                            let _ = std::fs::remove_file(&dest_path);
+                            skip_fail += 1;
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "copy_object {} succeeded per WPD but dest file missing: {} — discarding",
+                            obj.id, e
+                        );
+                        skip_fail += 1;
+                        continue;
+                    }
+                }
 
                 // v1.5.153 — Slow path: file is now in _inbox_tmp. Read
                 // EXIF / mtime to figure out a real year/month bucket,
