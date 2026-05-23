@@ -1274,7 +1274,7 @@ pub fn get_photos_timeline(
                 p.media_type, p.date_taken, p.duration_secs, p.rating, p.favorite
          FROM photos p
          {}
-         ORDER BY photo_date DESC, p.created_at DESC
+         ORDER BY COALESCE(p.date_taken, '0000-00-00') DESC, p.filename ASC
          LIMIT ?1 OFFSET ?2",
         where_clause
     );

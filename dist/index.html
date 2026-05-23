@@ -18920,37 +18920,45 @@ async function batchDelete(){
       toast('Delete returned 0 — DB rows unchanged. Check %LOCALAPPDATA%\\RetinaTag\\delete-photos.log for the reason.', 'error');
       return;
     }
-    // v1.5.243 — Auto-refresh removed. Show a sticky toast with the
-    // filename list of what was just deleted so the user can see
-    // what they did, plus a "Refresh" action when they're ready to
-    // re-render the view. Stats/folders refresh silently (those are
-    // counters, not visual cards). Selection is also kept until
-    // they hit Refresh so they can re-confirm by eye what was
-    // chosen.
+    // v1.5.266 — Reverted v1.5.243's manual-refresh experiment.
+    // User: "siliyor belki ama galeride gözüküyor" — they didn't
+    // notice the "Refresh view" toast button and assumed delete
+    // failed. New flow: refresh the grid IMMEDIATELY and surface
+    // the deleted filenames in the success toast so they still
+    // see what went without needing to click anything.
+    const deletedIds = new Set(ids);
+    try{
+      if(Array.isArray(photos)) photos = photos.filter(p => !deletedIds.has(p.id));
+      if(typeof totalPhotos === 'number') totalPhotos = Math.max(0, totalPhotos - n);
+    } catch(_){}
+    // Drop any open detail panel for a deleted photo.
+    if(typeof selectedId !== 'undefined' && selectedId && deletedIds.has(selectedId)){
+      try{ $('detailPanel')?.classList.remove('open'); } catch(_){}
+      selectedId = null; selectedPath = '';
+    }
+    selectedIds.clear(); if(typeof updateSelectionUI === 'function') updateSelectionUI();
+    // Tear down the in-memory thumb cache for the deleted ids so
+    // the same id isn't accidentally re-shown if a future row
+    // recycles the id.
+    try{ for(const id of deletedIds){ if(typeof thumbCache !== 'undefined') thumbCache.delete(id); } } catch(_){}
+    // Render the active view fresh.
+    try{
+      if(typeof curView !== 'undefined'){
+        if(curView === 'timeline'    && typeof loadTimeline    === 'function') { await loadTimeline(); }
+        else if(curView === 'calendar'    && typeof loadCalendar    === 'function') { await loadCalendar(); }
+        else if(curView === 'cleanup'     && typeof loadCleanup     === 'function') { await loadCleanup(); }
+        else if(curView === 'map'         && typeof initMap         === 'function') { initMap(); }
+        else if(curView === 'duplicates'  && typeof loadDuplicates  === 'function') { await loadDuplicates(); }
+        else if(curView === 'dashboard'   && typeof loadDashboard   === 'function') { await loadDashboard(); }
+        else if(typeof renderGrid === 'function') { renderGrid(true); }
+      } else if(typeof renderGrid === 'function') {
+        renderGrid(true);
+      }
+    } catch(_){}
     try{ refreshStats && refreshStats(); refreshFolders && refreshFolders(); } catch(_){}
     const previewNames = namesByPriority.slice(0, 3).join(', ');
     const more = namesByPriority.length > 3 ? ` +${namesByPriority.length - 3} more` : '';
-    const summary = `✓ Deleted ${n.toLocaleString()} · ${_esc(previewNames)}${more}`;
-    if(typeof toastAction === 'function'){
-      toastAction(summary, 'success', 'Refresh view', async () => {
-        try{ if(typeof thumbCache !== 'undefined' && thumbCache && thumbCache.clear) thumbCache.clear(); } catch(_){}
-        selectedIds.clear(); updateSelectionUI();
-        await loadPhotos();
-        try{
-          if(typeof curView !== 'undefined'){
-            if(curView === 'timeline'    && typeof loadTimeline    === 'function') await loadTimeline();
-            if(curView === 'calendar'    && typeof loadCalendar    === 'function') await loadCalendar();
-            if(curView === 'cleanup'     && typeof loadCleanup     === 'function') await loadCleanup();
-            if(curView === 'map'         && typeof initMap         === 'function') initMap();
-            if(curView === 'duplicates'  && typeof loadDuplicates  === 'function') await loadDuplicates();
-            if(curView === 'dashboard'   && typeof loadDashboard   === 'function') await loadDashboard();
-          }
-        } catch(_){}
-      });
-    } else {
-      // Fallback if toastAction is missing — keep behaviour useful.
-      toast(summary, 'success');
-    }
+    toast(`✓ Deleted ${n.toLocaleString()} · ${_esc(previewNames)}${more}`, 'success');
   } catch(e){
     console.error('[batchDelete] invoke threw', e);
     toast('Delete failed: ' + (typeof e === 'string' ? e : (e && e.message) || JSON.stringify(e)), 'error');

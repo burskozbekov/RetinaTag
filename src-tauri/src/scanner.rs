@@ -232,16 +232,17 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
         }
     }
 
-    if let Ok(meta) = std::fs::metadata(path) {
-        if let Ok(t) = meta.modified() {
-            let dt: DateTime<Local> = t.into();
-            candidates.push(Cand { dt: dt.naive_local(), q: 2 });
-        }
-        if let Ok(t) = meta.created() {
-            let dt: DateTime<Local> = t.into();
-            candidates.push(Cand { dt: dt.naive_local(), q: 2 });
-        }
-    }
+    // v1.5.266 — filesystem mtime/ctime DROPPED as a date source.
+    // User: "Bu fotolar çok eski" — the Gallery's "Newest" stack was
+    // showing 10+ year old Facebook exports and Samsung phone copies
+    // because those files have NO EXIF and NO path date, so mtime
+    // ("when I dragged the file onto the PC, basically today") was
+    // the only candidate. mtime is a lie for "date taken".
+    //
+    // New rule: EXIF (placeholder-filtered) → path-pattern → None.
+    // Files with no real signal get date_taken = NULL. The gallery's
+    // "Newest → Oldest" sort buckets NULLs at the end where they
+    // belong, and a future "set date" UI lets the user backfill.
 
     // Path/filename pattern — date only, time is synthesized noon.
     {
@@ -258,7 +259,11 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
             let try_compact = i + 8 <= bytes.len()
                 && is_digit(bytes[i+4]) && is_digit(bytes[i+5])
                 && is_digit(bytes[i+6]) && is_digit(bytes[i+7]);
-            let sep_ok = |b: u8| b == b'-' || b == b'_' || b == b':' || b == b'.';
+            // v1.5.266 — include path separators \ and / so a folder
+            // hierarchy like \2026\05-May\IMG_x.HEIC counts the "2026\05"
+            // as YYYY-MM. Same for "/" on Unix paths over SMB.
+            let sep_ok = |b: u8| b == b'-' || b == b'_' || b == b':'
+                || b == b'.' || b == b'\\' || b == b'/';
             let try_separated = i + 10 <= bytes.len()
                 && sep_ok(bytes[i+4])
                 && is_digit(bytes[i+5]) && is_digit(bytes[i+6])
@@ -303,7 +308,11 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
             }
             let y: i32 = std::str::from_utf8(&bytes[i..i+4]).unwrap_or("0").parse().unwrap_or(0);
             if !(1990..=2099).contains(&y) { i += 1; continue; }
-            let sep_ok = |b: u8| b == b'-' || b == b'_' || b == b':' || b == b'.';
+            // v1.5.266 — include path separators \ and / so a folder
+            // hierarchy like \2026\05-May\IMG_x.HEIC counts the "2026\05"
+            // as YYYY-MM. Same for "/" on Unix paths over SMB.
+            let sep_ok = |b: u8| b == b'-' || b == b'_' || b == b':'
+                || b == b'.' || b == b'\\' || b == b'/';
             if !sep_ok(bytes[i+4]) { i += 1; continue; }
             if !(is_digit(bytes[i+5]) && is_digit(bytes[i+6])) { i += 1; continue; }
             // If the next byte is ALSO a separator-digit-digit (full YYYY-MM-DD)
@@ -336,17 +345,23 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
     candidates.retain(|c| c.dt >= earliest_plausible && c.dt <= now);
     if candidates.is_empty() { return None; }
 
-    // Pick the oldest DATE across all candidates.
-    let oldest_date = candidates.iter().map(|c| c.dt.date()).min().unwrap();
+    // v1.5.266 — Pick by oldest YEAR-MONTH (not full date). A folder
+    // pattern like `\2026\05-May\` synthesizes day=1 noon, which used
+    // to beat EXIF DTO at the same month later in the day. Now: find
+    // the oldest (year, month) across all candidates, then within
+    // that month pick the highest-quality TIME (EXIF beats path-synth).
+    let oldest_ym = candidates
+        .iter()
+        .map(|c| (c.dt.year(), c.dt.month()))
+        .min()
+        .unwrap();
 
-    // Among candidates on that date, pick the one with the highest quality.
-    // Ties on quality: pick the earliest time (still preserves user's
-    // "oldest wins" preference within the day).
     let chosen = candidates
         .iter()
-        .filter(|c| c.dt.date() == oldest_date)
+        .filter(|c| (c.dt.year(), c.dt.month()) == oldest_ym)
         .max_by(|a, b| {
-            a.q.cmp(&b.q).then_with(|| b.dt.time().cmp(&a.dt.time()))
+            // Highest quality wins; ties → earliest dt within the month.
+            a.q.cmp(&b.q).then_with(|| b.dt.cmp(&a.dt))
         })?;
 
     let dt_local = Local.from_local_datetime(&chosen.dt).single()?;

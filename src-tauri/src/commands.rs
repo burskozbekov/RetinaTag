@@ -13848,7 +13848,7 @@ pub fn list_private_photos(
            LEFT JOIN tags t ON t.photo_id = p.id
           WHERE p.private = 1
           GROUP BY p.id
-          ORDER BY COALESCE(p.date_taken, p.created_at) DESC
+          ORDER BY COALESCE(p.date_taken, '0000-00-00') DESC, p.filename ASC
           LIMIT 5000"
     ).map_err(|e| e.to_string())?;
     let rows: Vec<serde_json::Value> = stmt
