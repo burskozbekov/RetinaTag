@@ -10858,10 +10858,10 @@ pub async fn delete_photos(photo_ids: Vec<i64>, delete_file: bool, state: tauri:
                 // v1.5.241 — Verify each path is actually gone after PS.
                 // Files still on disk = silent PS failure; surface the
                 // count via the log so the user can see WHICH ones.
-                let mut still_there: Vec<&str> = Vec::new();
+                let mut still_there: Vec<String> = Vec::new();
                 for (_, p) in &orig_paths {
                     if std::path::Path::new(p).exists() {
-                        still_there.push(p);
+                        still_there.push(p.clone());
                     }
                 }
                 dlog(&format!(
@@ -10872,6 +10872,62 @@ pub async fn delete_photos(photo_ids: Vec<i64>, delete_file: bool, state: tauri:
                 for p in still_there.iter().take(10) {
                     dlog(&format!("  STILL ON DISK: {}", p));
                 }
+                // v1.5.249 — "ne olursa olsun silinebilmeli". If PS recycle
+                // left files behind (file locked, iCloud Online-only,
+                // read-only attribute, >260-char path, weird permissions),
+                // try a hard fallback chain so the user's delete request
+                // actually completes:
+                //   1. Strip readonly attribute
+                //   2. Permanent delete via std::fs::remove_file (with
+                //      \\?\ long-path prefix so 260+ chars work)
+                //   3. Last-ditch direct PS Remove-Item -Force
+                // Per-file outcome goes to the log.
+                let mut force_deleted = 0u32;
+                let mut still_stuck: Vec<String> = Vec::new();
+                for p in &still_there {
+                    let path = std::path::Path::new(p);
+                    // 1. Strip readonly.
+                    if let Ok(meta) = std::fs::metadata(path) {
+                        let mut perms = meta.permissions();
+                        if perms.readonly() {
+                            perms.set_readonly(false);
+                            let _ = std::fs::set_permissions(path, perms);
+                        }
+                    }
+                    // 2. Direct remove (try plain, then long-path prefix).
+                    let mut removed = std::fs::remove_file(path).is_ok();
+                    if !removed {
+                        let long_path = if !p.starts_with(r"\\?\") {
+                            format!(r"\\?\{}", p)
+                        } else {
+                            p.clone()
+                        };
+                        removed = std::fs::remove_file(&long_path).is_ok();
+                    }
+                    // 3. Last resort: PS Remove-Item -Force -LiteralPath.
+                    if !removed {
+                        let ps_force = format!(
+                            "Remove-Item -LiteralPath '{}' -Force -ErrorAction SilentlyContinue",
+                            p.replace('\'', "''")
+                        );
+                        let _ = std::process::Command::new("powershell.exe")
+                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_force])
+                            .creation_flags(0x08000000)
+                            .output();
+                        removed = !std::path::Path::new(p).exists();
+                    }
+                    if removed {
+                        force_deleted += 1;
+                        dlog(&format!("force-deleted: {}", p));
+                    } else {
+                        still_stuck.push(p.clone());
+                        dlog(&format!("STILL STUCK after fallback: {}", p));
+                    }
+                }
+                dlog(&format!(
+                    "force-delete pass: {} rescued, {} still stuck",
+                    force_deleted, still_stuck.len()
+                ));
                 std::fs::remove_file(&temp).ok();
             } else {
                 dlog("temp file write failed — recycle skipped");

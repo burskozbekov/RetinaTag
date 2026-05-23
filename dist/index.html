@@ -2999,7 +2999,8 @@ async function _showUndoMenu(){
   const rect = pill.getBoundingClientRect();
   const menu = document.createElement('div');
   menu.id = 'undoMenu';
-  menu.style.cssText = `position:fixed;top:${rect.bottom+6}px;left:${rect.left}px;z-index:10001;background:var(--card);border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.5);padding:4px;min-width:240px;max-width:360px;font-size:12px`;
+  // v1.5.249 — start hidden off-screen so we can measure and clamp.
+  menu.style.cssText = `position:fixed;top:-9999px;left:-9999px;z-index:10001;background:var(--card);border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.5);padding:4px;min-width:240px;max-width:360px;font-size:12px`;
   // Top 5 actions, newest first (= reverse iteration of the stack).
   const top = UNDO_STACK.slice(-5).reverse();
   menu.innerHTML = `
@@ -3016,6 +3017,17 @@ async function _showUndoMenu(){
     }).join('')}
   `;
   document.body.appendChild(menu);
+  // v1.5.249 — clamp to viewport.
+  {
+    const r = menu.getBoundingClientRect();
+    const pad = 8;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let x = rect.left, y = rect.bottom + 6;
+    if (x + r.width  > vw - pad) x = Math.max(pad, vw - r.width  - pad);
+    if (y + r.height > vh - pad) y = Math.max(pad, rect.top - r.height - 6);
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+  }
   menu.querySelectorAll('.undo-menu-item').forEach(el=>{
     el.onclick = async ()=>{
       const depth = parseInt(el.dataset.depth||'1',10);
@@ -5070,7 +5082,7 @@ $('addTagInput').onkeydown=e=>{
 let ctxPhotoId=null,ctxPhotoPath='';
 function showCtxMenu(e,id,path){
   ctxPhotoId=id;ctxPhotoPath=path;
-  const menu=$('ctxMenu');menu.style.left=e.clientX+'px';menu.style.top=e.clientY+'px';menu.classList.add('open');
+  const menu=$('ctxMenu');
   // v1.4.74 — Only show "Paste Tags" when the clipboard actually has
   // something, so users don't see a useless menu item on first right-click.
   const paste = document.getElementById('ctxPasteTags');
@@ -5079,6 +5091,21 @@ function showCtxMenu(e,id,path){
     paste.style.display = n > 0 ? 'block' : 'none';
     if(n > 0) paste.textContent = `🏷 Paste Tags (${n})`;
   }
+  // v1.5.249 — Render off-screen first to measure, then clamp to the
+  // viewport so the menu never clips at the bottom or right edge.
+  // Previous code put the menu at exactly (clientX, clientY) which
+  // chopped the bottom items when the click was near the screen edge.
+  menu.style.left = '-9999px';
+  menu.style.top  = '-9999px';
+  menu.classList.add('open');
+  const rect = menu.getBoundingClientRect();
+  const pad = 8;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let x = e.clientX, y = e.clientY;
+  if (x + rect.width  > vw - pad) x = Math.max(pad, vw - rect.width  - pad);
+  if (y + rect.height > vh - pad) y = Math.max(pad, vh - rect.height - pad);
+  menu.style.left = x + 'px';
+  menu.style.top  = y + 'px';
 }
 document.addEventListener('click',()=>$('ctxMenu').classList.remove('open'));
 document.querySelectorAll('.ctx-item').forEach(item=>{
@@ -9683,6 +9710,10 @@ $('btnCuClear').onclick = () => {
  * are selected. Clicking "Move to Recycle Bin" actually executes.
  */
 function _cuShowDeleteModal(photos, totalSize) {
+  // v1.5.249 — "insanlar tembel okumaz". Heavy warning text gone.
+  // Only the row list, count, freed bytes, and a single ⚠ line when
+  // protected/favorited items are in the selection. No tip footer,
+  // no "Files to be moved:" heading, no multi-line essay.
   const investedCount = photos.filter(p => p.is_invested).length;
   const favRatedCount = photos.filter(p => p.favorite || (p.rating >= 4)).length;
 
@@ -9702,33 +9733,26 @@ function _cuShowDeleteModal(photos, totalSize) {
     </div>`;
   }).join('');
 
-  const warnBlock = (investedCount > 0 || favRatedCount > 0)
-    ? `<div class="cu-del-warn">
-        <span style="font-size:16px">⚠</span>
-        <div>
-          ${investedCount > 0 ? `<b>${investedCount}</b> of these are 🔒 protected (tagged / assigned to a person / in a collection).<br>` : ''}
-          ${favRatedCount > 0 ? `<b>${favRatedCount}</b> are favorites or rated 4★+.<br>` : ''}
-          Files move to the Recycle Bin so you can restore them — but if you're unsure, click <b>Cancel</b> and untick those rows first.
-        </div>
-       </div>`
+  // One-line warning if any of the selection is protected/favorited.
+  const flaggedTotal = investedCount + favRatedCount;
+  const warnBlock = flaggedTotal > 0
+    ? `<div class="cu-del-warn"><span>⚠</span> <b>${flaggedTotal}</b> protected (tagged / ♥ / 4★+).</div>`
     : '';
 
   const html = `
     <div class="cu-del-modal" id="cuDelModal">
       <div class="cu-del-box" role="dialog" aria-label="Confirm deletion">
         <div class="cu-del-head">
-          <h3>🗑 Move ${photos.length.toLocaleString()} photo${photos.length===1?'':'s'} to the Recycle Bin?</h3>
-          <div class="sub">Frees ~<b>${fmtBytes(totalSize)}</b> of disk space · Files go to the Windows Recycle Bin (restorable)</div>
+          <h3>Delete ${photos.length.toLocaleString()}?</h3>
+          <div class="sub">${fmtBytes(totalSize)} → Recycle Bin</div>
         </div>
         <div class="cu-del-body">
           ${warnBlock}
-          <div style="font-size:11px;color:var(--text3);margin:4px 0 2px">Files to be moved:</div>
           ${rows}
         </div>
         <div class="cu-del-foot">
-          <div class="info">Tip: closing this dialog keeps your selection.</div>
           <button class="btn btn-secondary" id="cuDelCancel">Cancel</button>
-          <button class="btn btn-danger" id="cuDelConfirm">🗑 Move to Recycle Bin</button>
+          <button class="btn btn-danger" id="cuDelConfirm">Delete</button>
         </div>
       </div>
     </div>`;
@@ -13646,7 +13670,8 @@ function showDeletePersonMenu(e, p) {
   document.getElementById('_personCtxMenu')?.remove();
   const menu = document.createElement('div');
   menu.id = '_personCtxMenu';
-  menu.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;background:var(--surface);
+  // v1.5.249 — start off-screen so we can measure and clamp to viewport.
+  menu.style.cssText = `position:fixed;left:-9999px;top:-9999px;background:var(--surface);
     border:1px solid var(--border);border-radius:6px;padding:4px;z-index:9999;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.5)`;
   menu.innerHTML = `<div style="padding:6px 10px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border);margin-bottom:2px">${p.name}</div>
     <div id="_renamePersonBtn" style="padding:7px 10px;font-size:12px;color:var(--cream);cursor:pointer;border-radius:4px"
@@ -13658,6 +13683,17 @@ function showDeletePersonMenu(e, p) {
     <div id="_delPersonBtn" style="padding:7px 10px;font-size:12px;color:var(--red-light);cursor:pointer;border-radius:4px"
       onmouseenter="this.style.background='var(--red-bg)'" onmouseleave="this.style.background=''">🗑 Delete person</div>`;
   document.body.appendChild(menu);
+  // v1.5.249 — clamp to viewport so the menu never clips off the bottom.
+  {
+    const rect = menu.getBoundingClientRect();
+    const pad = 8;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let x = e.clientX, y = e.clientY;
+    if (x + rect.width  > vw - pad) x = Math.max(pad, vw - rect.width  - pad);
+    if (y + rect.height > vh - pad) y = Math.max(pad, vh - rect.height - pad);
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+  }
   menu.querySelector('#_renamePersonBtn').onclick = async () => {
     menu.remove();
     // v1.5.247 — no more `tauri.localhost says` prompt; in-app modal.
