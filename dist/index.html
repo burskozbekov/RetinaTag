@@ -3527,6 +3527,132 @@ function confirmModal(opts){
   });
 }
 
+// v1.5.251 — picker dialog. Used to be a native prompt('1. foo\n2. bar')
+// asking the user to type a number — ugly + error-prone. Returns
+// Promise<value|null>; resolves to the chosen option's `value`, or null
+// on cancel / esc / overlay-click.
+//
+// Options:
+//   title         — header
+//   message       — optional body text above the list
+//   options       — [{ value, label, hint?, danger? }]  (1–~20 entries)
+//   cancelLabel   — secondary button label (default 'Cancel')
+//   width         — px (default 460)
+//   allowNewInput — if true, a small free-text input is rendered at the
+//                   bottom and the modal resolves to {custom:string} when
+//                   the user submits it. Useful for "pick existing OR
+//                   create new" flows (person assign).
+//   newPlaceholder — placeholder for the free-text input
+//   newLabel       — primary button label for the new-input variant
+function chooseModal(opts){
+  const o = Object.assign({
+    title:'', message:'', options:[], cancelLabel:'Cancel', width:460,
+    allowNewInput:false, newPlaceholder:'', newLabel:'Create',
+  }, opts || {});
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay open';
+    overlay.style.zIndex = '10300';
+    const box = document.createElement('div');
+    box.className = 'modal-box';
+    box.style.width = o.width + 'px';
+
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const h2 = document.createElement('h2');
+    h2.textContent = o.title || '';
+    head.appendChild(h2);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+    body.style.cssText = 'padding:14px 18px 6px;max-height:60vh;overflow-y:auto';
+    if(o.message){
+      const m = document.createElement('div');
+      m.style.cssText = 'margin-bottom:10px;color:var(--text2);font-size:13px';
+      m.textContent = o.message;
+      body.appendChild(m);
+    }
+    const list = document.createElement('div');
+    list.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+    (o.options || []).forEach(op => {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-secondary';
+      btn.style.cssText = 'justify-content:flex-start;text-align:left;padding:10px 12px;'
+        + 'font-size:13px;width:100%;display:flex;align-items:center;gap:10px;'
+        + (op.danger ? 'color:var(--red-light)' : '');
+      const lbl = document.createElement('span');
+      lbl.style.flex = '1';
+      lbl.textContent = op.label;
+      btn.appendChild(lbl);
+      if(op.hint){
+        const h = document.createElement('span');
+        h.style.cssText = 'color:var(--text3);font-size:11px;white-space:nowrap';
+        h.textContent = op.hint;
+        btn.appendChild(h);
+      }
+      btn.onclick = () => close(op.value);
+      list.appendChild(btn);
+    });
+    body.appendChild(list);
+
+    let newInputEl = null;
+    if(o.allowNewInput){
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'margin-top:12px;border-top:1px solid var(--border);padding-top:10px;display:flex;gap:8px';
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.placeholder = o.newPlaceholder || '';
+      inp.autocomplete = 'off';
+      inp.spellcheck = false;
+      inp.style.cssText = 'flex:1;padding:8px 10px;background:var(--card2,#1a1414);border:1px solid var(--border2);border-radius:6px;color:var(--cream);font-size:13px;box-sizing:border-box;outline:none';
+      const okBtn = document.createElement('button');
+      okBtn.className = 'btn btn-primary btn-sm';
+      okBtn.textContent = o.newLabel;
+      okBtn.onclick = () => {
+        const v = (inp.value||'').trim();
+        if(v) close({custom:v});
+      };
+      inp.addEventListener('keydown', ev => {
+        if(ev.key === 'Enter'){ ev.preventDefault(); okBtn.click(); }
+      });
+      wrap.appendChild(inp);
+      wrap.appendChild(okBtn);
+      body.appendChild(wrap);
+      newInputEl = inp;
+    }
+
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    foot.style.cssText = 'padding:8px 18px 16px;display:flex;justify-content:flex-end';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-secondary btn-sm';
+    cancelBtn.textContent = o.cancelLabel;
+    cancelBtn.onclick = () => close(null);
+    foot.appendChild(cancelBtn);
+
+    box.appendChild(head);
+    box.appendChild(body);
+    box.appendChild(foot);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    let done = false;
+    function close(v){
+      if(done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      try{ overlay.remove(); }catch(_){}
+      resolve(v);
+    }
+    overlay.addEventListener('mousedown', ev => { if(ev.target===overlay) close(null); });
+    function onKey(ev){
+      if(ev.key==='Escape'){ ev.preventDefault(); ev.stopPropagation(); close(null); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(()=>{ try{ (newInputEl || list.querySelector('button'))?.focus(); }catch(_){}}, 30);
+  });
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmt=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
 const fmtB=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB';
@@ -5349,14 +5475,16 @@ async function addToCollectionPrompt(photoId){
   try{
     const cols=await invoke('get_collections');
     if(!cols.length){toast('Create a collection first','info');return}
-    const names=cols.map((c,i)=>`${i+1}. ${c.name}`).join('\n');
-    const choice=prompt('Add to which collection?\n'+names);
-    if(!choice)return;
-    const idx=parseInt(choice)-1;
-    if(idx>=0&&idx<cols.length){
-      await invoke('add_to_collection',{collectionId:cols[idx].id,photoId});
-      toast('Added to '+cols[idx].name,'success');refreshCollections();
-    }
+    // v1.5.251 — pick from a button list instead of asking the user to
+    // type a number from a numbered prompt list.
+    const cid = await chooseModal({
+      title: 'Add to collection',
+      options: cols.map(c => ({ value: c.id, label: c.name, hint: (c.photo_count||0)+' photos' })),
+    });
+    if(cid === null) return;
+    const col = cols.find(c => c.id === cid);
+    await invoke('add_to_collection',{collectionId:cid,photoId});
+    toast('Added to '+(col?col.name:'collection'),'success');refreshCollections();
   }catch(e){toast('Error: '+e,'error')}
 }
 
@@ -18317,11 +18445,19 @@ async function saveAllFoldersAsCollections(){
 }
 
 async function saveCluster(clusterId, defaultLabel, count){
-  const name=prompt(`Save ${count} photos near "${defaultLabel}" as a collection named:`, defaultLabel);
-  if(!name)return;
+  // v1.5.251 — in-app modal.
+  const name = await inputModal({
+    title:`Save ${count} photo${count===1?'':'s'} as collection`,
+    message:`Near "${defaultLabel}"`,
+    defaultValue:defaultLabel,
+    placeholder:'Collection name',
+    okLabel:'Save',
+    validate:v=>(v||'').trim() ? null : 'Name is required',
+  });
+  if(name===null) return;
   try{
-    const collId=await invoke('save_gps_cluster_as_collection',{clusterId, name});
-    toast(`Collection "${name}" created (#${collId}) with ${count} photos`,'success');
+    const collId=await invoke('save_gps_cluster_as_collection',{clusterId, name:name.trim()});
+    toast(`Collection "${name.trim()}" created (#${collId}) with ${count} photos`,'success');
     // Refresh the sidebar collections list if the helper exists.
     try{typeof loadCollections==='function'&&loadCollections();}catch(_){}
   }catch(e){toast('Save failed: '+e,'error');}
@@ -18333,17 +18469,24 @@ async function saveCluster(clusterId, defaultLabel, count){
 // deleted, just hidden.
 async function batchPerson(){
   if(selectedIds.size===0){toast('Nothing selected','info');return;}
-  // Offer the list of existing people for quick pick; otherwise let the user
-  // type a new name. We keep this as a plain prompt so it stays lightweight
-  // and works with the existing batch-bar layout — no extra modal needed.
+  // v1.5.251 — chooseModal with allowNewInput so existing people are a
+  // one-click pick, but typing a new name still works. The native prompt
+  // was a pain on touchpads.
   let existing=[];
   try{existing=await invoke('get_persons');}catch(e){existing=[];}
-  const existingNames=(existing||[]).map(p=>p.name).filter(Boolean);
-  const hint=existingNames.length
-    ? `Existing: ${existingNames.slice(0,12).join(', ')}${existingNames.length>12?'…':''}`
-    : 'No people yet — a new one will be created.';
-  const name=prompt(`Assign ${selectedIds.size} photo${selectedIds.size===1?'':'s'} to which person?\n\n${hint}`);
-  if(!name||!name.trim())return;
+  const opts=(existing||[])
+    .filter(p=>p.name)
+    .map(p=>({ value:p.name, label:p.name, hint:(p.photo_count||0)+' photos' }));
+  const pick=await chooseModal({
+    title:`Assign ${selectedIds.size} photo${selectedIds.size===1?'':'s'} to`,
+    options:opts,
+    allowNewInput:true,
+    newPlaceholder:'…or type a new person name',
+    newLabel:'Create + assign',
+  });
+  if(pick===null) return;
+  const name = (typeof pick === 'object' && pick && 'custom' in pick) ? pick.custom : pick;
+  if(!name || !String(name).trim()) return;
   const ids=[...selectedIds];
   try{
     const res=await invoke('batch_assign_person',{photoIds:ids,personName:name.trim()});
