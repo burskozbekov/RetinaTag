@@ -7948,23 +7948,31 @@ function _applySort(arr){
   if(!curSort||!Array.isArray(arr))return arr;
   const by=curSort;
   const collator=new Intl.Collator('tr',{sensitivity:'base',numeric:true});
-  const cmpDate=(a,b)=>{
+  // v1.5.270 — NULL date_taken ALWAYS sorts last regardless of direction.
+  // Old code negated cmpDate for date-desc, which flipped the NULL
+  // sentinel and dumped no-date photos at the TOP of "Newest → Oldest"
+  // (the user saw alphabetical AAB/AASD/ABMN before the real 2026 EXIF
+  // photos). Direction-aware cmpDate keeps NULLs at the END both ways.
+  const cmpDate=(a,b,desc)=>{
     const ax=a.date_taken||'',bx=b.date_taken||'';
+    // Both NULL → stable tiebreak on id (newer rows first).
     if(!ax&&!bx)return (b.id||0)-(a.id||0);
-    if(!ax)return 1;if(!bx)return -1;
-    return ax<bx?-1:ax>bx?1:0;
+    // Single-side NULL: NULL always loses.
+    if(!ax)return 1;
+    if(!bx)return -1;
+    return desc ? (ax<bx?1:ax>bx?-1:0) : (ax<bx?-1:ax>bx?1:0);
   };
   const sorted=[...arr];
-  if(by==='date-desc')sorted.sort((a,b)=>-cmpDate(a,b));
-  else if(by==='date-asc')sorted.sort(cmpDate);
+  if(by==='date-desc')sorted.sort((a,b)=>cmpDate(a,b,true));
+  else if(by==='date-asc')sorted.sort((a,b)=>cmpDate(a,b,false));
   else if(by==='name-asc')sorted.sort((a,b)=>collator.compare(a.filename||'',b.filename||''));
   else if(by==='name-desc')sorted.sort((a,b)=>collator.compare(b.filename||'',a.filename||''));
   else if(by==='rating-desc')sorted.sort((a,b)=>{
     const ar=a.favorite?100:(a.rating||0);
     const br=b.favorite?100:(b.rating||0);
-    return br-ar||(-cmpDate(a,b));
+    return br-ar||cmpDate(a,b,true);
   });
-  else if(by==='tags-desc')sorted.sort((a,b)=>((b.tag_count||(b.tags?b.tags.length:0))-(a.tag_count||(a.tags?a.tags.length:0)))||(-cmpDate(a,b)));
+  else if(by==='tags-desc')sorted.sort((a,b)=>((b.tag_count||(b.tags?b.tags.length:0))-(a.tag_count||(a.tags?a.tags.length:0)))||cmpDate(a,b,true));
   return sorted;
 }
 // Quick filter chips (toolbar) — single-select toggle. Clicking an active chip

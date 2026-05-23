@@ -1193,6 +1193,15 @@ pub fn get_photos(
         stmt.query_row(args_refs.as_slice(), |r| r.get(0))?
     };
 
+    // v1.5.270 — Gallery's "Newest → Oldest" toggle means "most
+    // recently TAKEN", not "most recently INSERTED". The old
+    // ORDER BY p.created_at DESC put today's freshly-imported
+    // 10-year-old photos at the top, sorted alphabetically by
+    // filename (because their created_at all collapsed to the
+    // same second). New rule: COALESCE date_taken to a sentinel
+    // earlier than 1990 so NULL rows fall to the bottom, then
+    // tie-break on the still-useful created_at (so two photos
+    // taken the exact same second land in import order).
     let fetch_sql = format!(
         "SELECT p.id, p.path, p.filename, p.status, p.provider_used,
                 (SELECT COUNT(*) FROM tags WHERE photo_id = p.id) AS tag_count,
@@ -1200,7 +1209,7 @@ pub fn get_photos(
                 p.media_type, p.date_taken, p.duration_secs, p.rating, p.favorite
          FROM photos p
          {}
-         ORDER BY p.created_at DESC
+         ORDER BY COALESCE(p.date_taken, '0000-00-00') DESC, p.created_at DESC
          LIMIT ?{} OFFSET ?{}",
         where_clause,
         args.len() + 1,
@@ -2000,12 +2009,14 @@ pub fn query_smart_collection(conn: &Connection, rules: &[crate::models::Collect
     // rest of the search/filter caps. A "tag like 'family'" rule on a
     // few thousand family photos silently lost everything past the
     // 1000th match.
+    // v1.5.270 — Same "Newest = recently taken, not recently imported"
+    // fix as get_photos. search_photos was sorting by created_at too.
     let sql = format!(
         "SELECT p.id, p.path, p.filename, p.status, p.provider_used,
                 (SELECT COUNT(*) FROM tags WHERE photo_id = p.id) AS tag_count,
                 COALESCE((SELECT GROUP_CONCAT(tag, '|||') FROM (SELECT tag FROM tags WHERE photo_id = p.id LIMIT 10)), '') AS tag_list,
                 p.media_type, p.date_taken, p.duration_secs, p.rating, p.favorite
-         FROM photos p WHERE {} ORDER BY p.created_at DESC LIMIT 5000", where_clause
+         FROM photos p WHERE {} ORDER BY COALESCE(p.date_taken, '0000-00-00') DESC, p.created_at DESC LIMIT 5000", where_clause
     );
 
     let mut stmt = conn.prepare(&sql)?;
