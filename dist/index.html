@@ -2625,6 +2625,26 @@ select.tb-select:focus{border-color:var(--red-dark)}
               <div id="sharedVaultActions" style="display:flex;flex-wrap:wrap;gap:8px"></div>
             </div>
           </div>
+          <!-- v1.5.267 — iPhone Companion (LAN sync) panel. The HTTP
+               server + Bonjour advertise are spawned at app start
+               (lib.rs setup hook). This panel exposes the pairing
+               UI: generate a 6-digit code shown for 5 minutes, list
+               currently-paired devices, revoke any of them. -->
+          <div class="pane-section">
+            <div class="sb-label">📱 iPhone Companion</div>
+            <div style="display:flex;flex-direction:column;gap:10px;font-size:12px;color:var(--text3)">
+              <div style="line-height:1.5">
+                The RetinaTag iOS app pairs with this desktop over your local Wi-Fi and uploads new photos directly. Generate a 6-digit code below, type it into the iPhone app, and it stays paired until you revoke it here.
+              </div>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn btn-secondary btn-sm" id="btnLanGenCode">Generate code</button>
+                <div id="lanCodeBox" style="display:none;font-family:'JetBrains Mono','Consolas',monospace;font-size:22px;font-weight:700;letter-spacing:6px;color:var(--cream);padding:6px 14px;background:var(--card2);border:1px solid var(--border2);border-radius:8px"></div>
+                <span id="lanCodeCountdown" style="font-size:11px;color:var(--text3);min-width:50px"></span>
+              </div>
+              <div id="lanPairedList" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
+            </div>
+          </div>
+
           <div class="pane-section" style="border-bottom:none">
             <div class="sb-label" style="display:flex;align-items:center;justify-content:space-between">
               <span>📜 Scan History</span>
@@ -11729,17 +11749,105 @@ async function _sharedVaultLock(){
 // Shared Vault status on first reveal.
 document.addEventListener('click', (e) => {
   const navItem = e.target && e.target.closest && e.target.closest('.settings-nav-item[data-pane="tools"]');
-  if(navItem) setTimeout(_sharedVaultRefresh, 50);
+  if(navItem) {
+    setTimeout(_sharedVaultRefresh, 50);
+    setTimeout(_lanPairedRefresh, 50);
+  }
 });
 // Also refresh once when the Settings modal itself opens.
 (function(){
   const modal = document.getElementById('settingsModal');
   if(!modal) return;
   const obs = new MutationObserver(() => {
-    if(modal.classList.contains('open')) _sharedVaultRefresh();
+    if(modal.classList.contains('open')) {
+      _sharedVaultRefresh();
+      _lanPairedRefresh();
+    }
   });
   obs.observe(modal, { attributes: true, attributeFilter: ['class'] });
 })();
+
+// v1.5.267 — iPhone Companion (LAN sync) UI wiring. Generate a 6-digit
+// code, render it with a 5-min countdown that turns into a "Code
+// expired" state. List paired devices with revoke buttons. Calls the
+// three lan_* Tauri commands registered in lib.rs.
+let _lanCountdownTimer = null;
+async function _lanGenCode(){
+  const box  = document.getElementById('lanCodeBox');
+  const ctd  = document.getElementById('lanCodeCountdown');
+  const btn  = document.getElementById('btnLanGenCode');
+  if(!box || !ctd) return;
+  try{
+    const code = await invoke('lan_request_pair_code');
+    box.textContent = code;
+    box.style.display = '';
+    btn.textContent = 'Regenerate';
+    if(_lanCountdownTimer) { clearInterval(_lanCountdownTimer); _lanCountdownTimer = null; }
+    let secs = 5 * 60;
+    const tick = () => {
+      if(secs <= 0){
+        ctd.textContent = 'expired';
+        ctd.style.color = 'var(--red-light)';
+        if(_lanCountdownTimer) { clearInterval(_lanCountdownTimer); _lanCountdownTimer = null; }
+        return;
+      }
+      const m = Math.floor(secs/60), s = secs % 60;
+      ctd.textContent = `${m}:${String(s).padStart(2,'0')}`;
+      ctd.style.color = secs <= 30 ? 'var(--red-light)' : 'var(--text3)';
+      secs--;
+    };
+    tick();
+    _lanCountdownTimer = setInterval(tick, 1000);
+  } catch(e){
+    toast('Could not generate code: ' + e, 'error');
+  }
+}
+async function _lanPairedRefresh(){
+  const list = document.getElementById('lanPairedList');
+  if(!list) return;
+  try{
+    const devs = await invoke('lan_list_paired_devices');
+    if(!devs || devs.length === 0){
+      list.innerHTML = '<div style="font-size:11px;color:var(--text3);font-style:italic">No devices paired yet.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    for(const d of devs){
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--card2);border:1px solid var(--border);border-radius:6px';
+      const name = document.createElement('div');
+      name.style.cssText = 'flex:1;color:var(--cream);font-size:12px';
+      const last = d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : 'never';
+      name.innerHTML = `<div style="font-weight:600">${_esc(d.device_name)}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:2px">paired ${new Date(d.created_at).toLocaleDateString()} · last seen ${last}</div>`;
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-secondary btn-xs';
+      btn.textContent = 'Revoke';
+      btn.onclick = async () => {
+        const ok = await confirmModal({
+          title:'Revoke device',
+          message:`"${d.device_name}" will no longer be able to upload until you pair it again.`,
+          okLabel:'Revoke', danger:true,
+        });
+        if(!ok) return;
+        try{
+          await invoke('lan_revoke_paired_device', { deviceId: d.id });
+          toast('Device revoked', 'success');
+          _lanPairedRefresh();
+        } catch(e){ toast('Revoke failed: ' + e, 'error'); }
+      };
+      row.appendChild(name);
+      row.appendChild(btn);
+      list.appendChild(row);
+    }
+  } catch(e){
+    list.innerHTML = `<div style="font-size:11px;color:var(--red-light)">Error: ${_esc(String(e))}</div>`;
+  }
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('btnLanGenCode');
+  if(btn) btn.onclick = _lanGenCode;
+});
 
 // v1.5.225 — Cross-machine bridge: drop a snapshot of retina.db at
 // <library>\.retinatag-state\retina-pc.db so the Mac side can merge.

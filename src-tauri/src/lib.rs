@@ -913,6 +913,41 @@ pub fn run() {
                 let _ = std::fs::write(&log_path, log);
             });
 
+            // v1.5.267 — Spawn the iPhone Companion / LAN sync server +
+            // mDNS advertiser. Both run inside the existing tokio runtime
+            // (Tauri exposes its async runtime via tauri::async_runtime).
+            // Failures are non-fatal: a bound-port collision or no
+            // network adapter just means iOS pairing won't work — the
+            // rest of the app keeps running.
+            {
+                use tauri::Manager;
+                let state = app.state::<AppState>();
+                let db = state.db.clone();
+                tauri::async_runtime::spawn(async move {
+                    match crate::lan_server::run_server(db).await {
+                        Ok(_h) => {
+                            eprintln!("[lan] HTTP server up on 0.0.0.0:{}", crate::lan_server::PORT);
+                        }
+                        Err(e) => {
+                            eprintln!("[lan] HTTP server failed to start: {}", e);
+                        }
+                    }
+                });
+                // v1.5.267 fix-1 — start_advertise internally calls
+                // tokio::spawn which panics if called outside a Tokio
+                // runtime context. Tauri's setup hook runs synchronously
+                // (no current runtime), so we wrap the call in
+                // async_runtime::spawn — that gives it a runtime to
+                // attach to. Doesn't change behaviour, just survives
+                // the spawn check.
+                tauri::async_runtime::spawn(async {
+                    match crate::lan_bonjour::start_advertise(crate::lan_server::PORT) {
+                        Ok(_h) => eprintln!("[lan] Bonjour advertising {}", crate::lan_bonjour::SERVICE_TYPE),
+                        Err(e) => eprintln!("[lan] Bonjour advertise failed: {}", e),
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1175,6 +1210,10 @@ pub fn run() {
             commands::merge_duplicate_photos,
             commands::save_all_folders_as_collections,
             commands::get_trending_tags,
+            // v1.5.267 — iPhone Companion / LAN sync.
+            commands::lan_request_pair_code,
+            commands::lan_list_paired_devices,
+            commands::lan_revoke_paired_device,
         ])
         // Intercept window close on the main window. If the `close_to_tray`
         // preference is enabled we hide the window instead of exiting, so the

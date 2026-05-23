@@ -15268,3 +15268,25 @@ pub async fn shared_vault_probe(library_root: String) -> Result<serde_json::Valu
     }))
 }
 
+// ── LAN sync / iPhone Companion ────────────────────────────────────────────
+// v1.5.267 — Tauri-side wrappers for the lan_pairing module. The Settings
+// "iPhone Companion" modal calls these. Server + bonjour are spawned from
+// lib.rs::setup(); these commands only touch the DB / pending-code map.
+
+#[tauri::command]
+pub fn lan_request_pair_code() -> Result<String, String> {
+    Ok(crate::lan_pairing::mint_code())
+}
+
+#[tauri::command]
+pub fn lan_list_paired_devices(state: tauri::State<'_, AppState>) -> Result<Vec<crate::lan_pairing::PairedDevice>, String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    crate::lan_pairing::list_paired(&conn)
+}
+
+#[tauri::command]
+pub fn lan_revoke_paired_device(device_id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|_| "db lock")?;
+    crate::lan_pairing::revoke(&conn, device_id)
+}
+
