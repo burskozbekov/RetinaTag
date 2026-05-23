@@ -15372,7 +15372,15 @@ function _vaultRefreshLockoutUI(){
 }
 async function _vaultOfferWipe(ev){
   if(ev) ev.preventDefault();
-  if(!confirm('Wipe the vault?\n\nThis will:\n• Reset the PIN\n• Make every private photo public again\n\nThis cannot be undone. Continue?')) return;
+  // v1.5.258 — in-app modal.
+  {
+    const ok = await confirmModal({
+      title:'Wipe the vault',
+      message:'Resets the PIN.\nMakes every private photo public again.\nCannot be undone.',
+      okLabel:'Wipe', danger:true,
+    });
+    if(!ok) return;
+  }
   try{
     await invoke('vault_reset_full').catch(()=>invoke('vault_clear_pin').catch(()=>{}));
     _vaultClearFails();
@@ -16310,7 +16318,15 @@ async function _vaultUnhideAllVisible(){
 async function _vaultBulkUnhide(){
   if (_vaultSelectedIds.size === 0) return;
   const ids = Array.from(_vaultSelectedIds);
-  if (!confirm(`Unlock ${ids.length} photo${ids.length === 1 ? '' : 's'} from the vault?\n\nThe encrypted files will be decrypted back to their original locations.`)) return;
+  // v1.5.258 — in-app modal.
+  {
+    const ok = await confirmModal({
+      title:`Unlock ${ids.length} photo${ids.length === 1 ? '' : 's'}`,
+      message:'Encrypted files will be decrypted back to their original locations.',
+      okLabel:'Unlock',
+    });
+    if(!ok) return;
+  }
   _vaultBumpActivity();
   let ok = 0, errs = 0;
   for (const id of ids) {
@@ -16493,7 +16509,13 @@ async function _vaultUnlockFolder(f) {
 // a permanent move out of vault.
 async function _vaultRevealFolder(f) {
   _vaultBumpActivity();
-  if (!confirm(`Show "${f.name}" in Explorer?\n\nThis decrypts ${f.photo_count} item(s) back to:\n${f.original_path}\n\nThe vault copies stay encrypted. Click 🔒 on the folder later to re-lock.`)) {
+  // v1.5.258 — in-app modal.
+  const _revealOk = await confirmModal({
+    title:`Show "${f.name}" in Explorer`,
+    message:`Decrypts ${f.photo_count} item${f.photo_count===1?'':'s'} back to:\n${f.original_path}\n\nVault copies stay encrypted — click 🔒 on the folder to re-lock.`,
+    okLabel:'Reveal',
+  });
+  if (!_revealOk) {
     return;
   }
   try {
@@ -16516,7 +16538,13 @@ async function _vaultRevealFolder(f) {
 // "commit edits" isn't built in.
 async function _vaultRelockFolder(f) {
   _vaultBumpActivity();
-  if (!confirm(`Re-lock "${f.name}"?\n\nThis removes the decrypted Explorer copy.\nVault contents stay sealed.\n\nAny edits you made while revealed will NOT be saved back to the vault.`)) {
+  // v1.5.258 — in-app modal.
+  const _relockOk = await confirmModal({
+    title:`Re-lock "${f.name}"`,
+    message:'Decrypted Explorer copy removed.\nVault contents stay sealed.\nEdits made while revealed will NOT be saved back.',
+    okLabel:'Re-lock',
+  });
+  if (!_relockOk) {
     return;
   }
   try {
@@ -18678,7 +18706,15 @@ async function batchUnperson(){
 }
 async function batchVault(){
   if(selectedIds.size===0){toast('Nothing selected','info');return;}
-  if(!confirm('Move '+selectedIds.size+' photo'+(selectedIds.size===1?'':'s')+' to the private vault? They will be hidden from the gallery until you unlock the vault.'))return;
+  // v1.5.258 — in-app modal.
+  {
+    const ok = await confirmModal({
+      title:`Move ${selectedIds.size} photo${selectedIds.size===1?'':'s'} to vault`,
+      message:'Hidden from the gallery until you unlock the vault.',
+      okLabel:'Move',
+    });
+    if(!ok) return;
+  }
   const ids=[...selectedIds];
   try{
     const n=await invoke('batch_set_private',{photoIds:ids,private:true});
