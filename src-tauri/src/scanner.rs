@@ -149,13 +149,30 @@ pub fn best_date_taken(path: &str) -> Option<String> {
 pub fn extract_date_taken(path: &str) -> Option<String> {
     use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 
-    let mut candidates: Vec<NaiveDateTime> = Vec::with_capacity(8);
+    // v1.5.252 — Was picking the oldest *timestamp* across all candidates,
+    // which meant the path-pattern's synthesized 12:00:00 always beat the
+    // real EXIF time when the dates matched. Result: 2,400+ photos had a
+    // bogus "noon" timestamp even though EXIF held the real capture time.
+    //
+    // New algorithm:
+    //   1. Collect candidates with a `quality` score for their TIME
+    //      component (path patterns = synthesized noon, lowest quality;
+    //      EXIF DTO = highest).
+    //   2. Pick the OLDEST DATE across all candidates (user's rule).
+    //   3. Among candidates on that date, prefer the HIGHEST-quality
+    //      time. So the date can come from a folder name but the time
+    //      from EXIF on the same day if both agree.
+    //
+    // TIME QUALITY scoring (higher = more authoritative):
+    //   3 = EXIF DateTimeOriginal/Digitized/DateTime — real wall-clock
+    //   2 = filesystem mtime/ctime — real wall-clock
+    //   1 = GPS without GPSTimeStamp — synthesized 12:00:00
+    //   0 = path-pattern (YYYY-MM-DD in folder name) — synthesized 12:00:00
+    #[derive(Clone)]
+    struct Cand { dt: NaiveDateTime, q: u8 }
 
-    // ── EXIF date tags ──────────────────────────────────────────────────
-    // The stock `read_exif` only returns DateTimeOriginal; for the oldest-
-    // date heuristic we open the EXIF directly and pull every dated tag.
-    // v1.5.47 — try multiple formats; some cameras emit dashes or
-    // DD/MM/YYYY, not the EXIF-spec colon form.
+    let mut candidates: Vec<Cand> = Vec::with_capacity(8);
+
     const FORMATS: &[&str] = &[
         "%Y:%m:%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
@@ -179,53 +196,36 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
                     let s = field.display_value().to_string();
                     let s = s.trim_matches('"').trim().to_string();
                     if let Some(dt) = FORMATS.iter().find_map(|f| NaiveDateTime::parse_from_str(&s, f).ok()) {
-                        candidates.push(dt);
+                        candidates.push(Cand { dt, q: 3 });
                     }
                 }
             }
-            // GPS date stamp ("YYYY:MM:DD") — combine with optional time
-            // stamp; without a time we fall back to noon UTC so it doesn't
-            // skew toward midnight on day boundaries.
             if let Some(field) = exif.get_field(exif::Tag::GPSDateStamp, exif::In::PRIMARY) {
                 let s = field.display_value().to_string();
                 let s = s.trim_matches('"').trim().to_string();
                 if let Ok(d) = chrono::NaiveDate::parse_from_str(&s, "%Y:%m:%d") {
-                    candidates.push(d.and_hms_opt(12, 0, 0).unwrap());
+                    candidates.push(Cand { dt: d.and_hms_opt(12, 0, 0).unwrap(), q: 1 });
                 }
             }
         }
     }
 
-    // ── Filesystem metadata ─────────────────────────────────────────────
     if let Ok(meta) = std::fs::metadata(path) {
         if let Ok(t) = meta.modified() {
             let dt: DateTime<Local> = t.into();
-            candidates.push(dt.naive_local());
+            candidates.push(Cand { dt: dt.naive_local(), q: 2 });
         }
         if let Ok(t) = meta.created() {
             let dt: DateTime<Local> = t.into();
-            candidates.push(dt.naive_local());
+            candidates.push(Cand { dt: dt.naive_local(), q: 2 });
         }
     }
 
-    // ── Path + filename pattern ─────────────────────────────────────────
-    // Look for YYYY-MM-DD / YYYY_MM_DD / YYYYMMDD tokens anywhere in the
-    // FULL PATH (not just the filename stem). Many users organise photos
-    // into folder hierarchies like `D:\photos\2003\2003_12\2003_12_14\`
-    // — the folder names carry the original date even when the EXIF was
-    // stripped or rewritten by a re-save. Manual sliding-window search
-    // instead of regex (the project doesn't pull the regex crate and
-    // adding it for one parse would bloat the binary). Only used as a
-    // candidate; it still has to win the "oldest plausible" race below.
-    // v1.5.48 — Was scanning only the filename stem; now scans the whole
-    // path string so folder-name dates contribute too. Also tracks the
-    // best (most specific + earliest) match across the path so a photo
-    // in `\2003\2003_12_14\` picks 2003-12-14 instead of just 2003.
+    // Path/filename pattern — date only, time is synthesized noon.
     {
         let bytes = path.as_bytes();
         let mut i = 0;
         while i + 8 <= bytes.len() {
-            // Need 4 ascii digits to start a year.
             let is_digit = |b: u8| b.is_ascii_digit();
             if !(is_digit(bytes[i]) && is_digit(bytes[i+1]) && is_digit(bytes[i+2]) && is_digit(bytes[i+3])) {
                 i += 1;
@@ -233,10 +233,6 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
             }
             let y: i32 = std::str::from_utf8(&bytes[i..i+4]).unwrap_or("0").parse().unwrap_or(0);
             if !(1990..=2099).contains(&y) { i += 1; continue; }
-            // Three forms supported:
-            //   YYYYMMDD      (8 digits in a row)
-            //   YYYY-MM-DD    (with - or _ or : as separators)
-            //   YYYY_MM_DD    (same family, different sep)
             let try_compact = i + 8 <= bytes.len()
                 && is_digit(bytes[i+4]) && is_digit(bytes[i+5])
                 && is_digit(bytes[i+6]) && is_digit(bytes[i+7]);
@@ -261,34 +257,36 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
             }
             if (1..=12).contains(&mm) && (1..=31).contains(&dd) {
                 if let Some(date) = chrono::NaiveDate::from_ymd_opt(y, mm, dd) {
-                    candidates.push(date.and_hms_opt(12, 0, 0).unwrap());
-                    // Don't break — keep scanning. A path like
-                    // `\backup-2024-01-01\photos-from-2003\2003_12_14\foo.jpg`
-                    // should pick 2003-12-14 (oldest), not the first hit
-                    // 2024-01-01. The "oldest plausible" picker below
-                    // chooses the right one.
+                    candidates.push(Cand { dt: date.and_hms_opt(12, 0, 0).unwrap(), q: 0 });
                 }
             }
             i += consumed;
         }
     }
 
-    // ── Pick the oldest plausible candidate ─────────────────────────────
+    // Clamp to plausible window.
     let now = Utc::now().naive_utc();
     let earliest_plausible = chrono::NaiveDate::from_ymd_opt(1990, 1, 1)
         .unwrap()
         .and_hms_opt(0, 0, 0)
         .unwrap();
+    candidates.retain(|c| c.dt >= earliest_plausible && c.dt <= now);
+    if candidates.is_empty() { return None; }
 
-    candidates.retain(|d| *d >= earliest_plausible && *d <= now);
-    candidates.sort();
-    let chosen = candidates.first()?;
+    // Pick the oldest DATE across all candidates.
+    let oldest_date = candidates.iter().map(|c| c.dt.date()).min().unwrap();
 
-    // Re-anchor to local-tz formatting so the DB uses the same shape it
-    // always has. We treat the naive date as local time (the EXIF spec is
-    // ambiguous about timezone; treating it as local matches what cameras
-    // print) and format identically to the previous code path.
-    let dt_local = Local.from_local_datetime(chosen).single()?;
+    // Among candidates on that date, pick the one with the highest quality.
+    // Ties on quality: pick the earliest time (still preserves user's
+    // "oldest wins" preference within the day).
+    let chosen = candidates
+        .iter()
+        .filter(|c| c.dt.date() == oldest_date)
+        .max_by(|a, b| {
+            a.q.cmp(&b.q).then_with(|| b.dt.time().cmp(&a.dt.time()))
+        })?;
+
+    let dt_local = Local.from_local_datetime(&chosen.dt).single()?;
     Some(dt_local.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
