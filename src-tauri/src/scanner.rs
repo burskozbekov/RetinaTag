@@ -267,6 +267,25 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
         }
     }
 
+    // v1.5.273 — PNG tEXt 'Creation Time' chunk. Mac's ImageIO returns
+    // this as part of kCGImagePropertyPNGDictionary; PC was missing it
+    // entirely. Two formats in the wild: EXIF colon
+    // ("2021:10:08 20:39:12") and RFC822 ("Sun, 06 Oct 2024 ... GMT").
+    {
+        let lc_ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        if lc_ext == "png" {
+            if let Some(dt) = read_png_creation_time(path) {
+                if !is_placeholder(&dt) {
+                    candidates.push(Cand { dt, q: 3 });
+                }
+            }
+        }
+    }
+
     // v1.5.272 — Read QuickTime / MP4 creation_time from the moov/mvhd
     // atom for video files. iPhone .MOV recordings carry the real
     // capture timestamp here even though they have no EXIF IFD; WPD
@@ -898,6 +917,63 @@ fn read_mp4_creation_time(path: &str) -> Option<chrono::NaiveDateTime> {
             return Some(dt.naive_local());
         }
         p += atom_size;
+    }
+    None
+}
+
+/// v1.5.273 — PNG `tEXt Creation Time` (or `iTXt Creation Time`) chunk.
+/// Accepts both common date formats found in the wild:
+///   EXIF colon  : "2021:10:08 20:39:12"
+///   ISO 8601    : "2024-10-06T20:20:11"
+///   RFC 822     : "Sun, 06 Oct 2024 20:20:11 GMT"  (PIL writes this)
+fn read_png_creation_time(path: &str) -> Option<chrono::NaiveDateTime> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    // First 128 KB is plenty for metadata chunks before IDAT.
+    let mut buf = vec![0u8; 128 * 1024];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
+    if !buf.starts_with(b"\x89PNG\r\n\x1a\n") { return None; }
+    // Find the marker. Two flavours.
+    let mut start = None;
+    for marker in [b"tEXtCreation Time\x00".as_ref(), b"iTXtCreation Time\x00".as_ref()] {
+        if let Some(pos) = find_subslice(&buf, marker) {
+            start = Some(pos + marker.len());
+            break;
+        }
+    }
+    let start = start?;
+    // Read until NUL, 0xFF, or 80 bytes (PNG chunk values are short).
+    let mut end = start;
+    while end < buf.len() && buf[end] != 0 && buf[end] != 0xff && end - start < 80 {
+        end += 1;
+    }
+    let s = std::str::from_utf8(&buf[start..end]).ok()?.trim();
+    parse_png_creation_date(s)
+}
+
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() { return None; }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn parse_png_creation_date(s: &str) -> Option<chrono::NaiveDateTime> {
+    use chrono::NaiveDateTime;
+    // EXIF colon
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], "%Y:%m:%d %H:%M:%S") {
+        return Some(dt);
+    }
+    // ISO 8601 with T
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], "%Y-%m-%dT%H:%M:%S") {
+        return Some(dt);
+    }
+    // ISO with space
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], "%Y-%m-%d %H:%M:%S") {
+        return Some(dt);
+    }
+    // RFC 822 like "Sun, 06 Oct 2024 20:20:11 GMT" — chrono can parse via DateTime
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
+        return Some(dt.naive_utc());
     }
     None
 }

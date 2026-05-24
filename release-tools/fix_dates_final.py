@@ -237,8 +237,64 @@ def _gather_mp4(path):
         pass
     return []
 
+def _gather_png(path):
+    """v1.5.273 — PNG tEXt 'Creation Time' chunk. Two common formats:
+       EXIF colon ("2021:10:08 20:39:12") and RFC822
+       ("Sun, 06 Oct 2024 20:20:11 GMT"). Mac's ImageIO surfaces this
+       natively; PC was missing it before."""
+    if not path.lower().endswith('.png'):
+        return []
+    out = []
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(128 * 1024)
+        if not head.startswith(b'\x89PNG\r\n\x1a\n'):
+            return []
+        for marker in (b'tEXtCreation Time\x00', b'iTXtCreation Time\x00'):
+            idx = head.find(marker)
+            if idx < 0:
+                continue
+            start = idx + len(marker)
+            # Read until NUL, 0xff (start of next png byte run), or 80 bytes.
+            end = start
+            while end < len(head) and head[end] not in (0, 0xff) and end - start < 80:
+                end += 1
+            val = head[start:end].decode('ascii', errors='replace').strip()
+            dt = _parse_png_date(val)
+            if dt and not is_placeholder(dt):
+                out.append((dt, 3))
+            break
+    except Exception:
+        pass
+    return out
+
+def _parse_png_date(val):
+    """Accept EXIF colon, ISO 8601, or RFC822. Returns naive datetime or None."""
+    # EXIF colon: "2021:10:08 20:39:12"
+    try:
+        return datetime.datetime.strptime(val[:19], '%Y:%m:%d %H:%M:%S')
+    except ValueError:
+        pass
+    # ISO with T: "2024-10-06T20:20:11"
+    try:
+        return datetime.datetime.strptime(val[:19], '%Y-%m-%dT%H:%M:%S')
+    except ValueError:
+        pass
+    try:
+        return datetime.datetime.strptime(val[:19], '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        pass
+    # RFC822: "Sun, 06 Oct 2024 20:20:11 GMT"
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(val)
+        if dt: return dt.replace(tzinfo=None)
+    except Exception:
+        pass
+    return None
+
 def best_date_for(path):
-    cands = gather_exif(path) + gather_path(path) + _gather_mp4(path)
+    cands = gather_exif(path) + gather_path(path) + _gather_mp4(path) + _gather_png(path)
     cands = [(dt, q) for dt, q in cands if FLOOR <= dt <= NOW]
     if not cands:
         return None  # NULL
