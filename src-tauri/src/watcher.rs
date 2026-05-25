@@ -112,37 +112,19 @@ impl FolderWatcher {
                                         }
                                     }
 
-                                    // Auto-tag: if any new file is in an auto_tag folder, trigger tagging
-                                    if new_count > 0 {
-                                        let should_auto_tag = files.iter().any(|f| {
-                                            auto_tag_ref.iter().any(|folder| {
-                                                let norm_f = f.replace('\\', "/");
-                                                let norm_folder = folder.replace('\\', "/");
-                                                norm_f.starts_with(&norm_folder)
-                                            })
-                                        });
-
-                                        if should_auto_tag && !tag_running_ref.swap(true, Ordering::SeqCst) {
-                                            let db_tag = db_ref.clone();
-                                            let stop_tag = tag_stop_ref.clone();
-                                            let ah_tag = ah_ref.clone();
-                                            let running_tag = tag_running_ref.clone();
-
-                                            ah_ref.emit("auto-tag-started", serde_json::json!({
-                                                "count": new_count,
-                                                "source": "watch-folder"
-                                            })).ok();
-
-                                            tauri::async_runtime::spawn(async move {
-                                                stop_tag.store(false, Ordering::SeqCst);
-                                                let result = crate::tagger::run_tagging(
-                                                    db_tag, stop_tag, ah_tag.clone(),
-                                                ).await;
-                                                running_tag.store(false, Ordering::SeqCst);
-                                                ah_tag.emit("tag-complete", result).ok();
-                                            });
-                                        }
-                                    }
+                                    // v1.5.280 — Auto-tag removed entirely.
+                                    //
+                                    // The watcher used to kick off `run_tagging` whenever new
+                                    // files landed in a folder marked `auto_tag=1`. That
+                                    // surprised the user repeatedly: opening the app caused
+                                    // background tagging they didn't ask for, burning API
+                                    // credits / local-model time without consent. Tagging
+                                    // must always be an explicit "Start tagging" click.
+                                    //
+                                    // The auto_tag column + UI toggle still exist for now
+                                    // (no DB migration headaches), but nothing reads them —
+                                    // they're effectively dead settings.
+                                    let _ = (new_count, &auto_tag_ref, &tag_running_ref, &tag_stop_ref);
                                 }
                             });
                         }

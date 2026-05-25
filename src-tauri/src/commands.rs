@@ -5923,10 +5923,18 @@ pub async fn check_for_updates() -> Result<VersionInfo, String> {
     {
         Ok(resp) if resp.status().is_success() => {
             let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-            let latest = json["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_string();
+            let raw_tag = json["tag_name"].as_str().unwrap_or("");
+            // Only treat the release as a candidate update if the tag looks
+            // like a semver / numeric version (e.g. "1.5.278" or "v1.5.278").
+            // Platform-specific tags such as "vmac-latest" are for a different
+            // build and must be ignored on Windows.
+            let latest = raw_tag.trim_start_matches('v').to_string();
+            let is_version_tag = latest.split('.').count() >= 2
+                && latest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
             let download_url = json["html_url"].as_str().map(|s| s.to_string());
-            let update_available = !latest.is_empty() && latest != current;
-            Ok(VersionInfo { current, latest: Some(latest), update_available, download_url })
+            let update_available = is_version_tag && !latest.is_empty() && latest != current;
+            let latest_opt = if is_version_tag { Some(latest) } else { None };
+            Ok(VersionInfo { current, latest: latest_opt, update_available, download_url })
         }
         _ => Ok(VersionInfo { current, latest: None, update_available: false, download_url: None }),
     }
