@@ -216,6 +216,8 @@ mod lan_bonjour;
 
 pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
+    /// Full path to retina.db — used by move_library to know the source.
+    pub db_path: std::path::PathBuf,
     pub thumbnails_dir: std::path::PathBuf,
     pub scan_running: Arc<AtomicBool>,
     pub scan_stop: Arc<AtomicBool>,
@@ -326,22 +328,20 @@ fn suppress_windows_error_dialogs() {}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     suppress_windows_error_dialogs();
-    // v1.5.274 — Force WebView2 / Chromium to honor the source video's
-    // own color profile instead of dropping HEVC HDR into a flat sRGB
-    // tone-map. User: "Bu videolar neden kendi renginde oynatılmıyor?
-    // hiç bir şeye dokunmaması lazımdı playerın". The default
-    // Chromium video pipeline runs colour-correction that washes out
-    // iPhone HEVC clips on a Windows SDR display. Passing
-    //   --disable-features=ColorCorrectVideos
-    //   --force-color-profile=srgb
-    //   --enable-features=PlatformHEVCDecoderSupport
-    // through WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS keeps the YUV→RGB
-    // matrix faithful to the source while leaving regular rendering
-    // alone. Env-var must be set BEFORE WebView2 boots.
+    // v1.5.277 — One surgical flag, only matches what Chrome already
+    // does. User noticed Chrome plays the same iPhone HEVC clip with
+    // correct colors while WebView2 washes it out. Reason: Chrome
+    // ships with PlatformHEVCDecoderSupport on by default; WebView2
+    // (Microsoft Edge runtime) ships with it OFF, so the HEVC stream
+    // falls back to software decode through a different colour path.
+    //
+    // This is NOT colour management — we still let GPU + display
+    // driver do that. We're only flipping the same decode-path
+    // switch Chrome already has.
     if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--disable-features=ColorCorrectVideos --enable-features=PlatformHEVCDecoderSupport,AcceleratedVideoDecodeLinuxGL --force-color-profile=srgb",
+            "--enable-features=PlatformHEVCDecoderSupport",
         );
     }
     tauri::Builder::default()
@@ -365,38 +365,96 @@ pub fn run() {
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            // Prefer the Roaming AppData path (app_config_dir on Windows ==
-            // %APPDATA%\<identifier>) — that's where pre-1.3 builds wrote the
-            // library, so an existing 200 MB DB is sitting there untouched.
-            // Fall back to the new Local path only if nothing is in Roaming
-            // (i.e. a clean first install on a brand new machine).
+            // v1.5.278 — Configurable library path.
             //
-            // WHY THIS MATTERS: Tauri 2's `app_data_dir()` resolves to
-            // %LOCALAPPDATA% on Windows, but earlier versions of this app
-            // ended up writing to %APPDATA%\Roaming. Blindly calling
-            // `app_data_dir()` on an upgraded install silently points at an
-            // empty new DB while the user's real library (49 k photos,
-            // persons, tags, faces) still lives in Roaming — the app looks
-            // like it lost everything. Checking Roaming first fixes that.
-            let roaming_dir = app.path().app_config_dir().ok();
-            let local_dir = app.path().app_data_dir().ok();
+            // Resolution order (first match wins):
+            //
+            //   1. prefs.json  — user changed the path via Settings → Library.
+            //      File: %APPDATA%\com.retinatag.app\prefs.json
+            //      Key:  {"library_path": "…"}
+            //      Only used if retina.db actually exists there.
+            //
+            //   2. Default location — %USERPROFILE%\Pictures\RetinaTag\
+            //      Hardcoded, discoverable, works for any Windows user.
+            //      On first launch after this upgrade, the existing Roaming
+            //      DB is automatically copied here so nothing is lost.
+            //
+            //   3. Legacy Roaming fallback — for installs that somehow skip
+            //      step 2 (e.g. Pictures dir inaccessible).
+            //
+            // The user can move the DB at any time via Settings → Library →
+            // "Move…"; that copies retina.db + writes prefs.json; the new
+            // path is active on the next launch.
+            let prefs_dir = app.path().app_config_dir().ok();
+
+            // Helper: does a directory contain a non-trivial retina.db?
+            let has_db = |dir: &std::path::Path| -> bool {
+                std::fs::metadata(dir.join("retina.db"))
+                    .map(|m| m.len() > 1024)
+                    .unwrap_or(false)
+            };
 
             let app_data_dir = {
-                let roaming_has_db = roaming_dir.as_ref().is_some_and(|d| {
-                    let db = d.join("retina.db");
-                    std::fs::metadata(&db).map(|m| m.len() > 1024).unwrap_or(false)
+                // 1. User-configured path from prefs.json.
+                let custom = prefs_dir.as_ref().and_then(|d| {
+                    let content = std::fs::read_to_string(d.join("prefs.json")).ok()?;
+                    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+                    let s = v.get("library_path")?.as_str()?.to_string();
+                    let p = std::path::PathBuf::from(&s);
+                    has_db(&p).then_some(p)
                 });
-                if roaming_has_db {
-                    roaming_dir.clone().unwrap()
+
+                if let Some(p) = custom {
+                    eprintln!("[init] library path from prefs: {}", p.display());
+                    p
                 } else {
-                    // No existing Roaming DB — use whichever path is available.
-                    // Prefer Roaming for new installs too, to stay consistent
-                    // with earlier versions and make future upgrades simple.
-                    roaming_dir
-                        .or(local_dir)
-                        .expect("Failed to resolve any app data dir")
+                    // 2. Hardcoded default: Pictures\RetinaTag\.
+                    let default_dir = dirs::picture_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from(
+                            std::env::var("USERPROFILE").unwrap_or_default()
+                        ))
+                        .join("RetinaTag");
+
+                    if has_db(&default_dir) {
+                        eprintln!("[init] library path (default): {}", default_dir.display());
+                        default_dir
+                    } else {
+                        // Not there yet — try to migrate from legacy Roaming.
+                        let roaming = app.path().app_config_dir().ok();
+                        let roaming_has_db = roaming.as_ref()
+                            .is_some_and(|d| has_db(d));
+
+                        if roaming_has_db {
+                            let src = roaming.as_ref().unwrap().join("retina.db");
+                            if let Err(e) = std::fs::create_dir_all(&default_dir) {
+                                eprintln!("[init] create_dir_all {}: {}", default_dir.display(), e);
+                            }
+                            let dst = default_dir.join("retina.db");
+                            match std::fs::copy(&src, &dst) {
+                                Ok(n) => {
+                                    eprintln!(
+                                        "[init] migrated DB {} → {} ({:.1} MB)",
+                                        src.display(), dst.display(),
+                                        n as f64 / 1_048_576.0
+                                    );
+                                    default_dir
+                                }
+                                Err(e) => {
+                                    // Migration failed — fall back to Roaming so the
+                                    // user doesn't lose their library.
+                                    eprintln!("[init] migration failed ({}), using Roaming", e);
+                                    roaming.unwrap()
+                                }
+                            }
+                        } else {
+                            // 3. Fresh install — use the default dir (will be created below).
+                            eprintln!("[init] fresh install, using default: {}", default_dir.display());
+                            default_dir
+                        }
+                    }
                 }
             };
+
             eprintln!("[init] app_data_dir = {}", app_data_dir.display());
             std::fs::create_dir_all(&app_data_dir)?;
 
@@ -493,6 +551,7 @@ pub fn run() {
 
             app.manage(AppState {
                 db: Arc::new(Mutex::new(conn)),
+                db_path: db_path.clone(),
                 thumbnails_dir,
                 scan_running: Arc::new(AtomicBool::new(false)),
                 scan_stop: Arc::new(AtomicBool::new(false)),
@@ -1042,6 +1101,9 @@ pub fn run() {
             commands::open_in_explorer,
             commands::open_file,
             commands::reveal_app_data_dir,
+            // v1.5.278 — Configurable library path
+            commands::get_library_path,
+            commands::move_library,
             // 10. Duplicates
             commands::compute_phashes,
             commands::get_duplicates,

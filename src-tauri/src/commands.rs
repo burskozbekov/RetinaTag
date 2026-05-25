@@ -4845,6 +4845,82 @@ pub async fn reveal_app_data_dir(state: tauri::State<'_, AppState>) -> Result<St
     Ok(s)
 }
 
+// ── v1.5.278 — Library path management ──────────────────────────────────────
+
+/// Returns the folder that contains retina.db (the "library directory").
+/// The frontend uses this to display the current path in Settings → Library.
+#[tauri::command]
+pub fn get_library_path(state: tauri::State<'_, AppState>) -> String {
+    state
+        .db_path
+        .parent()
+        .unwrap_or(&state.db_path)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Move retina.db to a new folder chosen by the user.
+///
+/// Steps:
+///   1. Create the destination directory if it doesn't exist.
+///   2. Copy the current retina.db there.
+///   3. Write %APPDATA%\com.retinatag.app\prefs.json with the new path.
+///   4. Return Ok — the caller should prompt the user to restart.
+///
+/// The old DB is **not** deleted automatically; the user can remove it after
+/// verifying that the new location works.
+#[tauri::command]
+pub async fn move_library(
+    new_dir: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let new_dir_path = std::path::PathBuf::from(&new_dir);
+
+    // Validate: destination must be an absolute path.
+    if !new_dir_path.is_absolute() {
+        return Err("Please choose an absolute path.".into());
+    }
+
+    std::fs::create_dir_all(&new_dir_path)
+        .map_err(|e| format!("Could not create directory: {e}"))?;
+
+    let new_db_path = new_dir_path.join("retina.db");
+    let current_db  = &state.db_path;
+
+    if new_db_path == *current_db {
+        return Err("That is already the current library location.".into());
+    }
+
+    // Copy DB to new location.
+    let size = std::fs::metadata(current_db)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    eprintln!(
+        "[move_library] copying {} → {} ({:.1} MB)",
+        current_db.display(),
+        new_db_path.display(),
+        size as f64 / 1_048_576.0
+    );
+    std::fs::copy(current_db, &new_db_path)
+        .map_err(|e| format!("Copy failed: {e}"))?;
+    eprintln!("[move_library] copy done");
+
+    // Write prefs.json so the next launch uses the new path.
+    let prefs_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Could not resolve config dir: {e}"))?;
+    std::fs::create_dir_all(&prefs_dir)
+        .map_err(|e| format!("Could not create prefs dir: {e}"))?;
+    let prefs_file = prefs_dir.join("prefs.json");
+    let prefs = serde_json::json!({ "library_path": new_dir_path.to_string_lossy() });
+    std::fs::write(&prefs_file, prefs.to_string())
+        .map_err(|e| format!("Could not write prefs: {e}"))?;
+
+    Ok(())
+}
+
 // ── 10. Duplicate Detection ─────────────────────────────────────────────────
 
 /// Compute perceptual hashes for all photos that don't yet have one.

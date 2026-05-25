@@ -2488,6 +2488,20 @@ select.tb-select:focus{border-color:var(--red-dark)}
             <div id="watchFoldersList" style="font-size:12px;color:var(--text3)"></div>
             <div class="form-hint">RetinaTag scans these folders on startup and watches for changes while running.</div>
           </div>
+          <div class="pane-section">
+            <div class="sb-label">Database Location</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+              <input class="form-input" id="libraryPathInput" readonly style="flex:1;font-size:11px;color:var(--text2)" placeholder="Loading…">
+              <button class="btn btn-secondary btn-xs" id="btnMoveLibrary">Move…</button>
+            </div>
+            <div style="font-size:10.5px;color:var(--text3);line-height:1.6">
+              Where <code style="background:var(--bg2);padding:1px 4px;border-radius:3px">retina.db</code> is stored. The database holds all your tags, persons and scan history — <b>not</b> the photos themselves. After moving, restart the app to use the new location.
+            </div>
+            <div id="libraryMoveNotice" style="display:none;margin-top:8px;padding:8px 10px;background:rgba(255,180,0,.08);border:1px solid var(--amber);border-radius:6px;font-size:11.5px;color:var(--amber)">
+              ✅ Database copied to new location. <b>Restart the app</b> to switch.
+              <button class="btn btn-xs btn-primary" style="margin-left:10px" onclick="invoke('app_restart').catch(()=>location.reload())">Restart now</button>
+            </div>
+          </div>
           <div class="pane-section" style="border-bottom:none">
             <div class="sb-label">Device Import (USB / SD)</div>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -11145,6 +11159,27 @@ async function openSettings(){
       };
     }
   }catch(_){}
+  // Library path (v1.5.278)
+  invoke('get_library_path').then(p=>{
+    $('libraryPathInput').value=p||'';
+  }).catch(()=>{$('libraryPathInput').value='(unknown)';});
+  $('libraryMoveNotice').style.display='none';
+  $('btnMoveLibrary').onclick=async()=>{
+    try{
+      const folder=await invoke('open_folder_dialog');
+      if(!folder)return;
+      $('btnMoveLibrary').disabled=true;
+      $('btnMoveLibrary').textContent='Copying…';
+      await invoke('move_library',{newDir:folder});
+      $('libraryPathInput').value=folder;
+      $('libraryMoveNotice').style.display='block';
+    }catch(e){
+      toast('Error moving library: '+String(e),'error');
+    }finally{
+      $('btnMoveLibrary').disabled=false;
+      $('btnMoveLibrary').textContent='Move…';
+    }
+  };
   // Auto-import settings
   const autoImportEnabled=settingsData['auto_import_enabled']==='true';
   const autoImportDir=settingsData['auto_import_dir']||'';
