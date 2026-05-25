@@ -458,12 +458,59 @@ pub fn run() {
             eprintln!("[init] app_data_dir = {}", app_data_dir.display());
             std::fs::create_dir_all(&app_data_dir)?;
 
-            let thumbnails_dir = app_data_dir.join("thumbnails");
-            std::fs::create_dir_all(&thumbnails_dir)?;
-
             let db_path = app_data_dir.join("retina.db");
             let conn = db::init_db(db_path.to_str().unwrap())
                 .expect("Failed to initialize SQLite database");
+
+            // v1.5.281 — Thumbnails ALWAYS live in AppData, never inside the
+            // library directory.  Reason: a watch folder rooted at the
+            // library (e.g. D:\Fotograflar\) recursively scans every subdir,
+            // and if thumbnails/ is one of those subdirs the scanner happily
+            // imports each 256×256 thumbnail as a "new photo".  v1.5.278
+            // accidentally put thumbnails/ inside the library dir, and the
+            // scanner promptly ate 130+ of its own thumbnails as photos.
+            //
+            // Keeping them under %APPDATA%\com.retinatag.app\thumbnails\
+            // is also where pre-1.5.278 builds put them, so this matches
+            // the long-standing path.
+            let thumbnails_root = app
+                .path()
+                .app_config_dir()
+                .or_else(|_| app.path().app_data_dir())
+                .expect("Failed to resolve thumbnails root");
+            std::fs::create_dir_all(&thumbnails_root)?;
+            let thumbnails_dir = thumbnails_root.join("thumbnails");
+            std::fs::create_dir_all(&thumbnails_dir)?;
+            eprintln!("[init] thumbnails_dir = {}", thumbnails_dir.display());
+
+            // v1.5.281 — One-time cleanup of v1.5.278's accidental
+            // "scan-your-own-thumbnails" mess.  Any photos row whose path
+            // points into a *\thumbnails\* segment is a 256×256 thumbnail
+            // that was imported as a photo by mistake.  Wipe those rows
+            // (the actual thumbnail files on disk are harmless and the
+            // surviving photo rows still have valid thumbnail_path entries).
+            {
+                use rusqlite::params;
+                let n: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM photos \
+                         WHERE path LIKE '%\\thumbnails\\%' \
+                            OR path LIKE '%/thumbnails/%'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if n > 0 {
+                    eprintln!("[cleanup] removing {} thumbnail-as-photo rows", n);
+                    let _ = conn.execute(
+                        "DELETE FROM photos \
+                         WHERE path LIKE '%\\thumbnails\\%' \
+                            OR path LIKE '%/thumbnails/%'",
+                        params![],
+                    );
+                    eprintln!("[cleanup] done");
+                }
+            }
 
             // Restore persisted tag-language setting (survives across restarts).
             if let Ok(Some(lang)) = db::get_setting(&conn, "tag_language") {

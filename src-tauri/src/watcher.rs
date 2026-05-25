@@ -167,6 +167,17 @@ fn process_new_files(
             continue;
         }
 
+        // v1.5.281 — Don't import files that live inside a `thumbnails`
+        // directory.  These are almost certainly RetinaTag's own cached
+        // 256×256 thumbnails (or some other app's cache); importing them
+        // as photos is what caused the v1.5.278 mass-pollution incident.
+        let in_thumb_dir = path.components().any(|c| {
+            c.as_os_str().to_string_lossy().eq_ignore_ascii_case("thumbnails")
+        });
+        if in_thumb_dir {
+            continue;
+        }
+
         let hash = match scanner::compute_hash(file_path) {
             Ok(h) => h,
             Err(_) => continue,

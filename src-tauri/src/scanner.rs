@@ -470,10 +470,22 @@ pub async fn scan_folder_impl(
     let folder_clone = folder.clone();
 
     // Collect all media paths (images + RAW + video)
+    //
+    // v1.5.281 — Skip any path that walks through a `thumbnails` segment.
+    // RetinaTag's own thumbnail cache contains 256×256 .jpg files that look
+    // like real photos to the scanner; if it scans its own cache it imports
+    // each thumbnail as a "new" photo (happened to 130 rows in v1.5.278
+    // when the cache landed inside the library dir).  We belt-and-brace it:
+    // even though v1.5.281 moves the cache out of the library, a user could
+    // still point a watch folder at AppData by accident.
     let all_paths: Vec<std::path::PathBuf> = tokio::task::spawn_blocking(move || {
         WalkDir::new(&folder_clone)
             .follow_links(true)
             .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                name != "thumbnails"
+            })
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file() && is_media_file(e.path()))
             .map(|e| e.path().to_path_buf())
