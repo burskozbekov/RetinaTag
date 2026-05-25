@@ -58,10 +58,44 @@ def parse_exif_dt_str(raw):
     except ValueError:
         return None
 
+def _gather_exifread(path):
+    """v1.5.274 — exifread fallback for formats PIL can't open
+    (Sony ARW raws + some TIFFs). Mac's ImageIO + libraw handle these
+    out of the box; PC was leaving them NULL."""
+    try:
+        import exifread
+    except ImportError:
+        return []
+    out = []
+    try:
+        with open(path, 'rb') as f:
+            tags = exifread.process_file(f, details=False)
+        for key in ('EXIF DateTimeOriginal', 'EXIF DateTimeDigitized', 'Image DateTime'):
+            if key in tags:
+                s = str(tags[key]).strip()
+                if len(s) >= 19:
+                    try:
+                        dt = datetime.datetime.strptime(s[:19], '%Y:%m:%d %H:%M:%S')
+                        if not is_placeholder(dt):
+                            out.append((dt, 3))
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    return out
+
+# Extensions PIL refuses but exifread handles — Sony RAW, some TIFFs.
+RAW_EXTS = {'.arw', '.cr2', '.cr3', '.nef', '.dng', '.rw2', '.raf', '.orf'}
+
 def gather_exif(path):
     out = []
     p = Path(path)
-    if p.suffix.lower() not in IMAGE_EXTS: return out
+    suf = p.suffix.lower()
+    # For RAW formats PIL can't open: go straight to exifread.
+    if suf in RAW_EXTS:
+        return _gather_exifread(path)
+    if suf not in IMAGE_EXTS: return out
+    pil_failed = False
     try:
         with Image.open(path) as img:
             exif = img.getexif()
@@ -79,7 +113,12 @@ def gather_exif(path):
                             if dt and not is_placeholder(dt):
                                 out.append((dt, 3))
     except Exception:
-        pass
+        pil_failed = True
+    # v1.5.274 — fallback to exifread when PIL refused the file or
+    # found no date tag. exifread is pure-python and handles TIFFs +
+    # RAWs PIL gives up on.
+    if pil_failed or not out:
+        out.extend(_gather_exifread(path))
     # v1.5.268 — Also scan for EMBEDDED XMP in the JPEG's APP1
     # segment. Mac reads this; PIL's getexif() doesn't surface it.
     # FB exports / Photoshop output / phone cameras stash the real

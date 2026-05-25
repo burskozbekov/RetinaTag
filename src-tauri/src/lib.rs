@@ -326,6 +326,24 @@ fn suppress_windows_error_dialogs() {}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     suppress_windows_error_dialogs();
+    // v1.5.274 — Force WebView2 / Chromium to honor the source video's
+    // own color profile instead of dropping HEVC HDR into a flat sRGB
+    // tone-map. User: "Bu videolar neden kendi renginde oynatılmıyor?
+    // hiç bir şeye dokunmaması lazımdı playerın". The default
+    // Chromium video pipeline runs colour-correction that washes out
+    // iPhone HEVC clips on a Windows SDR display. Passing
+    //   --disable-features=ColorCorrectVideos
+    //   --force-color-profile=srgb
+    //   --enable-features=PlatformHEVCDecoderSupport
+    // through WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS keeps the YUV→RGB
+    // matrix faithful to the source while leaving regular rendering
+    // alone. Env-var must be set BEFORE WebView2 boots.
+    if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--disable-features=ColorCorrectVideos --enable-features=PlatformHEVCDecoderSupport,AcceleratedVideoDecodeLinuxGL --force-color-profile=srgb",
+        );
+    }
     tauri::Builder::default()
         // v1.5.73 — single-instance guard. Second launches (Start menu,
         // tray double-click, file-association open) hand their argv off to
