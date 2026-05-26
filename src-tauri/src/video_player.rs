@@ -47,77 +47,15 @@ pub fn mpv_close() -> Result<(), String> {
     #[cfg(not(target_os = "windows"))] { Ok(()) }
 }
 
-/// v1.5.285 — Open `path` inside an mpv-rendered child window parented
-/// to the Tauri main window, at the given rect (CSS pixels, top-left
-/// origin within the main window's client area).
-#[tauri::command]
-pub fn mpv_show_in_window(
-    app: tauri::AppHandle,
-    path: String,
-    x: i32, y: i32, w: i32, h: i32,
-    muted: Option<bool>,
-) -> Result<(), String> {
-    #[cfg(target_os = "windows")] { imp::mpv_show_in_window(app, path, x, y, w, h, muted.unwrap_or(false)) }
-    #[cfg(not(target_os = "windows"))] {
-        let _ = (app, path, x, y, w, h, muted);
-        Err("libmpv is Windows-only in this build".into())
-    }
-}
-
-/// v1.5.285 — Reposition the active overlay window (called from JS on
-/// window resize/move so the video follows the placeholder div).
-#[tauri::command]
-pub fn mpv_set_rect(
-    app: tauri::AppHandle,
-    x: i32, y: i32, w: i32, h: i32,
-) -> Result<(), String> {
-    #[cfg(target_os = "windows")] { imp::mpv_set_rect(app, x, y, w, h) }
-    #[cfg(not(target_os = "windows"))] {
-        let _ = (app, x, y, w, h);
-        Ok(())
-    }
-}
-
-/// v1.5.285 — Hide the overlay (lightbox closed).  Keeps the player
-/// alive so the next open is fast; pair with `mpv_close` to fully
-/// tear it down.
-#[tauri::command]
-pub fn mpv_hide_overlay() -> Result<(), String> {
-    #[cfg(target_os = "windows")] { imp::mpv_hide_overlay() }
-    #[cfg(not(target_os = "windows"))] { Ok(()) }
-}
-
-/// v1.5.285 — Toggle pause on the active overlay player.
-#[tauri::command]
-pub fn mpv_set_paused(paused: bool) -> Result<(), String> {
-    #[cfg(target_os = "windows")] { imp::mpv_set_paused(paused) }
-    #[cfg(not(target_os = "windows"))] {
-        let _ = paused;
-        Ok(())
-    }
-}
-
-/// Non-command helper: lib.rs's window-event handler calls this when
-/// the main window moves or resizes so the mpv overlay stays glued to
-/// the placeholder div.  No-op on non-Windows.
-pub fn on_main_window_geometry_changed(app: &tauri::AppHandle) {
-    #[cfg(target_os = "windows")] { imp::reposition_after_main_window_event(app); }
-    #[cfg(not(target_os = "windows"))] {
-        let _ = app;
-    }
-}
-
-/// Non-command helper: hide the overlay when the main window is
-/// minimised / loses focus, show it again when it returns.  Without
-/// this the popup would float over other apps when the user Alt+Tabs.
-pub fn set_overlay_visible(visible: bool) {
-    #[cfg(target_os = "windows")] { imp::set_overlay_visible(visible); }
-    #[cfg(not(target_os = "windows"))] {
-        let _ = visible;
-    }
-}
+// v1.5.294 — In-window overlay commands (mpv_show_in_window /
+// mpv_set_rect / mpv_hide_overlay / mpv_set_paused) and the
+// window-event helpers (on_main_window_geometry_changed /
+// set_overlay_visible) are removed from the public Tauri command
+// surface.  Their Rust impl stays in `imp` (marked allow(dead_code))
+// as scaffolding for the future WebGL-canvas inline approach.
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]  // overlay code stays for the future WebGL-canvas approach
 mod imp {
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};

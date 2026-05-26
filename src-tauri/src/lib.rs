@@ -1356,16 +1356,16 @@ pub fn run() {
             commands::lan_request_pair_code,
             commands::lan_list_paired_devices,
             commands::lan_revoke_paired_device,
-            // v1.5.283 — libmpv embed.  Windows-only impls in
-            // src/video_player.rs; non-Windows builds get stubs.
+            // v1.5.283 — libmpv embed.  Only the standalone-window
+            // commands are wired into JS (Settings → Tools → "Test mpv
+            // color"); the in-window overlay commands (mpv_show_in_window
+            // / mpv_set_rect / mpv_hide_overlay / mpv_set_paused) are
+            // unregistered because the lightbox went back to the WebView2
+            // <video> element in v1.5.289 — their code stays in the tree
+            // for the future WebGL-canvas inline approach.
             video_player::mpv_probe,
             video_player::mpv_test_open,
             video_player::mpv_close,
-            // v1.5.285 — in-window overlay
-            video_player::mpv_show_in_window,
-            video_player::mpv_set_rect,
-            video_player::mpv_hide_overlay,
-            video_player::mpv_set_paused,
         ])
         // Intercept window close on the main window. If the `close_to_tray`
         // preference is enabled we hide the window instead of exiting, so the
@@ -1390,23 +1390,10 @@ pub fn run() {
                 }
             }
 
-            // v1.5.286 — Keep the libmpv overlay popup glued to the
-            // main window.  Moved/Resized → reposition.  Focused →
-            // show.  Defocused / minimised → hide.  The popup is
-            // top-level so without this it would float over other
-            // apps when the user Alt+Tabs.
-            if window.label() == "main" {
-                let app = window.app_handle();
-                match event {
-                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                        video_player::on_main_window_geometry_changed(app);
-                    }
-                    tauri::WindowEvent::Focused(focused) => {
-                        video_player::set_overlay_visible(*focused);
-                    }
-                    _ => {}
-                }
-            }
+            // v1.5.294 — Window-event hooks for the libmpv overlay are
+            // removed; the helper fns still exist for future re-wiring
+            // but no longer fire on every window move/resize/focus.
+            // The standalone mpv test window manages its own focus.
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
