@@ -1087,6 +1087,32 @@ pub fn run() {
                 });
             }
 
+            // v1.5.302 — Pre-warm powershell.exe + PresentationCore so the
+            // FIRST HEIC lightbox open after launch isn't paying ~80–150 ms
+            // of cold-start tax (binary load from disk + assembly JIT).
+            // We fire off a no-op PowerShell that touches the assembly,
+            // then exits; Windows keeps powershell.exe + PresentationCore
+            // in the file cache, so the real decode call later hits a
+            // warm path. Detached so app startup doesn't block on it.
+            #[cfg(target_os = "windows")]
+            {
+                tauri::async_runtime::spawn_blocking(|| {
+                    use std::os::windows::process::CommandExt;
+                    use std::process::Stdio;
+                    let _ = std::process::Command::new("powershell.exe")
+                        .args([
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-Command",
+                            "Add-Type -AssemblyName PresentationCore | Out-Null",
+                        ])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                        .status();
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
