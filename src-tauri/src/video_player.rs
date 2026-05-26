@@ -564,20 +564,25 @@ fn overlay() -> &'static Mutex<Overlay> {
     }))
 }
 
-/// Register the window class for the mpv overlay.  Kept around even
-/// though v1.5.286 ships the standalone-window flow — the embed code
-/// path is still wired up via `mpv_show_in_window` for future
-/// experiments.
+/// Register the window class for the mpv overlay.  Background brush
+/// is magenta as a diagnostic — if you see magenta where the video
+/// should be, the overlay WS_CHILD is visible but mpv isn't painting;
+/// if you don't see magenta either, the overlay is occluded or never
+/// created.
 fn ensure_window_class() -> Vec<u16> {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Gdi::CreateSolidBrush;
     static CLASS_NAME: OnceLock<Vec<u16>> = OnceLock::new();
     CLASS_NAME
         .get_or_init(|| {
             let name: Vec<u16> = "RetinaTagMpvOverlay\0".encode_utf16().collect();
+            let magenta = unsafe { CreateSolidBrush(COLORREF(0x00FF00FF)) };
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(overlay_wndproc),
                 lpszClassName: PCWSTR(name.as_ptr()),
+                hbrBackground: magenta,
                 ..Default::default()
             };
             unsafe { RegisterClassExW(&wc) };
@@ -586,47 +591,34 @@ fn ensure_window_class() -> Vec<u16> {
         .clone()
 }
 
-/// Create a top-level borderless popup window that mpv renders into.
+/// Create a WS_CHILD window parented to the Tauri main HWND.
 ///
-/// Why top-level instead of WS_CHILD?  WebView2 uses DirectComposition;
-/// it composes its surface OVER any native child HWNDs underneath, so
-/// a WS_CHILD window parented inside the Tauri main window stays
-/// invisible (audio plays, video doesn't).  A top-level WS_POPUP with
-/// WS_EX_TOOLWINDOW + WS_EX_NOACTIVATE sits in its own DComp swap-chain
-/// above WebView2 — visible, doesn't steal focus, doesn't show in
-/// Alt+Tab.  The caller is responsible for repositioning it whenever
-/// the main window moves or resizes.
-unsafe fn create_overlay_window(x: i32, y: i32, w: i32, h: i32) -> Result<HWND, String> {
+/// v1.5.287 — switched from WS_POPUP top-level back to WS_CHILD now
+/// that the main window is configured with `transparent: true`.  With
+/// that, WebView2 composites with alpha — wherever the HTML paints
+/// transparent pixels, the WS_CHILD HWND BELOW the WebView2 surface
+/// shows through.  This produces a *truly inline* video player: it
+/// follows the window automatically (Windows handles WS_CHILD layout
+/// for us) and lives inside the same window so Alt+Tab / move /
+/// minimise just work.
+unsafe fn create_overlay_window(parent: HWND, x: i32, y: i32, w: i32, h: i32) -> Result<HWND, String> {
     let class_name = ensure_window_class();
     use windows::Win32::Foundation::HINSTANCE;
     use windows::Win32::UI::WindowsAndMessaging::HMENU;
-    let style = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-    let ex_style = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+    let style = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
     let hwnd = CreateWindowExW(
-        ex_style,
+        WINDOW_EX_STYLE(0),
         PCWSTR(class_name.as_ptr()),
         PCWSTR(std::ptr::null()),
         style,
         x, y, w, h,
-        HWND::default(),    // no parent — top-level
+        parent,
         HMENU::default(),
         HINSTANCE::default(),
         None,
     )
     .map_err(|e| format!("CreateWindowExW: {}", e))?;
     Ok(hwnd)
-}
-
-/// Convert (x, y) from the Tauri main window's client coordinates to
-/// screen (desktop) coordinates.  The mpv overlay is a top-level
-/// window so it lives in screen-coord space, but the frontend passes
-/// the placeholder div's getBoundingClientRect — which is client-area
-/// relative.  Doing the conversion in Rust keeps the JS side simple
-/// and immune to title-bar / window-frame size differences.
-unsafe fn client_to_screen(parent: HWND, x: i32, y: i32) -> (i32, i32) {
-    let mut p = POINT { x, y };
-    let _ = ClientToScreen(parent, &mut p);
-    (p.x, p.y)
 }
 
 unsafe fn destroy_child_window(hwnd: HWND) {
@@ -646,36 +638,41 @@ pub fn mpv_show_in_window(
     x: i32, y: i32, w: i32, h: i32,
     muted: bool,
 ) -> Result<(), String> {
+    eprintln!("[mpv] show_in_window: path={} rect=({},{},{},{}) muted={}", path, x, y, w, h, muted);
     let file = std::path::PathBuf::from(&path);
     if !file.exists() {
+        eprintln!("[mpv] file not found: {}", path);
         return Err(format!("file not found: {}", path));
     }
 
     let parent = main_window_hwnd(&app)?;
-    let (sx, sy) = unsafe { client_to_screen(parent, x, y) };
+    eprintln!("[mpv] parent hwnd={:?}", parent.0);
 
     let mut o = overlay().lock().map_err(|_| "overlay lock")?;
     o.last_client_rect = Some((x, y, w, h));
     let child_hwnd = match o.child_hwnd {
         Some(existing) => {
+            eprintln!("[mpv] reusing overlay hwnd={:?}", existing.0);
             unsafe {
-                SetWindowPos(existing, HWND_TOPMOST, sx, sy, w, h, SWP_NOACTIVATE)
+                SetWindowPos(existing, HWND_TOP, x, y, w, h, SWP_NOACTIVATE)
                     .map_err(|e| e.to_string())?;
             }
             existing
         }
         None => {
-            let new_hwnd = unsafe { create_overlay_window(sx, sy, w, h)? };
-            // Ensure first-time creation also lands at topmost Z — without
-            // this the popup sits below WebView2's DComposition surface.
+            let new_hwnd = unsafe { create_overlay_window(parent, x, y, w, h)? };
+            eprintln!("[mpv] created overlay hwnd={:?}", new_hwnd.0);
+            // Bring the child above WebView2 in the parent's Z-order so
+            // it isn't immediately occluded.
             unsafe {
-                let _ = SetWindowPos(new_hwnd, HWND_TOPMOST, sx, sy, w, h, SWP_NOACTIVATE);
+                let _ = SetWindowPos(new_hwnd, HWND_TOP, x, y, w, h, SWP_NOACTIVATE);
             }
             o.child_hwnd = Some(new_hwnd);
             new_hwnd
         }
     };
     unsafe { let _ = ShowWindow(child_hwnd, SW_SHOWNOACTIVATE); }
+    eprintln!("[mpv] overlay shown");
 
     {
         let mut slot = global().lock().map_err(|_| "global lock")?;
@@ -696,35 +693,28 @@ pub fn mpv_show_in_window(
     Ok(())
 }
 
-pub fn mpv_set_rect(app: tauri::AppHandle, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+pub fn mpv_set_rect(_app: tauri::AppHandle, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
     let mut o = overlay().lock().map_err(|_| "overlay lock")?;
     let Some(child) = o.child_hwnd else { return Ok(()) };
     o.last_client_rect = Some((x, y, w, h));
-    let parent = main_window_hwnd(&app)?;
-    let (sx, sy) = unsafe { client_to_screen(parent, x, y) };
     unsafe {
-        SetWindowPos(child, HWND_TOPMOST, sx, sy, w, h, SWP_NOACTIVATE)
+        SetWindowPos(child, HWND_TOP, x, y, w, h, SWP_NOACTIVATE)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 /// Called by lib.rs from `on_window_event` when the main window moves
-/// or resizes.  Re-applies the cached client-area rect — the screen
-/// coords change implicitly because `ClientToScreen` queries the
-/// window's current position.
-///
-/// No-ops when the overlay isn't active or no rect has been set yet.
-pub fn reposition_after_main_window_event(app: &tauri::AppHandle) {
-    let o = overlay().lock();
-    let Ok(o) = o else { return; };
-    let Some(child) = o.child_hwnd else { return; };
-    let Some((x, y, w, h)) = o.last_client_rect else { return; };
-    let Ok(parent) = main_window_hwnd(app) else { return; };
-    let (sx, sy) = unsafe { client_to_screen(parent, x, y) };
-    unsafe {
-        let _ = SetWindowPos(child, HWND_TOPMOST, sx, sy, w, h, SWP_NOACTIVATE);
-    }
+/// or resizes.  WS_CHILD windows are repositioned automatically by
+/// the OS when the parent moves — but Resized events can still
+/// change layout that the frontend hasn't re-measured yet.  This
+/// no-op preserves the API hook so lib.rs's event handler doesn't
+/// need to be re-wired for the WS_CHILD switch.
+pub fn reposition_after_main_window_event(_app: &tauri::AppHandle) {
+    // WS_CHILD: positioning happens inside the parent's client area
+    // and follows the parent automatically.  JS calls mpv_set_rect
+    // explicitly when the user-visible rect inside the lightbox
+    // needs to change.
 }
 
 /// Hide / show the overlay window without destroying it.  Used by the

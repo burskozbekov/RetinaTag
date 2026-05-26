@@ -15392,29 +15392,112 @@ async function openLightbox(photoId) {
 
     if (useMpv) {
       try {
-        // Vault videos still need decryption.
         let playablePath = photo.path;
         if (typeof photo.path === 'string' && photo.path.toLowerCase().endsWith('.rtenc')) {
           playablePath = await invoke('vault_decrypt_to_temp', { photoId: id });
         }
-        // Hide the WebView2 video element (we're using mpv instead).
+        // v1.5.287 — Inline mpv overlay with proper backdrop framing.
+        //
+        // For mpv's WS_CHILD HWND to be visible, the WebView2 surface
+        // above it MUST be transparent in that area — so we punch a
+        // hole in the page by making document.body transparent.  But
+        // raw transparency would expose whatever app is behind the
+        // Tauri window, so we frame the video with 4 opaque backdrop
+        // <div> strips (top / bottom / left / right of the video rect)
+        // that cover everything except the central video hole.  The
+        // lightbox controls (close, ←, →, info, counter) sit on top
+        // of those backdrop strips and stay fully visible.
         videoEl.removeAttribute('src');
         try { videoEl.pause(); } catch(_) {}
         videoEl.style.display = 'none';
         spinner.style.display = 'none';
         playBtn.style.display = 'none';
-        await invoke('mpv_test_open', { path: playablePath });
-        // Visual reminder inside the lightbox that the actual video is
-        // in the separate mpv window — otherwise the dark middle area
-        // is mysteriously empty.
-        const cap = document.getElementById('lbCaption');
-        if (cap) {
-          const fn = (photo.filename) || (photo.path||'').split(/[\\/]/).pop() || '';
-          cap.textContent = fn + '  ·  playing in mpv window →';
+
+        // Stash original styles for clean restore on close.
+        if (!window._mpvStashedBg) {
+          window._mpvStashedBg = {
+            body:  document.body.style.background,
+            html:  document.documentElement.style.background,
+            lightbox: document.getElementById('lightbox').style.background,
+            appDisp: document.getElementById('app')?.style.display ?? '',
+          };
         }
-        return;  // skip the legacy <video> path entirely
+        // Punch the hole.
+        document.documentElement.style.background = 'transparent';
+        document.body.style.background = 'transparent';
+        const lbEl = document.getElementById('lightbox');
+        lbEl.style.background = 'transparent';
+        const appEl = document.getElementById('app');
+        if (appEl) appEl.style.display = 'none';
+
+        // Build / refresh 4 backdrop strips that frame the video.
+        const margin = 60;
+        const ensureStrip = (id) => {
+          let el = document.getElementById(id);
+          if (!el) {
+            el = document.createElement('div');
+            el.id = id;
+            el.style.cssText = 'position:fixed;background:rgba(0,0,0,.96);z-index:9999;pointer-events:none';
+            document.body.appendChild(el);
+          }
+          return el;
+        };
+        const layoutStrips = () => {
+          const vw = document.documentElement.clientWidth;
+          const vh = document.documentElement.clientHeight;
+          const t = ensureStrip('mpvBdTop');
+          t.style.left = '0'; t.style.top = '0';
+          t.style.width = vw + 'px'; t.style.height = margin + 'px';
+          const b = ensureStrip('mpvBdBottom');
+          b.style.left = '0'; b.style.top = (vh - margin) + 'px';
+          b.style.width = vw + 'px'; b.style.height = margin + 'px';
+          const l = ensureStrip('mpvBdLeft');
+          l.style.left = '0'; l.style.top = margin + 'px';
+          l.style.width = margin + 'px'; l.style.height = (vh - 2 * margin) + 'px';
+          const r = ensureStrip('mpvBdRight');
+          r.style.left = (vw - margin) + 'px'; r.style.top = margin + 'px';
+          r.style.width = margin + 'px'; r.style.height = (vh - 2 * margin) + 'px';
+        };
+        layoutStrips();
+
+        // Compute the video rect (in physical pixels for the HWND) and
+        // ask the backend to open the player there.
+        await new Promise(r => requestAnimationFrame(r));
+        const dpr = window.devicePixelRatio || 1;
+        const vpW = document.documentElement.clientWidth;
+        const vpH = document.documentElement.clientHeight;
+        const rect = {
+          x: Math.round(margin * dpr),
+          y: Math.round(margin * dpr),
+          w: Math.round((vpW - 2 * margin) * dpr),
+          h: Math.round((vpH - 2 * margin) * dpr),
+        };
+        await invoke('mpv_show_in_window', {
+          path: playablePath,
+          x: rect.x, y: rect.y, w: rect.w, h: rect.h,
+          muted: false,
+        });
+
+        // Track resizes — both the HWND and the backdrop strips need
+        // to follow the new layout.
+        if (!window._mpvResizeHandler) {
+          window._mpvResizeHandler = () => {
+            layoutStrips();
+            const d2 = window.devicePixelRatio || 1;
+            const w2 = document.documentElement.clientWidth;
+            const h2 = document.documentElement.clientHeight;
+            invoke('mpv_set_rect', {
+              x: Math.round(margin * d2),
+              y: Math.round(margin * d2),
+              w: Math.round((w2 - 2 * margin) * d2),
+              h: Math.round((h2 - 2 * margin) * d2),
+            }).catch(()=>{});
+          };
+          window.addEventListener('resize', window._mpvResizeHandler);
+        }
+        return;
       } catch (e) {
-        console.warn('[mpv] standalone open failed, falling back to <video>:', e);
+        console.warn('[mpv] inline failed, falling back to <video>:', e);
         window._mpvAvail = false;
         videoEl.style.display = '';
       }
@@ -17594,11 +17677,27 @@ function closeLightbox() {
   // strings sitting in JS heap is fine while the lightbox is open, but
   // there's no reason to hold them once the user is back in the grid.
   try { _lbCacheClear(); } catch(_) {}
-  // v1.5.286 — Close the standalone mpv window if one's open.
-  // mpv_close terminates the active player and destroys its native
-  // window so the user doesn't end up with a stray video playing
-  // after they've returned to the gallery.
+  // v1.5.287 — Tear down inline mpv overlay and restore the document
+  // backgrounds so the next gallery / non-video open looks normal.
   try { invoke('mpv_close'); } catch(_) {}
+  if (window._mpvResizeHandler) {
+    window.removeEventListener('resize', window._mpvResizeHandler);
+    window._mpvResizeHandler = null;
+  }
+  // Remove the 4 backdrop strips.
+  for (const sid of ['mpvBdTop', 'mpvBdBottom', 'mpvBdLeft', 'mpvBdRight']) {
+    const el = document.getElementById(sid);
+    if (el) el.remove();
+  }
+  if (window._mpvStashedBg) {
+    document.documentElement.style.background = window._mpvStashedBg.html;
+    document.body.style.background           = window._mpvStashedBg.body;
+    const lbEl = document.getElementById('lightbox');
+    if (lbEl) lbEl.style.background = window._mpvStashedBg.lightbox;
+    const appEl = document.getElementById('app');
+    if (appEl) appEl.style.display = window._mpvStashedBg.appDisp;
+    window._mpvStashedBg = null;
+  }
   // Restore the <video> element's visibility so the legacy path still
   // works on the next open if mpv is unavailable.
   try {
