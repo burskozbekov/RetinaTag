@@ -4863,8 +4863,16 @@ pub async fn extract_all_gps(
 pub async fn get_cost_dashboard(
     state: tauri::State<'_, AppState>,
 ) -> Result<CostDashboard, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_cost_dashboard(&conn).map_err(|e| e.to_string())
+    // v1.5.309 — spawn_blocking.  Aggregates over usage_log table,
+    // which on a long-running install can be 5–20 k rows.  Keep the
+    // runtime free while the Cost tab renders.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_cost_dashboard(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 9. Right-click → Open in Explorer ───────────────────────────────────────
