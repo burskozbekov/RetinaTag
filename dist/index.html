@@ -874,6 +874,12 @@ select.tb-select:focus{border-color:var(--red-dark)}
 /* ── Media badges ─────────────────────────────────────────────────── */
 .media-badge{position:absolute;top:6px;left:6px;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:800;z-index:2;pointer-events:none}
 .media-badge.video{background:rgba(0,0,0,.7);color:#fff}
+/* v1.5.290 — kill Chromium's default focus outline on <video>; on dark
+   backgrounds it shows up as the thin white frame the user complained
+   about.  We programmatically focus the player so Space → toggle works
+   without going through our JS handler. */
+#lbVideo{outline:none!important;border:none!important;box-shadow:none!important}
+#lbVideo:focus,#lbVideo:focus-visible{outline:none!important}
 .media-badge.raw{background:rgba(184,58,18,.8);color:var(--cream)}
 
 /* ── Rating & Favorites ──────────────────────────────────────────── */
@@ -1480,7 +1486,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <!-- Image / video — width clamped so the right toolbar (~80 px) stays
        outside the picture instead of floating over it. -->
   <img id="lbImg" src="" style="width:calc(95vw - 80px);height:95vh;max-width:calc(95vw - 80px);max-height:95vh;object-fit:contain;border-radius:4px;display:block;transition:transform .15s ease-out;transform-origin:center center;cursor:default" alt="" oncontextmenu="event.preventDefault(); event.stopPropagation(); if (window._lbCurrentPhoto) { showCtxMenu(event, window._lbCurrentPhoto.id, window._lbCurrentPhoto.path); } return false;">
-  <video id="lbVideo" controls preload="metadata" style="width:calc(95vw - 80px);height:95vh;max-width:calc(95vw - 80px);max-height:95vh;object-fit:contain;border-radius:4px;display:none;background:#000" onclick="event.stopPropagation()"></video>
+  <video id="lbVideo" controls preload="metadata" tabindex="-1" style="width:calc(95vw - 80px);height:95vh;max-width:calc(95vw - 80px);max-height:95vh;object-fit:contain;border-radius:4px;display:none;background:#000;outline:none;border:none" onclick="event.stopPropagation()"></video>
   <button onclick="lbNav(1)" style="position:absolute;right:74px;top:50%;transform:translateY(-50%);width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:28px;cursor:pointer;line-height:1;z-index:5">&#8250;</button>
   <div id="lbCounter" style="position:absolute;bottom:18px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.6);font-size:13px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:4px;z-index:5"><span id="lbCounterText"></span><div id="lbProgress" title="Click to jump · drag to scrub" style="width:160px;height:6px;padding:2px 0;background:transparent;border-radius:3px;cursor:pointer;position:relative"><div style="position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:2px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden"><div id="lbProgressFill" style="height:100%;width:0;background:rgba(255,255,255,.55);transition:width .18s ease"></div></div><div id="lbProgressHint" style="display:none;position:absolute;bottom:16px;left:0;transform:translateX(-50%);padding:3px 7px;background:rgba(0,0,0,.75);color:rgba(255,255,255,.95);font-size:10px;font-weight:600;border-radius:4px;pointer-events:none;white-space:nowrap;font-variant-numeric:tabular-nums"></div></div></div>
   <!-- v1.4.88 — zoom-% badge at bottom-right. Shown only when zoom is not 1×
@@ -12357,16 +12363,18 @@ document.addEventListener('keydown',e=>{
     if(e.key==='ArrowRight'){lbNav(e.shiftKey?10:1);e.preventDefault()}
     if(e.key==='ArrowLeft'){lbNav(e.shiftKey?-10:-1);e.preventDefault()}
     if(e.key===' '){
-      // v1.5.115 — When a video is loaded, Space toggles play/pause
-      // (the universal HTML5-video shortcut) instead of slideshow.
-      // Slideshow over a video would silently cut it off mid-playback
-      // anyway, so this is also the safer default. Falls through to
-      // toggleSlideshow() only for image/RAW photos.
+      // v1.5.290 — When a video is loaded, let the BROWSER's native
+      // Space handler toggle play/pause.  The old code called
+      // _vid.play()/pause() manually then preventDefault(), but the
+      // play() promise hadn't settled by the time the browser ran its
+      // own keyboard default, so Space caused a visible double-toggle
+      // (pause→play→pause again) — what the user saw as "constantly
+      // in pause state".  Now we just no-op the JS handler for video
+      // and let WebView2 do its thing; only fall through to
+      // toggleSlideshow for image/RAW photos.
       const _vid = document.getElementById('lbVideo');
       if (_vid && _vid.style.display !== 'none' && _vid.currentSrc) {
-        if (_vid.paused) { _vid.play().catch(()=>{}); } else { _vid.pause(); }
-        e.preventDefault();
-        return;
+        return; // browser handles Space → play/pause
       }
       toggleSlideshow();
       e.preventDefault();
@@ -15442,6 +15450,12 @@ async function openLightbox(photoId) {
       try { videoEl.load(); } catch(_) {}
       videoEl.src = assetUrl;
       videoEl.currentTime = 0;
+      // v1.5.290 — Focus the video element so Space / ←/→ keyboard
+      // shortcuts go to it natively.  Without explicit focus, the
+      // event target stays on body and Space hits the document
+      // keydown handler (which deliberately no-ops for video to
+      // avoid the v1.5.289 double-toggle race).
+      setTimeout(() => { try { videoEl.focus({ preventScroll: true }); } catch(_) {} }, 50);
       // v1.5.181 — One-time error handler. Without it, an unsupported
       // codec / disk read failure inside WebView2's media stack would
       // fire MEDIA_ERR_DECODE / MEDIA_ERR_SRC_NOT_SUPPORTED, the element
