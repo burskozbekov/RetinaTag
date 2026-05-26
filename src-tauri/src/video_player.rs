@@ -65,12 +65,15 @@ pub fn mpv_show_in_window(
 }
 
 /// v1.5.285 — Reposition the active overlay window (called from JS on
-/// window resize so the video follows the placeholder div).
+/// window resize/move so the video follows the placeholder div).
 #[tauri::command]
-pub fn mpv_set_rect(x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
-    #[cfg(target_os = "windows")] { imp::mpv_set_rect(x, y, w, h) }
+pub fn mpv_set_rect(
+    app: tauri::AppHandle,
+    x: i32, y: i32, w: i32, h: i32,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")] { imp::mpv_set_rect(app, x, y, w, h) }
     #[cfg(not(target_os = "windows"))] {
-        let _ = (x, y, w, h);
+        let _ = (app, x, y, w, h);
         Ok(())
     }
 }
@@ -91,6 +94,26 @@ pub fn mpv_set_paused(paused: bool) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))] {
         let _ = paused;
         Ok(())
+    }
+}
+
+/// Non-command helper: lib.rs's window-event handler calls this when
+/// the main window moves or resizes so the mpv overlay stays glued to
+/// the placeholder div.  No-op on non-Windows.
+pub fn on_main_window_geometry_changed(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")] { imp::reposition_after_main_window_event(app); }
+    #[cfg(not(target_os = "windows"))] {
+        let _ = app;
+    }
+}
+
+/// Non-command helper: hide the overlay when the main window is
+/// minimised / loses focus, show it again when it returns.  Without
+/// this the popup would float over other apps when the user Alt+Tabs.
+pub fn set_overlay_visible(visible: bool) {
+    #[cfg(target_os = "windows")] { imp::set_overlay_visible(visible); }
+    #[cfg(not(target_os = "windows"))] {
+        let _ = visible;
     }
 }
 
@@ -240,7 +263,15 @@ unsafe impl Sync for MpvPlayer {}
 impl MpvPlayer {
     /// Create + initialise an mpv context.  Sets the colour-accurate
     /// config (gpu-next, libplacebo tone-map, etc.).
-    pub fn new() -> Result<Self, String> {
+    ///
+    /// If `parent_hwnd` is `Some`, mpv is told to render into that
+    /// window via the `wid` option.  This option MUST be applied
+    /// **before** `mpv_initialize`, otherwise mpv creates its own
+    /// top-level video output window and the embed silently fails
+    /// (audio still plays — the user-visible "no video" symptom).
+    /// `None` is for the standalone test where mpv may create its own
+    /// window via `force-window=yes`.
+    pub fn new(parent_hwnd: Option<isize>) -> Result<Self, String> {
         let a = api()?;
         let handle = unsafe { (a.create)() };
         if handle.is_null() {
@@ -252,6 +283,26 @@ impl MpvPlayer {
         // Quiet on stderr unless something blows up.
         me.set_option_str("msg-level", "all=warn")?;
         me.set_option_str("terminal", "no")?;
+
+        // v1.5.286 — wid MUST be set before mpv_initialize, or mpv
+        // creates its own window and renders there instead of the
+        // parent.  See mpv issue #10189 for the u32 cast workaround.
+        if let Some(hwnd) = parent_hwnd {
+            let wid_u32: u32 = hwnd as u32;
+            let mut wid_i64: i64 = wid_u32 as i64;
+            let name = CString::new("wid").unwrap();
+            let r = unsafe {
+                (a.set_option)(
+                    me.handle,
+                    name.as_ptr(),
+                    MPV_FORMAT_INT64,
+                    &mut wid_i64 as *mut _ as *mut c_void,
+                )
+            };
+            if r < 0 {
+                return Err(format!("set_option wid: {}", api_err(a, r)));
+            }
+        }
 
         // v1.5.283 — Colour-accurate config tuned for iPhone HEVC + HDR.
         //   • vo=gpu-next     — libplacebo renderer (Vulkan/D3D11)
@@ -288,30 +339,6 @@ impl MpvPlayer {
             return Err(format!("mpv_initialize: {}", api_err(a, r)));
         }
         Ok(me)
-    }
-
-    /// Reparent mpv into the given HWND.  Must be called BEFORE the
-    /// first `load_file` (mpv attaches its renderer to the parent
-    /// window when it creates its first frame).
-    pub fn set_parent_hwnd(&self, hwnd: isize) -> Result<(), String> {
-        // libmpv reads `wid` as int64.  We pass through u32 first to
-        // avoid sign-extension issues on 64-bit HWNDs (mpv issue #10189).
-        let wid_u32: u32 = hwnd as u32;
-        let mut wid_i64: i64 = wid_u32 as i64;
-        let a = api()?;
-        let name = CString::new("wid").unwrap();
-        let r = unsafe {
-            (a.set_option)(
-                self.handle,
-                name.as_ptr(),
-                MPV_FORMAT_INT64,
-                &mut wid_i64 as *mut _ as *mut c_void,
-            )
-        };
-        if r < 0 {
-            return Err(format!("set_option wid: {}", api_err(a, r)));
-        }
-        Ok(())
     }
 
     pub fn load_file(&self, path: &Path) -> Result<(), String> {
@@ -448,9 +475,9 @@ pub fn mpv_test_open(path: String) -> Result<String, String> {
         *slot = None;
     }
 
-    let player = MpvPlayer::new()?;
-    // Standalone window — no parent HWND set.  mpv will create its own
+    // Standalone window — no parent HWND.  mpv creates its own
     // top-level window with the colour-accurate renderer.
+    let player = MpvPlayer::new(None)?;
     player.set_option_str("force-window", "yes")?;
     player.set_option_str("title", &format!("RetinaTag (mpv test) — {}", p.file_name().unwrap_or_default().to_string_lossy()))?;
     player.load_file(&p)?;
@@ -494,12 +521,14 @@ pub fn mpv_close() -> Result<(), String> {
 // (close button, ←/→ arrows) sit OUTSIDE the placeholder rect, so the
 // mpv overlay doesn't cover them.
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, SetWindowPos,
-    ShowWindow, CS_HREDRAW, CS_VREDRAW, HWND_TOP, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOZORDER, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_VISIBLE,
+    ShowWindow, CS_HREDRAW, CS_VREDRAW, HWND_TOP, HWND_TOPMOST, SW_HIDE,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_POPUP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -516,6 +545,11 @@ struct Overlay {
     child_hwnd: Option<HWND>,
     /// Whether an mpv player is currently bound to `child_hwnd`.
     player_active: bool,
+    /// Last placeholder rect in *main window client coordinates*.
+    /// Cached so `reposition_after_main_window_event` can re-derive
+    /// the screen-space rect when the main window moves/resizes
+    /// without needing a roundtrip to JS.
+    last_client_rect: Option<(i32, i32, i32, i32)>,
 }
 
 unsafe impl Send for Overlay {}
@@ -523,11 +557,17 @@ unsafe impl Send for Overlay {}
 static OVERLAY: OnceLock<Mutex<Overlay>> = OnceLock::new();
 
 fn overlay() -> &'static Mutex<Overlay> {
-    OVERLAY.get_or_init(|| Mutex::new(Overlay { child_hwnd: None, player_active: false }))
+    OVERLAY.get_or_init(|| Mutex::new(Overlay {
+        child_hwnd: None,
+        player_active: false,
+        last_client_rect: None,
+    }))
 }
 
-/// Register the window class for the mpv overlay.  Idempotent — we
-/// stash the class name once and reuse it.
+/// Register the window class for the mpv overlay.  Kept around even
+/// though v1.5.286 ships the standalone-window flow — the embed code
+/// path is still wired up via `mpv_show_in_window` for future
+/// experiments.
 fn ensure_window_class() -> Vec<u16> {
     static CLASS_NAME: OnceLock<Vec<u16>> = OnceLock::new();
     CLASS_NAME
@@ -546,26 +586,47 @@ fn ensure_window_class() -> Vec<u16> {
         .clone()
 }
 
-unsafe fn create_child_window(parent: HWND, x: i32, y: i32, w: i32, h: i32) -> Result<HWND, String> {
+/// Create a top-level borderless popup window that mpv renders into.
+///
+/// Why top-level instead of WS_CHILD?  WebView2 uses DirectComposition;
+/// it composes its surface OVER any native child HWNDs underneath, so
+/// a WS_CHILD window parented inside the Tauri main window stays
+/// invisible (audio plays, video doesn't).  A top-level WS_POPUP with
+/// WS_EX_TOOLWINDOW + WS_EX_NOACTIVATE sits in its own DComp swap-chain
+/// above WebView2 — visible, doesn't steal focus, doesn't show in
+/// Alt+Tab.  The caller is responsible for repositioning it whenever
+/// the main window moves or resizes.
+unsafe fn create_overlay_window(x: i32, y: i32, w: i32, h: i32) -> Result<HWND, String> {
     let class_name = ensure_window_class();
-    let style = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-    // windows-rs 0.58: parent/hmenu/hinstance are now passed unwrapped
-    // (Param<HWND> etc.).  Pass HWND::default() / etc. for "none".
     use windows::Win32::Foundation::HINSTANCE;
     use windows::Win32::UI::WindowsAndMessaging::HMENU;
+    let style = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+    let ex_style = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
     let hwnd = CreateWindowExW(
-        WINDOW_EX_STYLE(0),
+        ex_style,
         PCWSTR(class_name.as_ptr()),
         PCWSTR(std::ptr::null()),
         style,
         x, y, w, h,
-        parent,
+        HWND::default(),    // no parent — top-level
         HMENU::default(),
         HINSTANCE::default(),
         None,
     )
     .map_err(|e| format!("CreateWindowExW: {}", e))?;
     Ok(hwnd)
+}
+
+/// Convert (x, y) from the Tauri main window's client coordinates to
+/// screen (desktop) coordinates.  The mpv overlay is a top-level
+/// window so it lives in screen-coord space, but the frontend passes
+/// the placeholder div's getBoundingClientRect — which is client-area
+/// relative.  Doing the conversion in Rust keeps the JS side simple
+/// and immune to title-bar / window-frame size differences.
+unsafe fn client_to_screen(parent: HWND, x: i32, y: i32) -> (i32, i32) {
+    let mut p = POINT { x, y };
+    let _ = ClientToScreen(parent, &mut p);
+    (p.x, p.y)
 }
 
 unsafe fn destroy_child_window(hwnd: HWND) {
@@ -591,37 +652,37 @@ pub fn mpv_show_in_window(
     }
 
     let parent = main_window_hwnd(&app)?;
+    let (sx, sy) = unsafe { client_to_screen(parent, x, y) };
 
-    // 1. Make sure we have a child HWND at the given rect.
     let mut o = overlay().lock().map_err(|_| "overlay lock")?;
+    o.last_client_rect = Some((x, y, w, h));
     let child_hwnd = match o.child_hwnd {
         Some(existing) => {
             unsafe {
-                SetWindowPos(existing, HWND_TOP, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+                SetWindowPos(existing, HWND_TOPMOST, sx, sy, w, h, SWP_NOACTIVATE)
                     .map_err(|e| e.to_string())?;
             }
             existing
         }
         None => {
-            let new_hwnd = unsafe { create_child_window(parent, x, y, w, h)? };
+            let new_hwnd = unsafe { create_overlay_window(sx, sy, w, h)? };
+            // Ensure first-time creation also lands at topmost Z — without
+            // this the popup sits below WebView2's DComposition surface.
+            unsafe {
+                let _ = SetWindowPos(new_hwnd, HWND_TOPMOST, sx, sy, w, h, SWP_NOACTIVATE);
+            }
             o.child_hwnd = Some(new_hwnd);
             new_hwnd
         }
     };
-    unsafe { let _ = ShowWindow(child_hwnd, SW_SHOW); }
+    unsafe { let _ = ShowWindow(child_hwnd, SW_SHOWNOACTIVATE); }
 
-    // 2. Tear down any previous player so we get a fresh context bound
-    //    to this HWND.  mpv only binds `wid` once at initialise time;
-    //    re-using the player for a different file is fine but for the
-    //    first version we re-create per open for simplicity.
     {
         let mut slot = global().lock().map_err(|_| "global lock")?;
         *slot = None;
     }
 
-    let player = MpvPlayer::new()?;
-    player.set_parent_hwnd(child_hwnd.0 as isize)?;
-    player.set_option_str("force-window", "no")?;  // child window is provided
+    let player = MpvPlayer::new(Some(child_hwnd.0 as isize))?;
     if muted {
         player.set_muted(true)?;
     }
@@ -635,14 +696,46 @@ pub fn mpv_show_in_window(
     Ok(())
 }
 
-pub fn mpv_set_rect(x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
-    let o = overlay().lock().map_err(|_| "overlay lock")?;
+pub fn mpv_set_rect(app: tauri::AppHandle, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+    let mut o = overlay().lock().map_err(|_| "overlay lock")?;
     let Some(child) = o.child_hwnd else { return Ok(()) };
+    o.last_client_rect = Some((x, y, w, h));
+    let parent = main_window_hwnd(&app)?;
+    let (sx, sy) = unsafe { client_to_screen(parent, x, y) };
     unsafe {
-        SetWindowPos(child, HWND_TOP, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+        SetWindowPos(child, HWND_TOPMOST, sx, sy, w, h, SWP_NOACTIVATE)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Called by lib.rs from `on_window_event` when the main window moves
+/// or resizes.  Re-applies the cached client-area rect — the screen
+/// coords change implicitly because `ClientToScreen` queries the
+/// window's current position.
+///
+/// No-ops when the overlay isn't active or no rect has been set yet.
+pub fn reposition_after_main_window_event(app: &tauri::AppHandle) {
+    let o = overlay().lock();
+    let Ok(o) = o else { return; };
+    let Some(child) = o.child_hwnd else { return; };
+    let Some((x, y, w, h)) = o.last_client_rect else { return; };
+    let Ok(parent) = main_window_hwnd(app) else { return; };
+    let (sx, sy) = unsafe { client_to_screen(parent, x, y) };
+    unsafe {
+        let _ = SetWindowPos(child, HWND_TOPMOST, sx, sy, w, h, SWP_NOACTIVATE);
+    }
+}
+
+/// Hide / show the overlay window without destroying it.  Used by the
+/// window-event handler when the main window is minimised / loses
+/// focus — the popup is top-level so without this it would keep
+/// floating over the desktop / other apps.
+pub fn set_overlay_visible(visible: bool) {
+    let Ok(o) = overlay().lock() else { return; };
+    let Some(child) = o.child_hwnd else { return; };
+    let cmd = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
+    unsafe { let _ = ShowWindow(child, cmd); }
 }
 
 pub fn mpv_hide_overlay() -> Result<(), String> {

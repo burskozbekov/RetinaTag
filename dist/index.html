@@ -15372,15 +15372,16 @@ async function openLightbox(photoId) {
   }
 
   if (isVideo) {
-    // v1.5.285 — mpv-backed overlay path.  WebView2's HEVC HDR
-    // pipeline produces washed-out colours for iPhone Dolby Vision
-    // content; libmpv (libavcodec + libplacebo) renders them with
-    // VLC/Photos.app-grade accuracy.  We hide the <video> element,
-    // use it just as a layout placeholder, and ask the backend to
-    // attach a child HWND there with mpv rendering into it.
+    // v1.5.286 — Videos play through libmpv in a *separate* native
+    // window for VLC-grade colour accuracy.  The embedded-overlay
+    // approach (mpv painting into a child HWND positioned over a
+    // WebView2 placeholder) keeps losing the visibility / Z-order
+    // fight with Chromium's DirectComposition surface; shipping the
+    // standalone-window flow gets the user correct iPhone HEVC HDR
+    // colours tonight while we iterate on inline embedding later.
     //
-    // Fallback: if mpv isn't available (DLL missing, probe failed) we
-    // fall through to the legacy <video> path below.
+    // Fallback: if mpv isn't available (DLL missing, probe failed)
+    // we fall through to the legacy WebView2 <video> path below.
     const videoEl = document.getElementById('lbVideo');
     const useMpv = await (async () => {
       if (window._mpvAvail === false) return false;
@@ -15391,56 +15392,31 @@ async function openLightbox(photoId) {
 
     if (useMpv) {
       try {
-        // Vault videos still need decryption; mpv reads the plaintext
-        // temp file the same way the <video> element would.
+        // Vault videos still need decryption.
         let playablePath = photo.path;
         if (typeof photo.path === 'string' && photo.path.toLowerCase().endsWith('.rtenc')) {
           playablePath = await invoke('vault_decrypt_to_temp', { photoId: id });
         }
-        // Layout the placeholder where the <video> would have been so
-        // the close/arrow buttons keep their familiar positions.  We
-        // make it transparent and let mpv's child HWND paint on top.
+        // Hide the WebView2 video element (we're using mpv instead).
         videoEl.removeAttribute('src');
         try { videoEl.pause(); } catch(_) {}
-        videoEl.style.display = 'block';
-        videoEl.style.background = 'transparent';
-        videoEl.style.visibility = 'hidden';  // hide WebView2's render; mpv paints over
-        // Wait one frame so the element has its final layout rect.
-        await new Promise(r => requestAnimationFrame(r));
-        const r = videoEl.getBoundingClientRect();
-        // Convert CSS pixels → HWND pixels via devicePixelRatio so
-        // 125%/150%/175% scaled displays still align.
-        const dpr = window.devicePixelRatio || 1;
-        const rect = {
-          x: Math.round(r.left * dpr),
-          y: Math.round(r.top  * dpr),
-          w: Math.round(r.width  * dpr),
-          h: Math.round(r.height * dpr),
-        };
-        await invoke('mpv_show_in_window', { path: playablePath, x: rect.x, y: rect.y, w: rect.w, h: rect.h, muted: false });
-        // Resize listener — keep the overlay glued to the placeholder
-        // when the user resizes the window.  One handler at a time;
-        // closeLightbox tears it down.
-        if (!window._mpvResizeHandler) {
-          window._mpvResizeHandler = () => {
-            const rr = videoEl.getBoundingClientRect();
-            const d2 = window.devicePixelRatio || 1;
-            invoke('mpv_set_rect', {
-              x: Math.round(rr.left * d2),
-              y: Math.round(rr.top  * d2),
-              w: Math.round(rr.width  * d2),
-              h: Math.round(rr.height * d2),
-            }).catch(()=>{});
-          };
-          window.addEventListener('resize', window._mpvResizeHandler);
-        }
+        videoEl.style.display = 'none';
         spinner.style.display = 'none';
-        playBtn.style.display = 'none';  // mpv has its own controls (none, for now)
+        playBtn.style.display = 'none';
+        await invoke('mpv_test_open', { path: playablePath });
+        // Visual reminder inside the lightbox that the actual video is
+        // in the separate mpv window — otherwise the dark middle area
+        // is mysteriously empty.
+        const cap = document.getElementById('lbCaption');
+        if (cap) {
+          const fn = (photo.filename) || (photo.path||'').split(/[\\/]/).pop() || '';
+          cap.textContent = fn + '  ·  playing in mpv window →';
+        }
         return;  // skip the legacy <video> path entirely
       } catch (e) {
-        console.warn('[mpv] overlay failed, falling back to <video>:', e);
-        window._mpvAvail = false;  // don't try again this session
-        videoEl.style.visibility = '';
+        console.warn('[mpv] standalone open failed, falling back to <video>:', e);
+        window._mpvAvail = false;
+        videoEl.style.display = '';
       }
     }
 
@@ -17618,14 +17594,11 @@ function closeLightbox() {
   // strings sitting in JS heap is fine while the lightbox is open, but
   // there's no reason to hold them once the user is back in the grid.
   try { _lbCacheClear(); } catch(_) {}
-  // v1.5.285 — Hide the mpv overlay child window and detach the
-  // resize listener so a future image-only lightbox open doesn't
-  // keep firing mpv_set_rect for nothing.
-  try { invoke('mpv_hide_overlay'); } catch(_) {}
-  if (window._mpvResizeHandler) {
-    window.removeEventListener('resize', window._mpvResizeHandler);
-    window._mpvResizeHandler = null;
-  }
+  // v1.5.286 — Close the standalone mpv window if one's open.
+  // mpv_close terminates the active player and destroys its native
+  // window so the user doesn't end up with a stray video playing
+  // after they've returned to the gallery.
+  try { invoke('mpv_close'); } catch(_) {}
   // Restore the <video> element's visibility so the legacy path still
   // works on the next open if mpv is unavailable.
   try {

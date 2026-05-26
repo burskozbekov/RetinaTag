@@ -1363,6 +1363,7 @@ pub fn run() {
         // app keeps running in the system tray (watch-folder scans + background
         // notifications stay alive).
         .on_window_event(|window, event| {
+            // Close-to-tray (existing behaviour).
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     let app = window.app_handle();
@@ -1377,6 +1378,24 @@ pub fn run() {
                         let _ = window.hide();
                         api.prevent_close();
                     }
+                }
+            }
+
+            // v1.5.286 — Keep the libmpv overlay popup glued to the
+            // main window.  Moved/Resized → reposition.  Focused →
+            // show.  Defocused / minimised → hide.  The popup is
+            // top-level so without this it would float over other
+            // apps when the user Alt+Tabs.
+            if window.label() == "main" {
+                let app = window.app_handle();
+                match event {
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                        video_player::on_main_window_geometry_changed(app);
+                    }
+                    tauri::WindowEvent::Focused(focused) => {
+                        video_player::set_overlay_visible(*focused);
+                    }
+                    _ => {}
                 }
             }
         })
