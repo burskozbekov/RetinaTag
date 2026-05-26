@@ -2963,26 +2963,101 @@ function activePhotoIds() {
 // stale gallery snapshot) and the backend would have scanned all
 // 65k photos again, exactly the bug the user reported on v1.5.179.
 function activeFaceScope() {
-  // v1.5.192 — Backend parameters are camelCase directly (yearMonth,
-  // photoIds) so the Tauri auto-rename layer is bypassed. Frontend
-  // sends those names verbatim; what you see is what backend gets.
+  // v1.5.299 — User contract: "what I'm looking at is what gets scanned."
+  // Scopes are checked top to bottom — the FIRST match wins.  This order
+  // exists because a `yearMonth` SQL filter on a 70 k-row table is
+  // index-friendly (strftime on date_taken), while inlining a
+  // multi-thousand-id list bloats the IN clause.  Empty return ({}) means
+  // "no scope, scan the whole library" — that path triggers only when
+  // the user is literally in unfiltered All Photos.
+  //
+  // 1. Folder selected in the sidebar
   const folder = activeFolderScope();
   if (folder) return { folder, yearMonth: null, photoIds: null };
+
+  // 2. Timeline view focused on a single year+month
   if (typeof curView === 'string' && curView === 'timeline'
       && typeof _tlYear === 'number' && typeof _tlMonth === 'number') {
     const ym = `${_tlYear}-${String(_tlMonth).padStart(2,'0')}`;
     return { yearMonth: ym, folder: null, photoIds: null };
   }
+
+  // 3. Calendar view focused on a single year+month
   if (typeof curView === 'string' && curView === 'calendar'
       && typeof _calYear === 'number' && typeof _calMonth === 'number') {
     const ym = `${_calYear}-${String(_calMonth).padStart(2,'0')}`;
     return { yearMonth: ym, folder: null, photoIds: null };
   }
+
+  // 4. v1.5.299 — Gallery view with the month chip set.  This was the
+  // big missing piece: pre-v1.5.299 the curMonth chip filter never
+  // made it into the scope, so a user looking at "May 2026" (4 000
+  // photos) had the scan fall through to the activePhotoIds() branch,
+  // get capped out at the 2 000 limit, fall through again, and walk
+  // all 70 k.  Now an explicit curMonth → yearMonth handoff.
+  if (typeof curMonth === 'string' && /^\d{4}-\d{2}$/.test(curMonth)) {
+    return { yearMonth: curMonth, folder: null, photoIds: null };
+  }
+
+  // 5. Map view with Leaflet bounds (v1.5.298)
+  if (typeof curView === 'string' && curView === 'map') {
+    try {
+      const ids = mapVisiblePhotoIds();
+      if (ids.length > 0 && ids.length < 10000) {
+        return { photoIds: ids, folder: null, yearMonth: null };
+      }
+    } catch(_) {}
+  }
+
+  // 6. Person filter / search / rating / media — whatever has the
+  // `photos` array shaped to "what's on screen".  Cap raised from
+  // 2 000 → 10 000 (v1.5.299) because the 2 000 cap was the exact
+  // reason a 4 000-photo month was falling through to whole-library.
+  // 10 000 inline IDs is ~100 KB of SQL text — well under SQLite's
+  // 1 MB statement-length limit.
   const ids = activePhotoIds();
-  if (ids.length > 0 && ids.length < 2000) {
+  if (ids.length > 0 && ids.length < 10000) {
     return { photoIds: ids, folder: null, yearMonth: null };
   }
   return {};
+}
+
+// v1.5.298 — Photo IDs whose GPS coords fall inside the Leaflet map's
+// current bounds (the visible viewport).  Used by face scan + any
+// future scope-aware command to limit work to "what's on the map
+// right now".  Globe view returns [] for now — three-globe doesn't
+// expose a clean lat/lng bounds API, so map-region scoping needs the
+// user to flip to flat view.  Empty cache or no map = [].
+function mapVisiblePhotoIds() {
+  if (!Array.isArray(_mapGpsCache) || _mapGpsCache.length === 0) return [];
+  // leafletMap is a top-level `let` (line 3245) — reachable as a bare
+  // identifier from any function but NOT via `window.leafletMap`.
+  if (typeof leafletMap === 'undefined' || !leafletMap
+      || typeof leafletMap.getBounds !== 'function') return [];
+  const b = leafletMap.getBounds();
+  // Leaflet bounds expose .contains([lat,lng]); we read the corner
+  // numbers once and compare manually so the inner loop is a few
+  // comparisons instead of an L.latLng allocation per photo.
+  const sw = b.getSouthWest(), ne = b.getNorthEast();
+  const minLat = sw.lat, maxLat = ne.lat;
+  const minLng = sw.lng, maxLng = ne.lng;
+  const wraps = minLng > maxLng;
+  const out = [];
+  for (const p of _mapGpsCache) {
+    if (p == null) continue;
+    const lat = p.lat, lng = p.lng;
+    if (lat == null || lng == null) continue;
+    if (lat < minLat || lat > maxLat) continue;
+    if (wraps) {
+      // Bounds wrap the antimeridian (e.g. zoomed-out Pacific view).
+      // Accept everything east of minLng OR west of maxLng.
+      if (lng < minLng && lng > maxLng) continue;
+    } else {
+      if (lng < minLng || lng > maxLng) continue;
+    }
+    if (Number.isInteger(p.id)) out.push(p.id);
+  }
+  return out;
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
