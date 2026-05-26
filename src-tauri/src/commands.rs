@@ -4803,13 +4803,23 @@ pub async fn get_photo_exif(
 pub async fn get_gps_photos(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<GpsPhoto>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let mut results = db::get_photos_with_gps(&conn).map_err(|e| e.to_string())?;
-    // Also include AI-estimated locations (only for photos without real GPS)
-    if let Ok(estimated) = db::get_photos_with_estimated_location(&conn) {
-        results.extend(estimated);
-    }
-    Ok(results)
+    // v1.5.307 — Map view's primary loader.  On the user's 66 k
+    // library this scans the photos table TWICE (real GPS + AI
+    // estimated locations) and can hit 200-400 ms cold.  Running it
+    // on the tokio runtime thread froze every other Tauri command
+    // each time the user switched to Map view; off the worker now.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let mut results = db::get_photos_with_gps(&conn).map_err(|e| e.to_string())?;
+        // Also include AI-estimated locations (only for photos without real GPS)
+        if let Ok(estimated) = db::get_photos_with_estimated_location(&conn) {
+            results.extend(estimated);
+        }
+        Ok::<Vec<GpsPhoto>, String>(results)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
