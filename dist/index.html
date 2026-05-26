@@ -15395,142 +15395,20 @@ async function openLightbox(photoId) {
   }
 
   if (isVideo) {
-    // v1.5.286 — Videos play through libmpv in a *separate* native
-    // window for VLC-grade colour accuracy.  The embedded-overlay
-    // approach (mpv painting into a child HWND positioned over a
-    // WebView2 placeholder) keeps losing the visibility / Z-order
-    // fight with Chromium's DirectComposition surface; shipping the
-    // standalone-window flow gets the user correct iPhone HEVC HDR
-    // colours tonight while we iterate on inline embedding later.
+    // v1.5.289 — Reverted to WebView2's built-in <video> element with
+    // standard HTML5 controls.  We spent several releases trying to
+    // embed libmpv (WS_CHILD overlay, WS_POPUP top-level, transparent
+    // window + backdrop strips) for VLC-grade colour on iPhone HEVC,
+    // and every variant either lost the Z-order fight with WebView2's
+    // DirectComposition surface or wrecked the rest of the lightbox
+    // UX (no controls, no arrow nav, foreground-focus loss).  Shipping
+    // the working <video> player today — colour quality on iPhone HDR
+    // content is a known gap we'll address with a different mechanism
+    // (mpv render API → WebGL canvas) in a future release.
     //
-    // Fallback: if mpv isn't available (DLL missing, probe failed)
-    // we fall through to the legacy WebView2 <video> path below.
-    const videoEl = document.getElementById('lbVideo');
-    const useMpv = await (async () => {
-      if (window._mpvAvail === false) return false;
-      if (window._mpvAvail === true)  return true;
-      try { await invoke('mpv_probe'); window._mpvAvail = true; return true; }
-      catch(_) { window._mpvAvail = false; return false; }
-    })();
-
-    if (useMpv) {
-      try {
-        let playablePath = photo.path;
-        if (typeof photo.path === 'string' && photo.path.toLowerCase().endsWith('.rtenc')) {
-          playablePath = await invoke('vault_decrypt_to_temp', { photoId: id });
-        }
-        // v1.5.287 — Inline mpv overlay with proper backdrop framing.
-        //
-        // For mpv's WS_CHILD HWND to be visible, the WebView2 surface
-        // above it MUST be transparent in that area — so we punch a
-        // hole in the page by making document.body transparent.  But
-        // raw transparency would expose whatever app is behind the
-        // Tauri window, so we frame the video with 4 opaque backdrop
-        // <div> strips (top / bottom / left / right of the video rect)
-        // that cover everything except the central video hole.  The
-        // lightbox controls (close, ←, →, info, counter) sit on top
-        // of those backdrop strips and stay fully visible.
-        videoEl.removeAttribute('src');
-        try { videoEl.pause(); } catch(_) {}
-        videoEl.style.display = 'none';
-        spinner.style.display = 'none';
-        playBtn.style.display = 'none';
-
-        // Stash original styles for clean restore on close.
-        if (!window._mpvStashedBg) {
-          window._mpvStashedBg = {
-            body:  document.body.style.background,
-            html:  document.documentElement.style.background,
-            lightbox: document.getElementById('lightbox').style.background,
-            appDisp: document.getElementById('app')?.style.display ?? '',
-          };
-        }
-        // Punch the hole.
-        document.documentElement.style.background = 'transparent';
-        document.body.style.background = 'transparent';
-        const lbEl = document.getElementById('lightbox');
-        lbEl.style.background = 'transparent';
-        const appEl = document.getElementById('app');
-        if (appEl) appEl.style.display = 'none';
-
-        // Build / refresh 4 backdrop strips that frame the video.
-        const margin = 60;
-        const ensureStrip = (id) => {
-          let el = document.getElementById(id);
-          if (!el) {
-            el = document.createElement('div');
-            el.id = id;
-            el.style.cssText = 'position:fixed;background:rgba(0,0,0,.96);z-index:9999;pointer-events:none';
-            document.body.appendChild(el);
-          }
-          return el;
-        };
-        const layoutStrips = () => {
-          const vw = document.documentElement.clientWidth;
-          const vh = document.documentElement.clientHeight;
-          const t = ensureStrip('mpvBdTop');
-          t.style.left = '0'; t.style.top = '0';
-          t.style.width = vw + 'px'; t.style.height = margin + 'px';
-          const b = ensureStrip('mpvBdBottom');
-          b.style.left = '0'; b.style.top = (vh - margin) + 'px';
-          b.style.width = vw + 'px'; b.style.height = margin + 'px';
-          const l = ensureStrip('mpvBdLeft');
-          l.style.left = '0'; l.style.top = margin + 'px';
-          l.style.width = margin + 'px'; l.style.height = (vh - 2 * margin) + 'px';
-          const r = ensureStrip('mpvBdRight');
-          r.style.left = (vw - margin) + 'px'; r.style.top = margin + 'px';
-          r.style.width = margin + 'px'; r.style.height = (vh - 2 * margin) + 'px';
-        };
-        layoutStrips();
-
-        // Compute the video rect (in physical pixels for the HWND) and
-        // ask the backend to open the player there.
-        await new Promise(r => requestAnimationFrame(r));
-        const dpr = window.devicePixelRatio || 1;
-        const vpW = document.documentElement.clientWidth;
-        const vpH = document.documentElement.clientHeight;
-        const rect = {
-          x: Math.round(margin * dpr),
-          y: Math.round(margin * dpr),
-          w: Math.round((vpW - 2 * margin) * dpr),
-          h: Math.round((vpH - 2 * margin) * dpr),
-        };
-        await invoke('mpv_show_in_window', {
-          path: playablePath,
-          x: rect.x, y: rect.y, w: rect.w, h: rect.h,
-          muted: false,
-        });
-
-        // Track resizes — both the HWND and the backdrop strips need
-        // to follow the new layout.
-        if (!window._mpvResizeHandler) {
-          window._mpvResizeHandler = () => {
-            layoutStrips();
-            const d2 = window.devicePixelRatio || 1;
-            const w2 = document.documentElement.clientWidth;
-            const h2 = document.documentElement.clientHeight;
-            invoke('mpv_set_rect', {
-              x: Math.round(margin * d2),
-              y: Math.round(margin * d2),
-              w: Math.round((w2 - 2 * margin) * d2),
-              h: Math.round((h2 - 2 * margin) * d2),
-            }).catch(()=>{});
-          };
-          window.addEventListener('resize', window._mpvResizeHandler);
-        }
-        return;
-      } catch (e) {
-        console.warn('[mpv] inline failed, falling back to <video>:', e);
-        window._mpvAvail = false;
-        videoEl.style.display = '';
-      }
-    }
-
-    // Legacy <video> path (h.264 / mpv-unavailable fallback) ─────────
-    // In-app playback using Tauri's asset:// protocol (which was already
-    // enabled for full-resolution image loading). We convert the OS path via
-    // `convertFileSrc` and hand it to a <video> element so users don't have
-    // to leave RetinaTag just to preview a clip.
+    // The libmpv code stays in the tree and is still exposed via
+    // Settings → Tools → "Test mpv color" so the user can compare
+    // when needed.
     try {
       // v1.5.155 — Vault videos live as `.rtenc` blobs on disk; WebView2
       // can't stream those directly. Ask the backend to decrypt the row
