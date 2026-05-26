@@ -7258,9 +7258,34 @@ $('btnScanFacesAll').onclick=async()=>{
     // below, which lets the sub-line show N/TOTAL and compute a rough ETA.
     const _faceScanStart = Date.now();
 
+    // v1.5.300 — Resolve the scope ONCE up front and use it for both the
+    // count call and every detect_faces_background / recognize_all_faces
+    // batch.  Two reasons:
+    //   1. If the user switches views mid-scan, the scope shouldn't
+    //      shift under them — the scan they kicked off is bound to the
+    //      view they were on when they pressed the button.
+    //   2. If the resolved scope ended up empty (whole-library), pause
+    //      and ask the user — they probably DIDN'T mean to grind
+    //      through 70 k photos when they're looking at a single month.
+    const _scope = activeFaceScope();
+    const _scopeLabel = (() => {
+      if (_scope.folder) return `folder ${_scope.folder.split(/[\\/]/).pop() || _scope.folder}`;
+      if (_scope.yearMonth) return _scope.yearMonth;
+      if (_scope.photoIds && _scope.photoIds.length) return `${_scope.photoIds.length} selected`;
+      return 'whole library';
+    })();
+    if (!_scope.folder && !_scope.yearMonth && (!_scope.photoIds || _scope.photoIds.length === 0)) {
+      const ok = await confirmModal({
+        title: 'Scan whole library?',
+        message: 'No folder, month, or selection is active, so the scan would walk every photo in the library. To scan only a subset, pick a folder / month / map region first and try again.',
+        okLabel: 'Scan everything', danger: false,
+      });
+      if (!ok) { btn.disabled = false; _updateFaceBtnLabel(); return; }
+    }
+
     // Show progress bar + stop button in sidebar
     $('progressArea').classList.add('active');
-    $('progressLabel').textContent = 'Face scan…';
+    $('progressLabel').textContent = `Face scan — ${_scopeLabel}…`;
     $('progressFill').style.width = '0%';
     $('progressPct').textContent = '';
     $('progressSub').textContent = 'Starting face detection…';
@@ -7278,7 +7303,7 @@ $('btnScanFacesAll').onclick=async()=>{
     // either way; this is purely UI metadata.
     let totalUnscanned = 0;
     try{
-      totalUnscanned = await invoke('count_unscanned_faces', activeFaceScope());
+      totalUnscanned = await invoke('count_unscanned_faces', _scope);
       if(!Number.isFinite(totalUnscanned) || totalUnscanned < 0) totalUnscanned = 0;
     }catch(_){ totalUnscanned = 0; }
     if(totalUnscanned > 0){
@@ -7390,7 +7415,7 @@ $('btnScanFacesAll').onclick=async()=>{
       });
 
       let result;
-      try { result = await invoke('detect_faces_background', activeFaceScope()); }
+      try { result = await invoke('detect_faces_background', _scope); }
       catch(e) { toast('Face detection: ' + e, 'warn'); unlisten(); break; }
       unlisten();
 
@@ -7431,7 +7456,7 @@ $('btnScanFacesAll').onclick=async()=>{
       if (facesFound > 0) {
         btn.textContent = '👤 Recognizing…';
         try {
-          const recognized = await invoke('recognize_all_faces', activeFaceScope());
+          const recognized = await invoke('recognize_all_faces', _scope);
           if (recognized > 0) toast(`${recognized} face(s) auto-matched`, 'success');
         } catch(_) {}
         // recognize_all_faces just bumped known-person face_count totals —
