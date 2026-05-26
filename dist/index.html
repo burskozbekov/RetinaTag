@@ -15302,11 +15302,13 @@ let _lbCurrentId = null;
 // is always the first key.  We use that for LRU trimming below.
 //
 // Memory budget: each cached entry is one base64 JPEG of a 2560-px
-// image, typically 600-900 kB as a JS string.  Cap = 5 → max ~5 MB of
-// JS heap, dropped completely on lightbox close.
+// image, typically 600-900 kB as a JS string.  v1.5.303 raised the cap
+// from 5 → 7 to accommodate ±2 neighbour prefetch (current + 4
+// prefetched + 2 slack for back-and-forth nav). Max ~7 MB of JS heap,
+// dropped completely on lightbox close.
 const _lbHeicCache = new Map();          // photoId → base64 JPEG string
 const _lbHeicPrefetching = new Set();    // photoIds whose IPC is in flight
-const _LB_HEIC_CACHE_MAX = 5;
+const _LB_HEIC_CACHE_MAX = 7;
 
 function _lbCacheTrim() {
   while (_lbHeicCache.size > _LB_HEIC_CACHE_MAX) {
@@ -15354,9 +15356,16 @@ function _lbPrefetchNeighbors(currentId) {
   const list = (typeof _lbList === 'function') ? _lbList() : photos;
   const idx = list.findIndex(p => p.id === currentId);
   if (idx < 0) return;
-  // Prefetch forward first — most users press → more than ←.
+  // v1.5.303 — prefetch ±2 instead of just ±1.  Cache cap is 5, so we
+  // can comfortably hold the current photo plus four neighbours; this
+  // lets a user rapid-arrow through 2–3 photos before hitting cold
+  // cache instead of stalling on the very next press once the ±1 slot
+  // was already consumed.  Forward first because that's the dominant
+  // direction; backward second so a ← right after a → is still warm.
   if (idx + 1 < list.length) _lbPrefetchHeic(list[idx + 1].id);
   if (idx - 1 >= 0)          _lbPrefetchHeic(list[idx - 1].id);
+  if (idx + 2 < list.length) _lbPrefetchHeic(list[idx + 2].id);
+  if (idx - 2 >= 0)          _lbPrefetchHeic(list[idx - 2].id);
 }
 
 // v1.5.219 — Lightbox context.
