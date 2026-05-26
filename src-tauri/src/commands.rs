@@ -2274,8 +2274,16 @@ pub async fn get_all_tags(
     prefix: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, i64)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_all_tags(&conn, prefix.as_deref()).map_err(|e| e.to_string())
+    // v1.5.305 — Off the tokio worker.  Tag Manager opens with a full
+    // tag-list dump which on a 66k photo library can hit 200k+ tags
+    // rows; the GROUP BY + ORDER BY is 100-200 ms cold.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_all_tags(&conn, prefix.as_deref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Tags that most often appear alongside `tag`. Used by the detail panel to
@@ -2288,8 +2296,15 @@ pub async fn get_related_tags(
     limit: Option<i64>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, i64)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_related_tags(&conn, &tag, limit.unwrap_or(10)).map_err(|e| e.to_string())
+    // v1.5.305 — spawn_blocking.  Self-join on tags can sweep through
+    // hundreds of thousands of rows; keep the runtime free.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_related_tags(&conn, &tag, limit.unwrap_or(10)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
