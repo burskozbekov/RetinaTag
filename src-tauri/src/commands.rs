@@ -5158,12 +5158,21 @@ pub async fn compute_phashes(
 pub async fn get_duplicates(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<DuplicateGroup>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let groups = db::get_duplicate_groups(&conn).map_err(|e| e.to_string())?;
-    Ok(groups
-        .into_iter()
-        .map(|(hash, photos)| DuplicateGroup { hash, photos })
-        .collect())
+    // v1.5.308 — Duplicate groups query is a self-join on perceptual
+    // hashes + a GROUP BY/HAVING — on 66 k photos that's 300-600 ms
+    // cold.  Wrap in spawn_blocking so the Duplicates tab no longer
+    // blocks the runtime while it loads.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let groups = db::get_duplicate_groups(&conn).map_err(|e| e.to_string())?;
+        Ok::<Vec<DuplicateGroup>, String>(groups
+            .into_iter()
+            .map(|(hash, photos)| DuplicateGroup { hash, photos })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Cleanup: Duplicates + Blurry photos ─────────────────────────────────────
