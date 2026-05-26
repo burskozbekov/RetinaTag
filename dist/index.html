@@ -2689,6 +2689,23 @@ select.tb-select:focus{border-color:var(--red-dark)}
             </div>
           </div>
 
+          <!-- v1.5.311 — Discovered desktops on the same LAN.  Populated
+               by the Bonjour browser (v1.5.310 backend); rows update live
+               via `lan-peer-found` / `lan-peer-lost` events. -->
+          <div class="pane-section">
+            <div class="sb-label">🖥 Other RetinaTag desktops on this LAN</div>
+            <div style="display:flex;flex-direction:column;gap:10px;font-size:12px;color:var(--text3)">
+              <div style="line-height:1.5">
+                Bilgisayar veya Mac, aynı Wi-Fi'da çalışan diğer RetinaTag kurulumlarını burada gösterir. Bağlantı için iPhone Companion'daki 6 haneli kodu peer'a yazman yeter — aynı pairing akışı her iki yönde de çalışır.
+              </div>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn btn-secondary btn-sm" id="btnLanRefreshPeers">↻ Refresh</button>
+                <span id="lanPeersHint" style="font-size:11px;color:var(--text3)"></span>
+              </div>
+              <div id="lanPeerList" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
+            </div>
+          </div>
+
           <div class="pane-section" style="border-bottom:none">
             <div class="sb-label" style="display:flex;align-items:center;justify-content:space-between">
               <span>📜 Scan History</span>
@@ -11994,6 +12011,8 @@ document.addEventListener('click', (e) => {
   if(navItem) {
     setTimeout(_sharedVaultRefresh, 50);
     setTimeout(_lanPairedRefresh, 50);
+    // v1.5.311 — discovered-peers list also refreshes on Tools open.
+    setTimeout(() => { try { _lanPeersRefresh(); } catch(_) {} }, 50);
   }
 });
 // Also refresh once when the Settings modal itself opens.
@@ -12004,6 +12023,7 @@ document.addEventListener('click', (e) => {
     if(modal.classList.contains('open')) {
       _sharedVaultRefresh();
       _lanPairedRefresh();
+      try { _lanPeersRefresh(); } catch(_) {}
     }
   });
   obs.observe(modal, { attributes: true, attributeFilter: ['class'] });
@@ -12089,6 +12109,90 @@ async function _lanPairedRefresh(){
 document.addEventListener('DOMContentLoaded', () => {
   const btn = document.getElementById('btnLanGenCode');
   if(btn) btn.onclick = _lanGenCode;
+});
+
+// v1.5.311 — Discovered desktops on the same LAN.  Backend
+// (v1.5.310 lan_bonjour::start_browse) holds the canonical peer
+// set and emits `lan-peer-found` / `lan-peer-lost` Tauri events on
+// every state change.  The UI keeps a local Map keyed by name so
+// it can be rerendered without touching backend each time, and
+// also calls lan_list_peers on Settings open to seed from an
+// already-warm browser (e.g. user reopened Settings 30 s after
+// launch — peers have been ticking in the whole time).
+const _lanPeerMap = new Map();   // name → peer
+function _lanPlatformIcon(p) {
+  const pf = (p && p.platform || '').toLowerCase();
+  if (pf.includes('mac'))    return '🍎';
+  if (pf.includes('win'))    return '🪟';
+  if (pf.includes('linux'))  return '🐧';
+  return '🖥';
+}
+function _lanRenderPeers() {
+  const list = document.getElementById('lanPeerList');
+  const hint = document.getElementById('lanPeersHint');
+  if (!list) return;
+  if (_lanPeerMap.size === 0) {
+    list.innerHTML = '<div style="font-size:11px;color:var(--text3);font-style:italic">Henüz başka cihaz görünmüyor. Mac\'te uygulamanın açık olduğundan ve aynı Wi-Fi\'da olduğunuzdan emin ol.</div>';
+    if (hint) hint.textContent = '';
+    return;
+  }
+  if (hint) hint.textContent = `${_lanPeerMap.size} cihaz`;
+  // Stable order by name.
+  const peers = [..._lanPeerMap.values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  list.innerHTML = '';
+  for (const p of peers) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--card2);border:1px solid var(--border);border-radius:6px';
+    const icon = document.createElement('div');
+    icon.style.cssText = 'font-size:18px;flex-shrink:0';
+    icon.textContent = _lanPlatformIcon(p);
+    const name = document.createElement('div');
+    name.style.cssText = 'flex:1;color:var(--cream);font-size:12px;min-width:0';
+    const ver = p.version ? ` · v${_esc(p.version)}` : '';
+    name.innerHTML = `<div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(p.hostname || p.name || 'unknown')}</div>
+      <div style="font-size:10px;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(p.addr || '')}:${p.port || ''}${ver}</div>`;
+    row.appendChild(icon);
+    row.appendChild(name);
+    list.appendChild(row);
+  }
+}
+async function _lanPeersRefresh() {
+  try {
+    const peers = await invoke('lan_list_peers');
+    _lanPeerMap.clear();
+    if (Array.isArray(peers)) {
+      for (const p of peers) if (p && p.name) _lanPeerMap.set(p.name, p);
+    }
+    _lanRenderPeers();
+  } catch (e) {
+    const list = document.getElementById('lanPeerList');
+    if (list) list.innerHTML = `<div style="font-size:11px;color:var(--red-light)">Error: ${_esc(String(e))}</div>`;
+  }
+}
+// Live updates without polling — fired by lan_bonjour::start_browse.
+(async () => {
+  if (!window.__TAURI__ || !window.__TAURI__.event) return;
+  try {
+    await window.__TAURI__.event.listen('lan-peer-found', (ev) => {
+      const p = ev && ev.payload;
+      if (!p || !p.name) return;
+      _lanPeerMap.set(p.name, p);
+      _lanRenderPeers();
+    });
+    await window.__TAURI__.event.listen('lan-peer-lost', (ev) => {
+      const name = ev && ev.payload;
+      if (!name) return;
+      _lanPeerMap.delete(name);
+      _lanRenderPeers();
+    });
+  } catch (_) { /* events arrive late or not at all on a slow init */ }
+})();
+document.addEventListener('DOMContentLoaded', () => {
+  const refresh = document.getElementById('btnLanRefreshPeers');
+  if (refresh) refresh.onclick = _lanPeersRefresh;
+  // Initial draw — empty until the first event lands, then the
+  // background listener takes over.
+  _lanPeersRefresh();
 });
 
 // v1.5.225 — Cross-machine bridge: drop a snapshot of retina.db at
