@@ -2165,16 +2165,21 @@ pub async fn set_estimated_location(
 pub async fn get_provider_statuses(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ProviderStatus>, String> {
-    let (settings_list, usage_stats) = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
+    // v1.5.295 — DB lock on async runtime, plus N stats queries
+    // (one per provider).  refreshProviders fires on settings open.
+    let db = state.db.clone();
+    let (settings_list, usage_stats) = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<(String, String)>, std::collections::HashMap<&'static str, (i64, i64, f64)>), String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
         let settings = db::get_all_settings(&conn).unwrap_or_default();
         let mut usage = std::collections::HashMap::new();
         for provider in AiProvider::all() {
             let stats = db::get_provider_stats(&conn, provider.key_name()).unwrap_or((0, 0, 0.0));
             usage.insert(provider.key_name(), stats);
         }
-        (settings, usage)
-    };
+        Ok((settings, usage))
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))??;
 
     let settings: std::collections::HashMap<String, String> =
         settings_list.into_iter().collect();
