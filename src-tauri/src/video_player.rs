@@ -33,10 +33,10 @@ pub fn mpv_probe() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn mpv_test_open(path: String) -> Result<String, String> {
-    #[cfg(target_os = "windows")] { imp::mpv_test_open(path) }
+pub fn mpv_test_open(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    #[cfg(target_os = "windows")] { imp::mpv_test_open(app, path) }
     #[cfg(not(target_os = "windows"))] {
-        let _ = path;
+        let _ = (app, path);
         Err("libmpv is Windows-only in this build".into())
     }
 }
@@ -286,10 +286,14 @@ impl MpvPlayer {
 
         // v1.5.286 — wid MUST be set before mpv_initialize, or mpv
         // creates its own window and renders there instead of the
-        // parent.  See mpv issue #10189 for the u32 cast workaround.
+        // parent.  v1.5.288: pass the full 64-bit HWND value; mpv on
+        // Windows expects the native handle as int64.  The earlier
+        // `as u32 -> as i64` round-trip was the recommended workaround
+        // for a 0.36-era sign-extension bug (issue #10189) that no
+        // longer affects current builds and silently truncates any
+        // HWND with high bits set.
         if let Some(hwnd) = parent_hwnd {
-            let wid_u32: u32 = hwnd as u32;
-            let mut wid_i64: i64 = wid_u32 as i64;
+            let mut wid_i64: i64 = hwnd as i64;
             let name = CString::new("wid").unwrap();
             let r = unsafe {
                 (a.set_option)(
@@ -462,7 +466,7 @@ pub fn mpv_probe() -> Result<String, String> {
 /// v1.5.284 — Standalone test: open the given video in a fresh mpv
 /// window (no parent), with colour-accurate config.  Used to verify
 /// the mpv pipeline matches VLC before we wire it into the lightbox.
-pub fn mpv_test_open(path: String) -> Result<String, String> {
+pub fn mpv_test_open(app: tauri::AppHandle, path: String) -> Result<String, String> {
     let p = std::path::PathBuf::from(&path);
     if !p.exists() {
         return Err(format!("file not found: {}", path));
@@ -478,12 +482,27 @@ pub fn mpv_test_open(path: String) -> Result<String, String> {
     // Standalone window — no parent HWND.  mpv creates its own
     // top-level window with the colour-accurate renderer.
     let player = MpvPlayer::new(None)?;
+    // v1.5.288 — show on-screen-controller (play/pause/seek/volume) so
+    // the user doesn't see an interactionless surface.  We turned it
+    // off in `new()` for the embed path; the standalone window WANTS
+    // controls visible.
+    player.set_option_str("osc", "yes")?;
     player.set_option_str("force-window", "yes")?;
-    player.set_option_str("title", &format!("RetinaTag (mpv test) — {}", p.file_name().unwrap_or_default().to_string_lossy()))?;
+    player.set_option_str("title", &format!("RetinaTag — {}", p.file_name().unwrap_or_default().to_string_lossy()))?;
     player.load_file(&p)?;
 
     let mut slot = global().lock().map_err(|_| "global lock")?;
     *slot = Some(player);
+
+    // v1.5.288 — mpv's window steals foreground focus when it first
+    // appears, so Tauri loses keyboard focus and ← / → no longer
+    // navigates the gallery.  Bring the Tauri main window back to the
+    // foreground (mpv's video stays painted thanks to its own DComp
+    // surface — only the keyboard focus moves).
+    if let Ok(parent) = main_window_hwnd(&app) {
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        unsafe { let _ = SetForegroundWindow(parent); }
+    }
 
     Ok(format!("mpv test window opened for {}", p.display()))
 }

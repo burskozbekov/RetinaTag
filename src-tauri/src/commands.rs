@@ -1948,11 +1948,20 @@ pub async fn get_photos_timeline(
     year_month: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<TimelineGroup>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let year_month_ref = year_month.as_deref().filter(|s| !s.trim().is_empty());
-    let groups = db::get_photos_timeline(&conn, offset, limit, folder.as_deref(), year_month_ref)
-        .map_err(|e| e.to_string())?;
-    Ok(groups.into_iter().map(|(date, photos)| TimelineGroup { date, photos }).collect())
+    // v1.5.288 — Move the timeline query off the tokio worker.  Pulls up
+    // to 1000 rows per month with N correlated subqueries for tags;
+    // running on the async runtime starves the IPC mutex while it
+    // executes (the v1.5.72 freeze class).
+    let db_arc = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+        let year_month_ref = year_month.as_deref().filter(|s| !s.trim().is_empty());
+        let groups = db::get_photos_timeline(&conn, offset, limit, folder.as_deref(), year_month_ref)
+            .map_err(|e| e.to_string())?;
+        Ok(groups.into_iter().map(|(date, photos)| TimelineGroup { date, photos }).collect())
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
 }
 
 /// Returns (YYYY-MM, count) buckets for every month that contains photos.
@@ -1962,30 +1971,38 @@ pub async fn get_timeline_buckets(
     folder: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, i64)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let (sql, has_folder) = match folder.as_deref() {
-        Some(f) if !f.trim().is_empty() => (
-            "SELECT COALESCE(SUBSTR(date_taken,1,7), SUBSTR(created_at,1,7)) AS m, COUNT(*)
-             FROM photos WHERE folder = ?1 GROUP BY m ORDER BY m ASC".to_string(),
-            Some(f.to_string()),
-        ),
-        _ => (
-            "SELECT COALESCE(SUBSTR(date_taken,1,7), SUBSTR(created_at,1,7)) AS m, COUNT(*)
-             FROM photos GROUP BY m ORDER BY m ASC".to_string(),
-            None,
-        ),
-    };
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows: Vec<(String, i64)> = if let Some(f) = has_folder {
-        stmt.query_map(rusqlite::params![f], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok()).collect()
-    } else {
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok()).collect()
-    };
-    Ok(rows)
+    // v1.5.288 — full-table GROUP BY on 66k rows; ~50-150 ms.  Moving
+    // off the tokio worker keeps the IPC mutex free for concurrent
+    // gallery / thumb requests.
+    let db_arc = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(String, i64)>, String> {
+        let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+        let (sql, has_folder) = match folder.as_deref() {
+            Some(f) if !f.trim().is_empty() => (
+                "SELECT COALESCE(SUBSTR(date_taken,1,7), SUBSTR(created_at,1,7)) AS m, COUNT(*)
+                 FROM photos WHERE folder = ?1 GROUP BY m ORDER BY m ASC".to_string(),
+                Some(f.to_string()),
+            ),
+            _ => (
+                "SELECT COALESCE(SUBSTR(date_taken,1,7), SUBSTR(created_at,1,7)) AS m, COUNT(*)
+                 FROM photos GROUP BY m ORDER BY m ASC".to_string(),
+                None,
+            ),
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows: Vec<(String, i64)> = if let Some(f) = has_folder {
+            stmt.query_map(rusqlite::params![f], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok()).collect()
+        } else {
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok()).collect()
+        };
+        Ok(rows)
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
 }
 
 /// v1.5.47 — Manually set a photo's date_taken. The auto-extractor can

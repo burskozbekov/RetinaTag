@@ -15244,6 +15244,29 @@ async function openLightbox(photoId) {
   const id = photoId || selectedId;
   if (!id) { toast('No photo selected','error'); return; }
   _lbCurrentId = id;
+  // v1.5.288 — Tear down any leftover mpv overlay state at the START
+  // of every open so a sequence like "open video → → → photo" doesn't
+  // leave transparent body / hidden #app / 4 backdrop strips covering
+  // the new photo with weird shapes.  closeLightbox already does this
+  // on close, but lbNav goes straight to openLightbox without closing.
+  try { invoke('mpv_close'); } catch(_) {}
+  for (const sid of ['mpvBdTop','mpvBdBottom','mpvBdLeft','mpvBdRight']) {
+    const el = document.getElementById(sid);
+    if (el) el.remove();
+  }
+  if (window._mpvStashedBg) {
+    document.documentElement.style.background = window._mpvStashedBg.html;
+    document.body.style.background           = window._mpvStashedBg.body;
+    const _lbEl = document.getElementById('lightbox');
+    if (_lbEl) _lbEl.style.background = window._mpvStashedBg.lightbox;
+    const _appEl = document.getElementById('app');
+    if (_appEl) _appEl.style.display = window._mpvStashedBg.appDisp;
+    window._mpvStashedBg = null;
+  }
+  if (window._mpvResizeHandler) {
+    window.removeEventListener('resize', window._mpvResizeHandler);
+    window._mpvResizeHandler = null;
+  }
   // v1.5.233 — Stash the currently-displayed photo's {id, path} on
   // window so the lightbox's <img oncontextmenu> handler can call
   // showCtxMenu with the exact same args the gallery thumbnails do.
