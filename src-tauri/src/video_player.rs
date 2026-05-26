@@ -47,6 +47,53 @@ pub fn mpv_close() -> Result<(), String> {
     #[cfg(not(target_os = "windows"))] { Ok(()) }
 }
 
+/// v1.5.285 — Open `path` inside an mpv-rendered child window parented
+/// to the Tauri main window, at the given rect (CSS pixels, top-left
+/// origin within the main window's client area).
+#[tauri::command]
+pub fn mpv_show_in_window(
+    app: tauri::AppHandle,
+    path: String,
+    x: i32, y: i32, w: i32, h: i32,
+    muted: Option<bool>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")] { imp::mpv_show_in_window(app, path, x, y, w, h, muted.unwrap_or(false)) }
+    #[cfg(not(target_os = "windows"))] {
+        let _ = (app, path, x, y, w, h, muted);
+        Err("libmpv is Windows-only in this build".into())
+    }
+}
+
+/// v1.5.285 — Reposition the active overlay window (called from JS on
+/// window resize so the video follows the placeholder div).
+#[tauri::command]
+pub fn mpv_set_rect(x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+    #[cfg(target_os = "windows")] { imp::mpv_set_rect(x, y, w, h) }
+    #[cfg(not(target_os = "windows"))] {
+        let _ = (x, y, w, h);
+        Ok(())
+    }
+}
+
+/// v1.5.285 — Hide the overlay (lightbox closed).  Keeps the player
+/// alive so the next open is fast; pair with `mpv_close` to fully
+/// tear it down.
+#[tauri::command]
+pub fn mpv_hide_overlay() -> Result<(), String> {
+    #[cfg(target_os = "windows")] { imp::mpv_hide_overlay() }
+    #[cfg(not(target_os = "windows"))] { Ok(()) }
+}
+
+/// v1.5.285 — Toggle pause on the active overlay player.
+#[tauri::command]
+pub fn mpv_set_paused(paused: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")] { imp::mpv_set_paused(paused) }
+    #[cfg(not(target_os = "windows"))] {
+        let _ = paused;
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod imp {
 
@@ -419,7 +466,202 @@ pub fn mpv_test_open(path: String) -> Result<String, String> {
 pub fn mpv_close() -> Result<(), String> {
     let mut slot = global().lock().map_err(|_| "global lock")?;
     *slot = None;
+    // Also drop the overlay child window so SetWindowPos calls don't
+    // operate on a stale HWND.
+    let mut o = overlay().lock().map_err(|_| "overlay lock")?;
+    if let Some(child) = o.child_hwnd.take() {
+        unsafe { destroy_child_window(child); }
+    }
+    o.player_active = false;
     Ok(())
+}
+
+// ── v1.5.285 — In-window overlay ────────────────────────────────────────────
+//
+// Lifecycle:
+//   1. `mpv_show_in_window` creates (or re-uses) a child HWND parented to
+//      the Tauri main window, positions it at the given rect, then
+//      starts a fresh MpvPlayer with `wid` pointing at that HWND.
+//   2. While the lightbox is open the frontend calls `mpv_set_rect`
+//      whenever the window resizes so the video follows the layout.
+//   3. When the lightbox closes, `mpv_hide_overlay` hides the HWND but
+//      keeps the player around so re-open is fast.  Full teardown via
+//      `mpv_close` destroys both.
+//
+// Z-order: WS_CHILD windows are always drawn ABOVE their parent's main
+// content, but BELOW any other top-level windows that pop up over the
+// main window.  This is fine for the lightbox because the controls
+// (close button, ←/→ arrows) sit OUTSIDE the placeholder rect, so the
+// mpv overlay doesn't cover them.
+
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, SetWindowPos,
+    ShowWindow, CS_HREDRAW, CS_VREDRAW, HWND_TOP, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOZORDER, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_VISIBLE,
+};
+use windows::core::PCWSTR;
+
+// windows-rs 0.58 wants a real `system` fn pointer in `lpfnWndProc`; passing
+// `DefWindowProcW` directly trips the Rust-vs-system ABI check, so we route
+// every message through this trampoline.
+unsafe extern "system" fn overlay_wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    DefWindowProcW(h, m, w, l)
+}
+
+struct Overlay {
+    /// The child window mpv is rendering into.  `None` until the first
+    /// `mpv_show_in_window` call creates it.
+    child_hwnd: Option<HWND>,
+    /// Whether an mpv player is currently bound to `child_hwnd`.
+    player_active: bool,
+}
+
+unsafe impl Send for Overlay {}
+
+static OVERLAY: OnceLock<Mutex<Overlay>> = OnceLock::new();
+
+fn overlay() -> &'static Mutex<Overlay> {
+    OVERLAY.get_or_init(|| Mutex::new(Overlay { child_hwnd: None, player_active: false }))
+}
+
+/// Register the window class for the mpv overlay.  Idempotent — we
+/// stash the class name once and reuse it.
+fn ensure_window_class() -> Vec<u16> {
+    static CLASS_NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    CLASS_NAME
+        .get_or_init(|| {
+            let name: Vec<u16> = "RetinaTagMpvOverlay\0".encode_utf16().collect();
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                style: CS_HREDRAW | CS_VREDRAW,
+                lpfnWndProc: Some(overlay_wndproc),
+                lpszClassName: PCWSTR(name.as_ptr()),
+                ..Default::default()
+            };
+            unsafe { RegisterClassExW(&wc) };
+            name
+        })
+        .clone()
+}
+
+unsafe fn create_child_window(parent: HWND, x: i32, y: i32, w: i32, h: i32) -> Result<HWND, String> {
+    let class_name = ensure_window_class();
+    let style = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+    // windows-rs 0.58: parent/hmenu/hinstance are now passed unwrapped
+    // (Param<HWND> etc.).  Pass HWND::default() / etc. for "none".
+    use windows::Win32::Foundation::HINSTANCE;
+    use windows::Win32::UI::WindowsAndMessaging::HMENU;
+    let hwnd = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        PCWSTR(class_name.as_ptr()),
+        PCWSTR(std::ptr::null()),
+        style,
+        x, y, w, h,
+        parent,
+        HMENU::default(),
+        HINSTANCE::default(),
+        None,
+    )
+    .map_err(|e| format!("CreateWindowExW: {}", e))?;
+    Ok(hwnd)
+}
+
+unsafe fn destroy_child_window(hwnd: HWND) {
+    let _ = DestroyWindow(hwnd);
+}
+
+fn main_window_hwnd(app: &tauri::AppHandle) -> Result<HWND, String> {
+    use tauri::Manager;
+    let win = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
+    let raw = win.hwnd().map_err(|e| e.to_string())?;
+    Ok(HWND(raw.0 as *mut _))
+}
+
+pub fn mpv_show_in_window(
+    app: tauri::AppHandle,
+    path: String,
+    x: i32, y: i32, w: i32, h: i32,
+    muted: bool,
+) -> Result<(), String> {
+    let file = std::path::PathBuf::from(&path);
+    if !file.exists() {
+        return Err(format!("file not found: {}", path));
+    }
+
+    let parent = main_window_hwnd(&app)?;
+
+    // 1. Make sure we have a child HWND at the given rect.
+    let mut o = overlay().lock().map_err(|_| "overlay lock")?;
+    let child_hwnd = match o.child_hwnd {
+        Some(existing) => {
+            unsafe {
+                SetWindowPos(existing, HWND_TOP, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+                    .map_err(|e| e.to_string())?;
+            }
+            existing
+        }
+        None => {
+            let new_hwnd = unsafe { create_child_window(parent, x, y, w, h)? };
+            o.child_hwnd = Some(new_hwnd);
+            new_hwnd
+        }
+    };
+    unsafe { let _ = ShowWindow(child_hwnd, SW_SHOW); }
+
+    // 2. Tear down any previous player so we get a fresh context bound
+    //    to this HWND.  mpv only binds `wid` once at initialise time;
+    //    re-using the player for a different file is fine but for the
+    //    first version we re-create per open for simplicity.
+    {
+        let mut slot = global().lock().map_err(|_| "global lock")?;
+        *slot = None;
+    }
+
+    let player = MpvPlayer::new()?;
+    player.set_parent_hwnd(child_hwnd.0 as isize)?;
+    player.set_option_str("force-window", "no")?;  // child window is provided
+    if muted {
+        player.set_muted(true)?;
+    }
+    player.load_file(&file)?;
+
+    {
+        let mut slot = global().lock().map_err(|_| "global lock")?;
+        *slot = Some(player);
+    }
+    o.player_active = true;
+    Ok(())
+}
+
+pub fn mpv_set_rect(x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+    let o = overlay().lock().map_err(|_| "overlay lock")?;
+    let Some(child) = o.child_hwnd else { return Ok(()) };
+    unsafe {
+        SetWindowPos(child, HWND_TOP, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn mpv_hide_overlay() -> Result<(), String> {
+    let o = overlay().lock().map_err(|_| "overlay lock")?;
+    let Some(child) = o.child_hwnd else { return Ok(()) };
+    unsafe { let _ = ShowWindow(child, SW_HIDE); }
+    // Pause the player so audio stops, but keep the context alive for fast re-show.
+    if let Ok(slot) = global().lock() {
+        if let Some(p) = slot.as_ref() {
+            let _ = p.pause();
+        }
+    }
+    Ok(())
+}
+
+pub fn mpv_set_paused(paused: bool) -> Result<(), String> {
+    let slot = global().lock().map_err(|_| "global lock")?;
+    let p = slot.as_ref().ok_or_else(|| "no active mpv player".to_string())?;
+    if paused { p.pause() } else { p.play() }
 }
 
 } // mod imp

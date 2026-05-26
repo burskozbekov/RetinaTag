@@ -1352,6 +1352,11 @@ pub fn run() {
             video_player::mpv_probe,
             video_player::mpv_test_open,
             video_player::mpv_close,
+            // v1.5.285 — in-window overlay
+            video_player::mpv_show_in_window,
+            video_player::mpv_set_rect,
+            video_player::mpv_hide_overlay,
+            video_player::mpv_set_paused,
         ])
         // Intercept window close on the main window. If the `close_to_tray`
         // preference is enabled we hide the window instead of exiting, so the

@@ -15372,6 +15372,79 @@ async function openLightbox(photoId) {
   }
 
   if (isVideo) {
+    // v1.5.285 — mpv-backed overlay path.  WebView2's HEVC HDR
+    // pipeline produces washed-out colours for iPhone Dolby Vision
+    // content; libmpv (libavcodec + libplacebo) renders them with
+    // VLC/Photos.app-grade accuracy.  We hide the <video> element,
+    // use it just as a layout placeholder, and ask the backend to
+    // attach a child HWND there with mpv rendering into it.
+    //
+    // Fallback: if mpv isn't available (DLL missing, probe failed) we
+    // fall through to the legacy <video> path below.
+    const videoEl = document.getElementById('lbVideo');
+    const useMpv = await (async () => {
+      if (window._mpvAvail === false) return false;
+      if (window._mpvAvail === true)  return true;
+      try { await invoke('mpv_probe'); window._mpvAvail = true; return true; }
+      catch(_) { window._mpvAvail = false; return false; }
+    })();
+
+    if (useMpv) {
+      try {
+        // Vault videos still need decryption; mpv reads the plaintext
+        // temp file the same way the <video> element would.
+        let playablePath = photo.path;
+        if (typeof photo.path === 'string' && photo.path.toLowerCase().endsWith('.rtenc')) {
+          playablePath = await invoke('vault_decrypt_to_temp', { photoId: id });
+        }
+        // Layout the placeholder where the <video> would have been so
+        // the close/arrow buttons keep their familiar positions.  We
+        // make it transparent and let mpv's child HWND paint on top.
+        videoEl.removeAttribute('src');
+        try { videoEl.pause(); } catch(_) {}
+        videoEl.style.display = 'block';
+        videoEl.style.background = 'transparent';
+        videoEl.style.visibility = 'hidden';  // hide WebView2's render; mpv paints over
+        // Wait one frame so the element has its final layout rect.
+        await new Promise(r => requestAnimationFrame(r));
+        const r = videoEl.getBoundingClientRect();
+        // Convert CSS pixels → HWND pixels via devicePixelRatio so
+        // 125%/150%/175% scaled displays still align.
+        const dpr = window.devicePixelRatio || 1;
+        const rect = {
+          x: Math.round(r.left * dpr),
+          y: Math.round(r.top  * dpr),
+          w: Math.round(r.width  * dpr),
+          h: Math.round(r.height * dpr),
+        };
+        await invoke('mpv_show_in_window', { path: playablePath, x: rect.x, y: rect.y, w: rect.w, h: rect.h, muted: false });
+        // Resize listener — keep the overlay glued to the placeholder
+        // when the user resizes the window.  One handler at a time;
+        // closeLightbox tears it down.
+        if (!window._mpvResizeHandler) {
+          window._mpvResizeHandler = () => {
+            const rr = videoEl.getBoundingClientRect();
+            const d2 = window.devicePixelRatio || 1;
+            invoke('mpv_set_rect', {
+              x: Math.round(rr.left * d2),
+              y: Math.round(rr.top  * d2),
+              w: Math.round(rr.width  * d2),
+              h: Math.round(rr.height * d2),
+            }).catch(()=>{});
+          };
+          window.addEventListener('resize', window._mpvResizeHandler);
+        }
+        spinner.style.display = 'none';
+        playBtn.style.display = 'none';  // mpv has its own controls (none, for now)
+        return;  // skip the legacy <video> path entirely
+      } catch (e) {
+        console.warn('[mpv] overlay failed, falling back to <video>:', e);
+        window._mpvAvail = false;  // don't try again this session
+        videoEl.style.visibility = '';
+      }
+    }
+
+    // Legacy <video> path (h.264 / mpv-unavailable fallback) ─────────
     // In-app playback using Tauri's asset:// protocol (which was already
     // enabled for full-resolution image loading). We convert the OS path via
     // `convertFileSrc` and hand it to a <video> element so users don't have
@@ -17545,6 +17618,20 @@ function closeLightbox() {
   // strings sitting in JS heap is fine while the lightbox is open, but
   // there's no reason to hold them once the user is back in the grid.
   try { _lbCacheClear(); } catch(_) {}
+  // v1.5.285 — Hide the mpv overlay child window and detach the
+  // resize listener so a future image-only lightbox open doesn't
+  // keep firing mpv_set_rect for nothing.
+  try { invoke('mpv_hide_overlay'); } catch(_) {}
+  if (window._mpvResizeHandler) {
+    window.removeEventListener('resize', window._mpvResizeHandler);
+    window._mpvResizeHandler = null;
+  }
+  // Restore the <video> element's visibility so the legacy path still
+  // works on the next open if mpv is unavailable.
+  try {
+    const v = document.getElementById('lbVideo');
+    if (v) v.style.visibility = '';
+  } catch(_) {}
   // v1.5.219 — Drop the per-view context so the next open from the
   // gallery (or any view that doesn't set one) navigates the full
   // library again. Without this, opening from Calendar then returning

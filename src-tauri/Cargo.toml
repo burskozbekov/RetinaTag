@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.283"
+version = "1.5.285"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -122,6 +122,9 @@ windows = { version = "0.58", features = [
     "Security_Credentials_UI",
     "Foundation",
     "Win32_Security_Cryptography",
+    # v1.5.285 — child HWND creation for libmpv video overlay
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
 ] }
 windows-core = "0.58"
 
