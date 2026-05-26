@@ -7258,27 +7258,39 @@ $('btnScanFacesAll').onclick=async()=>{
     // below, which lets the sub-line show N/TOTAL and compute a rough ETA.
     const _faceScanStart = Date.now();
 
-    // v1.5.300 — Resolve the scope ONCE up front and use it for both the
-    // count call and every detect_faces_background / recognize_all_faces
-    // batch.  Two reasons:
-    //   1. If the user switches views mid-scan, the scope shouldn't
-    //      shift under them — the scan they kicked off is bound to the
-    //      view they were on when they pressed the button.
-    //   2. If the resolved scope ended up empty (whole-library), pause
-    //      and ask the user — they probably DIDN'T mean to grind
-    //      through 70 k photos when they're looking at a single month.
+    // v1.5.301 — Resolve scope once, bind to _scope, and SHOW the
+    // user exactly what's about to be scanned (or warn before the
+    // whole library).  The previous (v1.5.300) version checked for
+    // truthy folder / yearMonth / photoIds, but activePhotoIds() can
+    // return a 500-row gallery snapshot that isn't 'the whole
+    // library' but also isn't what the user thinks they selected.
+    // Now we ask the BACKEND how many photos the scope actually
+    // covers (count_unscanned_faces does the same SQL it'll use for
+    // the scan), and surface that number + the scope label in a
+    // dialog the user has to OK before anything runs.  Any scan of
+    // 10 000+ photos triggers the confirm; smaller scopes proceed
+    // silently because the user clearly meant something local.
     const _scope = activeFaceScope();
     const _scopeLabel = (() => {
       if (_scope.folder) return `folder ${_scope.folder.split(/[\\/]/).pop() || _scope.folder}`;
       if (_scope.yearMonth) return _scope.yearMonth;
-      if (_scope.photoIds && _scope.photoIds.length) return `${_scope.photoIds.length} selected`;
+      if (_scope.photoIds && _scope.photoIds.length) return `${_scope.photoIds.length.toLocaleString()} selected photos`;
       return 'whole library';
     })();
-    if (!_scope.folder && !_scope.yearMonth && (!_scope.photoIds || _scope.photoIds.length === 0)) {
+    // Ask the backend up front so the confirm dialog can quote the
+    // real number — if the user agreed to '10 photos' but the real
+    // pool is 70 k, that mismatch alone tells them the scope's wrong.
+    let _scopePreviewCount = 0;
+    try {
+      _scopePreviewCount = await invoke('count_unscanned_faces', _scope);
+      if (!Number.isFinite(_scopePreviewCount) || _scopePreviewCount < 0) _scopePreviewCount = 0;
+    } catch(_) { _scopePreviewCount = 0; }
+    const _isWholeLib = !_scope.folder && !_scope.yearMonth && (!_scope.photoIds || _scope.photoIds.length === 0);
+    if (_isWholeLib || _scopePreviewCount >= 10000) {
       const ok = await confirmModal({
-        title: 'Scan whole library?',
-        message: 'No folder, month, or selection is active, so the scan would walk every photo in the library. To scan only a subset, pick a folder / month / map region first and try again.',
-        okLabel: 'Scan everything', danger: false,
+        title: `Scan ${_scopePreviewCount.toLocaleString()} photos?`,
+        message: `Scope: ${_scopeLabel}.\n\n${_scopePreviewCount.toLocaleString()} photo(s) match.  If that's not what you expected, cancel and pick a folder / month / map region / search filter first.`,
+        okLabel: 'Start scan', danger: false,
       });
       if (!ok) { btn.disabled = false; _updateFaceBtnLabel(); return; }
     }
