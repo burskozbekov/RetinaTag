@@ -10297,14 +10297,30 @@ pub async fn get_library_analytics(state: tauri::State<'_, AppState>) -> Result<
 
 #[tauri::command]
 pub async fn get_photos_calendar(year: i32, month: i32, state: tauri::State<'_, AppState>) -> Result<Vec<CalendarDay>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_photos_calendar(&conn, year, month).map_err(|e| e.to_string())
+    // v1.5.304 — Move off the tokio worker. The query aggregates by day
+    // across the month using strftime + GROUP BY, which on a 66 k library
+    // can hit 100-300 ms and stall every other UI command behind it.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_photos_calendar(&conn, year, month).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn get_year_month_counts(state: tauri::State<'_, AppState>) -> Result<Vec<(i32, i32, i64)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_year_month_counts(&conn).map_err(|e| e.to_string())
+    // v1.5.304 — spawn_blocking. The whole-library GROUP BY year, month
+    // is the slowest of the calendar queries — fanning a 66 k-row scan
+    // through tokio's blocking pool keeps the main runtime responsive.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_year_month_counts(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Health Check ───────────────────────────────────────────────────────────
