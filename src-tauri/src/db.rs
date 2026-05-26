@@ -869,20 +869,24 @@ pub struct NewPhoto<'a> {
 }
 
 pub fn insert_photo(conn: &Connection, p: &NewPhoto<'_>) -> Result<i64> {
+    // v1.5.293 — `prepare_cached` keeps the parsed statement in the
+    // connection's per-conn cache so a 66 000-row first scan doesn't
+    // pay ~66 000 SQL parse/plan cycles (~30 µs each).  The scanner
+    // batches 64 rows per transaction (scanner.rs:572-659) so each
+    // batch reuses the same cached statement.
     let now = chrono::Utc::now().to_rfc3339();
-    let rows_affected = conn.execute(
-        "INSERT OR IGNORE INTO photos
-             (path, filename, folder, hash, size, width, height, created_at, status, media_type, date_taken, duration_secs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11)",
-        params![p.path, p.filename, p.folder, p.hash, p.size, p.width, p.height, now, p.media_type, p.date_taken, p.duration_secs],
-    )?;
+    let rows_affected = {
+        let mut stmt = conn.prepare_cached(
+            "INSERT OR IGNORE INTO photos
+                 (path, filename, folder, hash, size, width, height, created_at, status, media_type, date_taken, duration_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11)",
+        )?;
+        stmt.execute(params![p.path, p.filename, p.folder, p.hash, p.size, p.width, p.height, now, p.media_type, p.date_taken, p.duration_secs])?
+    };
     if rows_affected == 0 {
         // Row already exists (UNIQUE conflict on path) — fetch existing ID
-        let id: i64 = conn.query_row(
-            "SELECT id FROM photos WHERE path = ?1",
-            params![p.path],
-            |r| r.get(0),
-        )?;
+        let mut stmt = conn.prepare_cached("SELECT id FROM photos WHERE path = ?1")?;
+        let id: i64 = stmt.query_row(params![p.path], |r| r.get(0))?;
         Ok(id)
     } else {
         Ok(conn.last_insert_rowid())

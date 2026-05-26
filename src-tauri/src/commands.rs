@@ -310,13 +310,30 @@ pub async fn get_photo_detail(
 
 #[tauri::command]
 pub async fn get_stats(state: tauri::State<'_, AppState>) -> Result<AppStats, String> {
+    // v1.5.292 — 5-second memo cache.  refreshStats fires from every
+    // page navigation and a couple of periodic timers; on a 66 k-row
+    // library the cold query is 100-300 ms (8 separate COUNT scans).
+    // 5 s is short enough that a scan / tag completion shows up
+    // promptly, long enough to suppress the burst of duplicate calls.
+    {
+        let cache = state.stats_cache.lock().map_err(|_| "stats cache lock")?;
+        if let Some((when, ref stats)) = *cache {
+            if when.elapsed() < std::time::Duration::from_secs(5) {
+                return Ok(stats.clone());
+            }
+        }
+    }
     let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let stats: AppStats = tauri::async_runtime::spawn_blocking(move || -> Result<AppStats, String> {
         let conn = db.lock().map_err(|_| "db lock".to_string())?;
         db::get_stats(&conn).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    if let Ok(mut cache) = state.stats_cache.lock() {
+        *cache = Some((std::time::Instant::now(), stats.clone()));
+    }
+    Ok(stats)
 }
 
 // ── Search with multi-language translation ───────────────────────────────────
@@ -7300,78 +7317,82 @@ pub async fn suggest_face_matches(
 pub async fn get_persons(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Person>, String> {
-    let (rows, thumbs_dir) = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let rows = db::get_persons(&conn).map_err(|e| e.to_string())?;
-        (rows, state.thumbnails_dir.clone())
-    };
-    let faces_dir = thumbs_dir.join("faces");
+    // v1.5.293 — Move the whole pipeline (DB queries + per-person disk
+    // reads + base64 encodes for 50+ avatars) off the tokio worker.
+    // The People sidebar calls this on every page navigation; doing
+    // sync I/O on the IPC executor was starving concurrent gallery
+    // commands.
+    let db = state.db.clone();
+    let thumbs_dir = state.thumbnails_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Person>, String> {
+        let faces_dir = thumbs_dir.join("faces");
+        let rows = {
+            let conn = db.lock().map_err(|_| "db lock")?;
+            db::get_persons(&conn).map_err(|e| e.to_string())?
+        };
 
-    // Discover which persons need a backfill so we can take a single
-    // write lock on the DB instead of grabbing+releasing per-row.
-    let needs_fix: Vec<i64> = rows
-        .iter()
-        .filter(|r| r.thumbnail.as_deref().map(str::is_empty).unwrap_or(true))
-        .map(|r| r.id)
-        .collect();
-    let backfilled: std::collections::HashMap<i64, String> = if needs_fix.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id FROM face_regions
-                  WHERE person_id = ?1
-                  ORDER BY score DESC",
-            )
-            .map_err(|e| e.to_string())?;
-        let mut out = std::collections::HashMap::new();
-        for pid in &needs_fix {
-            // Find the best face crop that actually exists on disk.
-            let face_ids: Vec<i64> = stmt
-                .query_map([pid], |r| r.get::<_, i64>(0))
-                .map_err(|e| e.to_string())?
-                .filter_map(|r| r.ok())
-                .collect();
-            for fid in face_ids {
-                let p = faces_dir.join(format!("face_{}.jpg", fid));
-                if p.exists() {
-                    let name = format!("face_{}.jpg", fid);
-                    let _ = conn.execute(
-                        "UPDATE persons SET thumbnail = ?1 WHERE id = ?2",
-                        rusqlite::params![&name, pid],
-                    );
-                    out.insert(*pid, name);
-                    break;
+        let needs_fix: Vec<i64> = rows
+            .iter()
+            .filter(|r| r.thumbnail.as_deref().map(str::is_empty).unwrap_or(true))
+            .map(|r| r.id)
+            .collect();
+        let backfilled: std::collections::HashMap<i64, String> = if needs_fix.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let conn = db.lock().map_err(|_| "db lock")?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT id FROM face_regions
+                      WHERE person_id = ?1
+                      ORDER BY score DESC",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut out = std::collections::HashMap::new();
+            for pid in &needs_fix {
+                let face_ids: Vec<i64> = stmt
+                    .query_map([pid], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                for fid in face_ids {
+                    let p = faces_dir.join(format!("face_{}.jpg", fid));
+                    if p.exists() {
+                        let name = format!("face_{}.jpg", fid);
+                        let _ = conn.execute(
+                            "UPDATE persons SET thumbnail = ?1 WHERE id = ?2",
+                            rusqlite::params![&name, pid],
+                        );
+                        out.insert(*pid, name);
+                        break;
+                    }
                 }
             }
-        }
-        out
-    };
+            out
+        };
 
-    Ok(rows
-        .into_iter()
-        .map(|r| {
-            // Use thumbnail file name stored in DB, or the freshly
-            // backfilled one from the pass above. Fall back to None
-            // (grey circle) only if no crop exists anywhere.
-            let stored = r.thumbnail.clone();
-            let backfilled_for_row = backfilled.get(&r.id).cloned();
-            let thumb_name = stored
-                .filter(|s| !s.is_empty())
-                .or(backfilled_for_row);
-            let thumbnail = thumb_name
-                .as_deref()
-                .and_then(|t| std::fs::read(faces_dir.join(t)).ok())
-                .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
-            Person {
-                id: r.id,
-                name: r.name,
-                thumbnail,
-                face_count: r.face_count,
-            }
-        })
-        .collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let stored = r.thumbnail.clone();
+                let backfilled_for_row = backfilled.get(&r.id).cloned();
+                let thumb_name = stored
+                    .filter(|s| !s.is_empty())
+                    .or(backfilled_for_row);
+                let thumbnail = thumb_name
+                    .as_deref()
+                    .and_then(|t| std::fs::read(faces_dir.join(t)).ok())
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+                Person {
+                    id: r.id,
+                    name: r.name,
+                    thumbnail,
+                    face_count: r.face_count,
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
 }
 
 /// Assign (or unassign) a detected face to a person.

@@ -223,7 +223,7 @@ pub struct ProviderBreakdown {
 
 // ── App stats ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppStats {
     pub total_photos: i64,
     pub tagged_photos: i64,

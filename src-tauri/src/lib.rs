@@ -225,6 +225,14 @@ pub struct AppState {
     /// Full path to retina.db — used by move_library to know the source.
     pub db_path: std::path::PathBuf,
     pub thumbnails_dir: std::path::PathBuf,
+    /// v1.5.292 — 5-second memo cache for `get_stats`.  The query
+    /// fans out 8 separate `SELECT COUNT(*)` scans across the 66 k-row
+    /// photos table; on the cold path that's ~100-300 ms.  refreshStats
+    /// fires on every page navigation and a few periodic timers, so
+    /// without a cache the same query runs many times per minute.
+    /// Invalidated implicitly by the 5-second TTL — fresh enough that
+    /// a scan or tag completion shows up promptly.
+    pub stats_cache: Mutex<Option<(std::time::Instant, models::AppStats)>>,
     pub scan_running: Arc<AtomicBool>,
     pub scan_stop: Arc<AtomicBool>,
     pub tag_running: Arc<AtomicBool>,
@@ -606,6 +614,7 @@ pub fn run() {
                 db: Arc::new(Mutex::new(conn)),
                 db_path: db_path.clone(),
                 thumbnails_dir,
+                stats_cache: Mutex::new(None),
                 scan_running: Arc::new(AtomicBool::new(false)),
                 scan_stop: Arc::new(AtomicBool::new(false)),
                 tag_running: Arc::new(AtomicBool::new(false)),
