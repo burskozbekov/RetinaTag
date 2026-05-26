@@ -880,6 +880,26 @@ select.tb-select:focus{border-color:var(--red-dark)}
    without going through our JS handler. */
 #lbVideo{outline:none!important;border:none!important;box-shadow:none!important}
 #lbVideo:focus,#lbVideo:focus-visible{outline:none!important}
+/* v1.5.297 — Smooth fullscreen.  The inline width:calc(95vw - 80px)
+   / height:95vh on the element fought with the browser's fullscreen
+   mode: vw / vh changed on enter, then the max-width/max-height
+   clamp pulled the element back down, then released — visible as a
+   grow / shrink jitter during the fullscreen animation.  Pinning
+   100vw / 100vh and dropping every constraint while :fullscreen is
+   active makes the transition a single smooth scale.  Also drop the
+   border-radius so the rounded corners don't try to render over the
+   monitor's true edge. */
+#lbVideo:fullscreen,
+#lbVideo:-webkit-full-screen{
+  width:100vw!important;
+  height:100vh!important;
+  max-width:none!important;
+  max-height:none!important;
+  border-radius:0!important;
+  background:#000;
+  object-fit:contain;
+  transition:none!important;
+}
 .media-badge.raw{background:rgba(184,58,18,.8);color:var(--cream)}
 
 /* ── Rating & Favorites ──────────────────────────────────────────── */
