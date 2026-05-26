@@ -2619,6 +2619,10 @@ select.tb-select:focus{border-color:var(--red-dark)}
                 <span style="font-size:11px;color:var(--text3)">Drops a read-only copy of <code>retina.db</code> at <code>&lt;library&gt;\.retinatag-state\retina-pc.db</code> on startup + every 30 min so a Mac running the same library can merge tags/dates/favorites/descriptions from it. SQLite over SMB isn't safe with two writers — this is the snapshot-only alternative.</span>
               </div>
               <div style="display:flex;align-items:center;gap:10px;margin-top:6px;padding-top:8px;border-top:1px dashed var(--border)">
+                <button class="btn btn-secondary btn-xs" id="btnMpvTest" style="white-space:nowrap">🎬 Test mpv color (HEVC HDR)</button>
+                <span style="font-size:11px;color:var(--text3)">Picks a video file and opens it in a standalone mpv window. Compare with the same file in VLC — if colors match, the libmpv pipeline is working.</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:6px;padding-top:8px;border-top:1px dashed var(--border)">
                 <button class="btn btn-danger btn-xs" id="btnClearAllTags" style="white-space:nowrap">🗑 Clear All Tags</button>
                 <span style="font-size:11px;color:var(--amber)">⚠ DANGEROUS — permanently removes every tag (AI + manual). Cannot be undone.</span>
               </div>
@@ -11525,6 +11529,38 @@ $('btnRegenThumbs').onclick=async()=>{
     thumbCache=new Map();renderGrid();
   }catch(e){toast('Failed: '+e,'error');}
 };
+
+// v1.5.283 — libmpv colour-test button.  Opens a file picker, hands the
+// selected video to the Rust mpv module, which spawns a separate top-
+// level mpv window.  User compares with VLC; if colours match we know
+// the embed plan is viable for the lightbox.
+const btnMpvTest = $('btnMpvTest');
+if (btnMpvTest) {
+  btnMpvTest.onclick = async () => {
+    const orig = btnMpvTest.innerHTML;
+    btnMpvTest.disabled = true;
+    btnMpvTest.innerHTML = '🎬 Loading…';
+    try {
+      const ver = await invoke('mpv_probe');
+      console.log('[mpv] version:', ver);
+      const file = await invoke('open_file_dialog');
+      if (!file) {
+        btnMpvTest.disabled = false;
+        btnMpvTest.innerHTML = orig;
+        return;
+      }
+      const result = await invoke('mpv_test_open', { path: file });
+      toast('mpv v' + ver + ' — window opened. Compare with VLC.', 'success');
+      console.log('[mpv]', result);
+    } catch (e) {
+      toast('mpv test failed: ' + String(e), 'error');
+      console.error('[mpv]', e);
+    } finally {
+      btnMpvTest.disabled = false;
+      btnMpvTest.innerHTML = orig;
+    }
+  };
+}
 
 // Smart fix: only wipes thumbs of photos with EXIF orientation ≠ 1.
 // Subscribes to `thumb-fix-progress` so the button shows live progress.

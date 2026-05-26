@@ -214,6 +214,12 @@ mod lan_pairing;
 mod lan_server;
 mod lan_bonjour;
 
+// v1.5.283 — Native video pipeline via libmpv (Windows only).  Replaces
+// WebView2's HEVC HDR path for iPhone Dolby Vision content so colours
+// match VLC / Photos.app on Mac.  Module exports stubs on non-Windows
+// so the Tauri command list stays consistent across platforms.
+mod video_player;
+
 pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     /// Full path to retina.db — used by move_library to know the source.
@@ -1341,6 +1347,11 @@ pub fn run() {
             commands::lan_request_pair_code,
             commands::lan_list_paired_devices,
             commands::lan_revoke_paired_device,
+            // v1.5.283 — libmpv embed.  Windows-only impls in
+            // src/video_player.rs; non-Windows builds get stubs.
+            video_player::mpv_probe,
+            video_player::mpv_test_open,
+            video_player::mpv_close,
         ])
         // Intercept window close on the main window. If the `close_to_tray`
         // preference is enabled we hide the window instead of exiting, so the

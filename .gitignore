@@ -19,3 +19,9 @@ build-*.log
 
 # Face recognition model binaries (download with download_models.ps1)
 src-tauri/models/*.onnx
+
+# libmpv runtime DLL — 97 MB, fetched fresh on clone via
+# release-tools/fetch_mpv.ps1.  We commit the import library + headers
+# (small, version-pinned) but the binary itself stays out of git so
+# the repo doesn't balloon at every mpv update.
+src-tauri/third-party/mpv/libmpv-2.dll

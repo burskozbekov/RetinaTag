@@ -10,6 +10,13 @@ fn main() {
     {
         println!("cargo:rustc-link-arg=/DELAYLOAD:directml.dll");
         println!("cargo:rustc-link-lib=delayimp");
+
+        // v1.5.283 — libmpv embed for accurate HEVC HDR video playback.
+        // We ship libmpv-2.dll (zhongfly LGPL build) under
+        // third-party/mpv/ and load it at runtime via `libloading`
+        // (see src/video_player.rs).  Loading dynamically lets the app
+        // start even if the DLL is missing or fails to load, and avoids
+        // the MinGW (.dll.a) vs MSVC (.lib) import-library mismatch.
     }
 
     tauri_build::build()

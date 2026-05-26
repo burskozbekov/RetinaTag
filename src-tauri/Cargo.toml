@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.282"
+version = "1.5.283"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -103,6 +103,11 @@ tauri-plugin-single-instance = "2.4.2"
 #   (DPAPI). Wraps the KEK with a key bound to the current Windows
 #   user account, so the bio_blob is useless on another machine or
 #   under another user even with disk access.
+# v1.5.283 — libmpv embed (Windows only). Loaded at runtime via libloading
+# so the DLL bundling is decoupled from the Rust link step.
+[target.'cfg(windows)'.dependencies.libloading]
+version = "0.8"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
