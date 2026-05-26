@@ -15517,3 +15517,16 @@ pub fn lan_revoke_paired_device(device_id: i64, state: tauri::State<'_, AppState
     crate::lan_pairing::revoke(&conn, device_id)
 }
 
+/// v1.5.310 — Snapshot of every RetinaTag desktop the Bonjour browser
+/// has resolved on the current LAN.  Returns Macs + other PCs but not
+/// this machine itself (filtered inside `start_browse`).
+///
+/// The browser runs continuously from app startup (see lib.rs::setup);
+/// this command is a pure read of its in-memory cache.  Frontend can
+/// also subscribe to `lan-peer-found` / `lan-peer-lost` events for
+/// live updates without polling.
+#[tauri::command]
+pub fn lan_list_peers() -> Result<Vec<crate::lan_bonjour::LanPeer>, String> {
+    Ok(crate::lan_bonjour::snapshot_peers())
+}
+

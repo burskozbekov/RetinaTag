@@ -1085,6 +1085,21 @@ pub fn run() {
                         Err(e) => eprintln!("[lan] Bonjour advertise failed: {}", e),
                     }
                 });
+
+                // v1.5.310 — Bonjour BROWSER side.  Symmetric to advertise:
+                // every RetinaTag desktop should both announce itself AND
+                // discover others.  Without this, PC's "Discovered devices"
+                // list was permanently empty even with a Mac advertising
+                // on the same Wi-Fi.  Spawn the browser inside the Tokio
+                // runtime context so the inner `tokio::spawn` survives;
+                // pass an AppHandle so it can emit lan-peer-found events.
+                let app_handle_for_browse = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    match crate::lan_bonjour::start_browse(app_handle_for_browse) {
+                        Ok(_h) => eprintln!("[lan] Bonjour browsing {}", crate::lan_bonjour::SERVICE_TYPE),
+                        Err(e) => eprintln!("[lan] Bonjour browse failed: {}", e),
+                    }
+                });
             }
 
             // v1.5.302 — Pre-warm powershell.exe + PresentationCore so the
@@ -1382,6 +1397,7 @@ pub fn run() {
             commands::lan_request_pair_code,
             commands::lan_list_paired_devices,
             commands::lan_revoke_paired_device,
+            commands::lan_list_peers,
             // v1.5.283 — libmpv embed.  Only the standalone-window
             // commands are wired into JS (Settings → Tools → "Test mpv
             // color"); the in-window overlay commands (mpv_show_in_window

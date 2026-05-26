@@ -94,3 +94,161 @@ pub fn start_advertise(port: u16) -> Result<JoinHandle<()>, String> {
     });
     Ok(handle)
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// v1.5.310 — Bonjour BROWSER side.  start_advertise (above) tells the
+// world we exist; this side discovers the OTHER RetinaTag desktops
+// (Macs + PCs) on the same LAN.  The pair is symmetric: both sides
+// advertise + browse, so PC sees Mac sees PC.
+// ─────────────────────────────────────────────────────────────────────
+
+use std::sync::{Mutex, OnceLock};
+
+/// One peer discovered on the LAN. Cloned into the Tauri event payload.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LanPeer {
+    /// Bonjour instance name (e.g. "Bugras-MacBook-Pro").  Stable for
+    /// the lifetime of the remote daemon; doubles as the dedup key.
+    pub name: String,
+    /// First non-loopback IPv4 the peer advertises.  Used to build
+    /// `http://addr:port` URLs for the LAN HTTP API.
+    pub addr: String,
+    pub port: u16,
+    pub hostname: String,
+    pub platform: String,
+    pub version: String,
+    /// Unix-second timestamp of the last advertise this side received.
+    /// The browser refreshes peers periodically; entries older than
+    /// ~3× advertise interval are considered dead.
+    pub last_seen: i64,
+}
+
+/// Single source of truth for the peer set, owned by the browser task
+/// and read back by the `lan_list_peers` Tauri command.  Mutex (not
+/// Tokio-async) because every access is a one-line read or write —
+/// nothing blocks long enough to need an async lock.  `OnceLock`
+/// matches the rest of this codebase (see lan_pairing.rs) — we avoid
+/// adding `once_cell` as a dep since std now ships the same pattern.
+static PEERS: OnceLock<Mutex<HashMap<String, LanPeer>>> = OnceLock::new();
+
+fn peers_map() -> &'static Mutex<HashMap<String, LanPeer>> {
+    PEERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Spawn the Bonjour browser.  Forwards every discovery event into the
+/// PEERS map and emits `lan-peer-found` / `lan-peer-lost` so the
+/// frontend can update its peer list without polling.
+pub fn start_browse(app_handle: tauri::AppHandle) -> Result<JoinHandle<()>, String> {
+    use mdns_sd::ServiceEvent;
+    use tauri::Emitter;
+
+    let daemon = ServiceDaemon::new()
+        .map_err(|e| format!("mdns ServiceDaemon (browse): {e}"))?;
+    let receiver = daemon
+        .browse(SERVICE_TYPE)
+        .map_err(|e| format!("mdns browse: {e}"))?;
+
+    // Skip OUR OWN advertise.  ServiceInfo.fullname is
+    // "<hostname>.<service_type>", so an exact match means we
+    // bounced our own announce off mdns-sd.
+    let self_name = hostname_safe();
+
+    let handle = tokio::spawn(async move {
+        // Hold the daemon alive for the lifetime of this task; dropping
+        // it stops the browser and releases the socket.
+        let _d = daemon;
+        loop {
+            // recv() blocks the mdns-sd worker thread; we await its
+            // crossbeam channel via a small bridge.  The `try_recv`
+            // loop drains everything queued, then sleep briefly.
+            while let Ok(ev) = receiver.try_recv() {
+                match ev {
+                    ServiceEvent::ServiceResolved(info) => {
+                        let name = info.get_fullname().to_string();
+                        // Strip the service-type suffix for display
+                        // ("Bugra-MacBook-Pro._retinatag._tcp.local." →
+                        //  "Bugra-MacBook-Pro").
+                        let display = name
+                            .split('.')
+                            .next()
+                            .unwrap_or(&name)
+                            .to_string();
+                        if display.eq_ignore_ascii_case(&self_name) {
+                            continue;
+                        }
+                        // Pick the first IPv4 address; v6 is fine too
+                        // but the existing HTTP server is bound to
+                        // v4 first by `first_local_ipv4` on both sides.
+                        let addr = info
+                            .get_addresses()
+                            .iter()
+                            .find_map(|a| match a {
+                                std::net::IpAddr::V4(v4) => Some(v4.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        if addr.is_empty() {
+                            continue;
+                        }
+                        let port = info.get_port();
+                        let props = info.get_properties();
+                        let mut hostname = String::new();
+                        let mut platform = String::new();
+                        let mut version = String::new();
+                        for prop in props.iter() {
+                            match prop.key() {
+                                "hostname" => hostname = prop.val_str().to_string(),
+                                "platform" => platform = prop.val_str().to_string(),
+                                "version"  => version  = prop.val_str().to_string(),
+                                _ => {}
+                            }
+                        }
+                        let now = chrono::Utc::now().timestamp();
+                        let peer = LanPeer {
+                            name: display.clone(),
+                            addr,
+                            port,
+                            hostname,
+                            platform,
+                            version,
+                            last_seen: now,
+                        };
+                        {
+                            let mut map = peers_map().lock().unwrap_or_else(|e| e.into_inner());
+                            map.insert(display.clone(), peer.clone());
+                        }
+                        let _ = app_handle.emit("lan-peer-found", &peer);
+                    }
+                    ServiceEvent::ServiceRemoved(_ty, fullname) => {
+                        let display = fullname
+                            .split('.')
+                            .next()
+                            .unwrap_or(&fullname)
+                            .to_string();
+                        let removed = {
+                            let mut map = peers_map().lock().unwrap_or_else(|e| e.into_inner());
+                            map.remove(&display)
+                        };
+                        if removed.is_some() {
+                            let _ = app_handle.emit("lan-peer-lost", &display);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
+    Ok(handle)
+}
+
+/// Snapshot of currently-known peers.  Tauri commands call into this
+/// instead of locking PEERS directly so the lock scope stays inside
+/// this module.
+pub fn snapshot_peers() -> Vec<LanPeer> {
+    let map = peers_map().lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<LanPeer> = map.values().cloned().collect();
+    // Stable order so the UI doesn't reshuffle every refresh.
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
