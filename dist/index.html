@@ -15428,7 +15428,14 @@ async function openLightbox(photoId) {
       }
       const assetUrl = convertFileSrc(playablePath);
       img.style.display = 'none';
+      // v1.5.291 — Hide the video while the new src loads.  The element
+      // is still laid out (visibility:hidden, not display:none) so the
+      // flex centring stays put, but Chromium can't paint the default
+      // 300×150 intrinsic-size flash that happens before metadata
+      // arrives — which the user saw as a 'video grow/shrink with an
+      // error' pulse on open and on every ←/→ arrow nav.
       videoEl.style.display = 'block';
+      videoEl.style.visibility = 'hidden';
       // v1.5.181 — Tear the previous video down CLEANLY before assigning a
       // new src. Without this, fast ←/→ navigation between videos was
       // leaving the previous source's MediaPlayer/MFT handles open inside
@@ -15450,6 +15457,14 @@ async function openLightbox(photoId) {
       try { videoEl.load(); } catch(_) {}
       videoEl.src = assetUrl;
       videoEl.currentTime = 0;
+      // v1.5.291 — Reveal the video only once Chromium has parsed
+      // enough of the header to know intrinsic width/height.  At
+      // that point object-fit:contain renders the actual aspect on
+      // first paint, no more snap from 300×150 to the real size.
+      // `{ once: true }` keeps us from leaking listeners across opens.
+      videoEl.addEventListener('loadedmetadata', () => {
+        videoEl.style.visibility = '';
+      }, { once: true });
       // v1.5.290 — Focus the video element so Space / ←/→ keyboard
       // shortcuts go to it natively.  Without explicit focus, the
       // event target stays on body and Space hits the document
@@ -17645,6 +17660,9 @@ function closeLightbox() {
     vid.removeAttribute('src');
     try { vid.load(); } catch(_) {}
     vid.style.display = 'none';
+    // v1.5.291 — Clear the visibility:hidden we may have set on open so
+    // the next opener doesn't have to remember to undo it.
+    vid.style.visibility = '';
   }
   _lbCurrentId = null;
   // v1.5.233 — clear the context-menu photo reference so a stale
