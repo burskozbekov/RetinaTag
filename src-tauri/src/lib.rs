@@ -1399,6 +1399,10 @@ pub fn run() {
             commands::lan_list_paired_devices,
             commands::lan_revoke_paired_device,
             commands::lan_list_peers,
+            commands::lan_peer_pair_request,
+            commands::lan_peer_pair_complete,
+            commands::lan_peer_list_paired,
+            commands::lan_peer_unpair,
             // v1.5.283 — libmpv embed.  Only the standalone-window
             // commands are wired into JS (Settings → Tools → "Test mpv
             // color"); the in-window overlay commands (mpv_show_in_window

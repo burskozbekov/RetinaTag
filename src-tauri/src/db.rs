@@ -571,6 +571,29 @@ pub fn init_db(path: &str) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_paired_token ON paired_devices(token_hash);"
     ).ok();
 
+    // v1.5.313 — Tokens WE got from OTHER RetinaTag desktops we paired
+    // with (the inverse of paired_devices above).  Each row is one Mac
+    // or peer PC we've completed `POST /api/pair/complete` against.
+    // The plaintext token lives only here — never in a settings file,
+    // never echoed back to the FE — so a screen-share or settings
+    // export can't leak it.  addr+port let us reconnect even if the
+    // Bonjour browser hasn't re-discovered the peer yet at app start.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS lan_peer_tokens (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            peer_name     TEXT    NOT NULL UNIQUE,
+            addr          TEXT    NOT NULL,
+            port          INTEGER NOT NULL,
+            hostname      TEXT,
+            platform      TEXT,
+            version       TEXT,
+            token         TEXT    NOT NULL,
+            created_at    TEXT    NOT NULL,
+            last_seen_at  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_lan_peer_name ON lan_peer_tokens(peer_name);"
+    ).ok();
+
     // Scan history log: one row per scan attempt, lets the user audit what
     // happened and when. Written from commands.rs after scan_folder_impl
     // returns (both success and error paths).
@@ -651,6 +674,126 @@ pub fn get_cached_file_hash(
         params![path, size, mtime],
         |r| r.get::<_, String>(0),
     ).ok()
+}
+
+// ── v1.5.313 — LAN peer tokens (we are the CLIENT) ─────────────────
+// Tokens we got from OTHER RetinaTag desktops via /api/pair/complete.
+// Stored plaintext (NOT hashed) because we need the live string for
+// every outbound `Authorization: Bearer <token>` header.  Anyone who
+// can read retina.db on this machine can use these tokens against the
+// paired peers — same risk class as a stored web-app password.
+
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct LanPeerTokenRow {
+    pub id: i64,
+    pub peer_name: String,
+    pub addr: String,
+    pub port: u16,
+    pub hostname: Option<String>,
+    pub platform: Option<String>,
+    pub version: Option<String>,
+    pub created_at: String,
+    pub last_seen_at: Option<String>,
+    // NOTE: token deliberately NOT in this struct — only commands that
+    // *need* the token call `get_lan_peer_token_by_name`. The list
+    // command never echoes it back to the FE.
+}
+
+pub fn upsert_lan_peer_token(
+    conn: &Connection,
+    peer_name: &str,
+    addr: &str,
+    port: u16,
+    hostname: Option<&str>,
+    platform: Option<&str>,
+    version: Option<&str>,
+    token: &str,
+) -> Result<i64> {
+    let now = chrono::Utc::now().to_rfc3339();
+    // ON CONFLICT(peer_name) DO UPDATE: re-pairing with the same Mac
+    // overwrites the old token transparently — no "duplicate row"
+    // error for the user.
+    conn.execute(
+        "INSERT INTO lan_peer_tokens
+            (peer_name, addr, port, hostname, platform, version, token, created_at, last_seen_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+         ON CONFLICT(peer_name) DO UPDATE SET
+            addr = excluded.addr,
+            port = excluded.port,
+            hostname = excluded.hostname,
+            platform = excluded.platform,
+            version = excluded.version,
+            token = excluded.token,
+            last_seen_at = excluded.last_seen_at",
+        params![peer_name, addr, port as i64, hostname, platform, version, token, now],
+    )?;
+    let id: i64 = conn.query_row(
+        "SELECT id FROM lan_peer_tokens WHERE peer_name = ?1",
+        params![peer_name],
+        |r| r.get(0),
+    )?;
+    Ok(id)
+}
+
+pub fn list_lan_peer_tokens(conn: &Connection) -> Result<Vec<LanPeerTokenRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, peer_name, addr, port, hostname, platform, version,
+                created_at, last_seen_at
+         FROM lan_peer_tokens
+         ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(LanPeerTokenRow {
+            id:           r.get(0)?,
+            peer_name:    r.get(1)?,
+            addr:         r.get(2)?,
+            port:         { let p: i64 = r.get(3)?; p as u16 },
+            hostname:     r.get(4)?,
+            platform:     r.get(5)?,
+            version:      r.get(6)?,
+            created_at:   r.get(7)?,
+            last_seen_at: r.get(8)?,
+        })
+    })?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(rows)
+}
+
+/// Returns just the bearer token for a paired peer, without exposing
+/// it to the FE.  Used by the future remote-photos commands.
+pub fn get_lan_peer_token_by_name(
+    conn: &Connection,
+    peer_name: &str,
+) -> Result<Option<(String, String, u16)>> {
+    let row = conn.query_row(
+        "SELECT token, addr, port FROM lan_peer_tokens WHERE peer_name = ?1",
+        params![peer_name],
+        |r| Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            { let p: i64 = r.get(2)?; p as u16 },
+        )),
+    );
+    match row {
+        Ok(t) => Ok(Some(t)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn delete_lan_peer_token(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM lan_peer_tokens WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn touch_lan_peer_seen(conn: &Connection, peer_name: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE lan_peer_tokens SET last_seen_at = ?1 WHERE peer_name = ?2",
+        params![now, peer_name],
+    )?;
+    Ok(())
 }
 
 pub fn put_cached_file_hash(

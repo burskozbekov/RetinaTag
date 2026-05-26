@@ -15530,3 +15530,100 @@ pub fn lan_list_peers() -> Result<Vec<crate::lan_bonjour::LanPeer>, String> {
     Ok(crate::lan_bonjour::snapshot_peers())
 }
 
+// ── v1.5.313 — Peer pairing client side ────────────────────────────
+// PC initiates the pair flow against a discovered Mac (or other PC).
+// Mac shows a 6-digit code modal; user reads it off the Mac and types
+// it into PC; PC posts /api/pair/complete and stores the returned
+// bearer token.  See peer_client.rs for the HTTP shapes.
+
+fn _self_device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "RetinaTag-PC".to_string())
+}
+
+/// Step 1 — kick the remote into showing its 6-digit code modal.
+/// `addr` and `port` are what the Bonjour browser surfaced; the
+/// device name we send is our own COMPUTERNAME so the user sees
+/// "Pair request from <PC name>" on the Mac side.
+#[tauri::command]
+pub async fn lan_peer_pair_request(addr: String, port: u16) -> Result<(), String> {
+    let client = crate::peer_client::PeerClient::new(&addr, port);
+    let name = _self_device_name();
+    client.pair_request(&name).await.map_err(|e| e.to_string())
+}
+
+/// Step 2 — user typed the code shown on the remote; complete the
+/// pair, store the returned token in `lan_peer_tokens`, and return
+/// the row id so the FE can refresh.  `peer_name` is the Bonjour
+/// instance name (stable dedup key).
+#[tauri::command]
+pub async fn lan_peer_pair_complete(
+    peer_name: String,
+    addr: String,
+    port: u16,
+    code: String,
+    hostname: Option<String>,
+    platform: Option<String>,
+    version: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<i64, String> {
+    let client = crate::peer_client::PeerClient::new(&addr, port);
+    let device_name = _self_device_name();
+    let token = client
+        .pair_complete(&code, &device_name)
+        .await
+        .map_err(|e| e.to_string())?;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<i64, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::upsert_lan_peer_token(
+            &conn,
+            &peer_name,
+            &addr,
+            port,
+            hostname.as_deref(),
+            platform.as_deref(),
+            version.as_deref(),
+            &token,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// List paired-peer tokens (tokens we obtained — distinct from the
+/// existing `lan_list_paired_devices` which lists tokens we issued).
+/// Token field is intentionally NOT serialized — only addr / port /
+/// metadata.
+#[tauri::command]
+pub async fn lan_peer_list_paired(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<db::LanPeerTokenRow>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::list_lan_peer_tokens(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Remove a paired peer (forget the token).  The peer continues to
+/// advertise on Bonjour; the user can re-pair anytime.
+#[tauri::command]
+pub async fn lan_peer_unpair(
+    id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::delete_lan_peer_token(&conn, id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
