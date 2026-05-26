@@ -10013,41 +10013,52 @@ pub async fn batch_add_tags_with_xmp(
 
 #[tauri::command]
 pub async fn find_similar(photo_id: i64, limit: usize, state: tauri::State<'_, AppState>) -> Result<Vec<SimilarResult>, String> {
-    let (target_emb_bytes, all_embs) = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let target = db::get_clip_embedding(&conn, photo_id)
-            .map_err(|e| e.to_string())?
-            .ok_or("Photo has no CLIP embedding. Index CLIP first.")?;
-        let all = db::get_all_clip_embeddings_except(&conn, photo_id)
-            .map_err(|e| e.to_string())?;
-        (target, all)
-    };
+    // v1.5.306 — The entire body of this command — DB pull of 60 k+ CLIP
+    // blobs, in-place vector decode, cosine similarity over the whole
+    // library, sort, then a second DB fetch — was running on a tokio
+    // worker thread. On the user's library that's 200-500 ms of CPU +
+    // disk, blocking every other command in the runtime. Wrap the whole
+    // thing in spawn_blocking; nothing here is genuinely async.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (target_emb_bytes, all_embs) = {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            let target = db::get_clip_embedding(&conn, photo_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Photo has no CLIP embedding. Index CLIP first.".to_string())?;
+            let all = db::get_all_clip_embeddings_except(&conn, photo_id)
+                .map_err(|e| e.to_string())?;
+            (target, all)
+        };
 
-    let target_emb = clip::bytes_to_embedding(&target_emb_bytes);
+        let target_emb = clip::bytes_to_embedding(&target_emb_bytes);
 
-    let mut scored: Vec<(i64, f32)> = all_embs.iter()
-        .map(|(id, bytes)| {
-            let emb = clip::bytes_to_embedding(bytes);
-            (*id, clip::cosine_similarity(&target_emb, &emb))
-        })
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit.min(100));
+        let mut scored: Vec<(i64, f32)> = all_embs.iter()
+            .map(|(id, bytes)| {
+                let emb = clip::bytes_to_embedding(bytes);
+                (*id, clip::cosine_similarity(&target_emb, &emb))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit.min(100));
 
-    let photo_ids: Vec<i64> = scored.iter().map(|(id, _)| *id).collect();
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let photos = db::get_photos_by_ids(&conn, &photo_ids).map_err(|e| e.to_string())?;
+        let photo_ids: Vec<i64> = scored.iter().map(|(id, _)| *id).collect();
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let photos = db::get_photos_by_ids(&conn, &photo_ids).map_err(|e| e.to_string())?;
 
-    let mut results: Vec<SimilarResult> = vec![];
-    for (id, sim) in &scored {
-        if let Some(photo) = photos.iter().find(|p| p.id == *id) {
-            results.push(SimilarResult {
-                photo: photo.clone(),
-                similarity: *sim,
-            });
+        let mut results: Vec<SimilarResult> = vec![];
+        for (id, sim) in &scored {
+            if let Some(photo) = photos.iter().find(|p| p.id == *id) {
+                results.push(SimilarResult {
+                    photo: photo.clone(),
+                    similarity: *sim,
+                });
+            }
         }
-    }
-    Ok(results)
+        Ok::<Vec<SimilarResult>, String>(results)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Find by example ───────────────────────────────────────────────────────
