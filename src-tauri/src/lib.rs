@@ -213,6 +213,7 @@ mod mtp;
 mod lan_pairing;
 mod lan_server;
 mod lan_bonjour;
+mod peer_client;
 
 // v1.5.283 — Native video pipeline via libmpv (Windows only).  Replaces
 // WebView2's HEVC HDR path for iPhone Dolby Vision content so colours
