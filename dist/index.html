@@ -12160,11 +12160,17 @@ function _lanRenderPeers() {
       const badge = document.createElement('span');
       badge.style.cssText = 'font-size:11px;color:var(--green-light,#7bc77b);padding:3px 8px;border:1px solid var(--green-light,#7bc77b);border-radius:10px;flex-shrink:0';
       badge.textContent = '✓ paired';
+      // v1.5.316 — Browse button opens the remote-vault modal.
+      const browse = document.createElement('button');
+      browse.className = 'btn btn-primary btn-xs';
+      browse.textContent = 'Browse';
+      browse.onclick = () => _lanPeerBrowseVault(p.name, p.hostname || p.name);
       const unpair = document.createElement('button');
       unpair.className = 'btn btn-secondary btn-xs';
       unpair.textContent = 'Unpair';
       unpair.onclick = () => _lanPeerUnpair(paired);
       row.appendChild(badge);
+      row.appendChild(browse);
       row.appendChild(unpair);
     } else {
       const pairBtn = document.createElement('button');
@@ -12251,6 +12257,227 @@ async function _lanPeerPairFlow(p) {
   await _lanPairedPeersRefresh();
   _lanRenderPeers();
 }
+// v1.5.316 — Browse a paired peer's vault.  Opens a full-screen modal
+// that mirrors the gallery view shape but sources its data from the
+// `lan_peer_*` Tauri commands instead of the local DB.  Flow:
+//
+//   1. GET /api/vault/status — if locked, show a PIN entry.
+//   2. POST /api/vault/unlock once user submits PIN.
+//   3. GET /api/photos?vault_only=true&offset=0&limit=200 — first page.
+//   4. For each photo, fetch /api/thumb/{id} on-demand
+//      (intersection-observed so we don't pull 60k thumbs on open).
+//   5. Click a thumb → fetch /api/photo/{id} → show fullscreen with
+//      ←/→ navigation through the loaded list.
+//
+// State lives in a closure per modal instance.  Modal is destroyed on
+// Close / Esc — no global pollution, no caching across opens (each
+// open re-checks vault status so a Lock on Mac is honoured).
+async function _lanPeerBrowseVault(peerName, displayName) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay open';
+  overlay.style.zIndex = '10400';
+  const box = document.createElement('div');
+  box.className = 'modal-box';
+  box.style.cssText = 'width:min(96vw,1400px);height:min(94vh,900px);display:flex;flex-direction:column';
+  const head = document.createElement('div');
+  head.className = 'modal-head';
+  head.style.cssText = 'display:flex;align-items:center;gap:10px;padding:14px 20px';
+  const title = document.createElement('h2');
+  title.style.cssText = 'flex:1;margin:0;font-size:14px;font-weight:700;color:var(--cream)';
+  title.textContent = `${displayName} — Vault`;
+  const status = document.createElement('span');
+  status.style.cssText = 'font-size:11px;color:var(--text3)';
+  const lockBtn = document.createElement('button');
+  lockBtn.className = 'btn btn-secondary btn-xs';
+  lockBtn.textContent = 'Lock';
+  lockBtn.style.display = 'none';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'btn btn-secondary btn-xs';
+  closeBtn.textContent = 'Close';
+  head.appendChild(title); head.appendChild(status); head.appendChild(lockBtn); head.appendChild(closeBtn);
+  const body = document.createElement('div');
+  body.style.cssText = 'flex:1;overflow-y:auto;padding:14px 20px;display:flex;flex-direction:column;gap:12px';
+  box.appendChild(head); box.appendChild(body); overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  let _photos = [];           // [{id, filename, ...}, ...]
+  let _thumbBlobUrls = new Map(); // id → object URL (revoked on close)
+
+  function close() {
+    document.removeEventListener('keydown', onKey, true);
+    for (const url of _thumbBlobUrls.values()) URL.revokeObjectURL(url);
+    _thumbBlobUrls.clear();
+    try { overlay.remove(); } catch(_) {}
+  }
+  function onKey(ev) {
+    if (ev.key === 'Escape') { ev.preventDefault(); close(); }
+  }
+  document.addEventListener('keydown', onKey, true);
+  overlay.addEventListener('mousedown', ev => { if (ev.target === overlay) close(); });
+  closeBtn.onclick = close;
+  lockBtn.onclick = async () => {
+    try {
+      await invoke('lan_peer_vault_lock', { peerName });
+      toast('Vault locked', 'info');
+    } catch (e) { toast(`Lock failed: ${e}`, 'error'); }
+    close();
+  };
+
+  // Step 1 — vault status.
+  let vs;
+  body.innerHTML = '<div style="color:var(--text3);font-size:12px">Checking vault…</div>';
+  try {
+    vs = await invoke('lan_peer_vault_status', { peerName });
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--red-light);font-size:12px">Vault status failed: ${_esc(String(e))}</div>`;
+    return;
+  }
+  if (!vs.has_pin) {
+    body.innerHTML = `<div style="color:var(--text3);font-size:12px">Bu peer henüz vault için PIN belirlememiş. ${_esc(displayName)} Settings → Vault'tan bir PIN oluşturmalı.</div>`;
+    return;
+  }
+  if (!vs.unlocked) {
+    // Step 2 — PIN entry.  Inline form, not a stacked modal, so user
+    // doesn't lose context.
+    body.innerHTML = '';
+    const form = document.createElement('div');
+    form.style.cssText = 'max-width:360px;display:flex;flex-direction:column;gap:10px;margin:auto;padding-top:60px';
+    form.innerHTML = `<div style="font-size:14px;color:var(--cream);font-weight:600">🔒 ${_esc(displayName)} vault locked</div>
+      <div style="font-size:12px;color:var(--text3)">PIN'i Mac'teki vault PIN'in.  PC bunu Mac'e gönderiyor; Mac geçerse vault unlock olur.</div>`;
+    const pinInput = document.createElement('input');
+    pinInput.type = 'password';
+    pinInput.placeholder = 'PIN';
+    pinInput.className = 'input';
+    pinInput.style.cssText = 'padding:10px 12px;font-size:14px;background:var(--card2);border:1px solid var(--border);border-radius:6px;color:var(--cream)';
+    const submit = document.createElement('button');
+    submit.className = 'btn btn-primary';
+    submit.textContent = 'Unlock';
+    const errMsg = document.createElement('div');
+    errMsg.style.cssText = 'font-size:11px;color:var(--red-light);min-height:14px';
+    form.appendChild(pinInput); form.appendChild(submit); form.appendChild(errMsg);
+    body.appendChild(form);
+    setTimeout(() => pinInput.focus(), 30);
+    const tryUnlock = async () => {
+      const pin = pinInput.value;
+      if (!pin) return;
+      submit.disabled = true; submit.textContent = 'Unlocking…';
+      errMsg.textContent = '';
+      try {
+        await invoke('lan_peer_vault_unlock', { peerName, pin });
+        // Recurse — reopen the modal which now sees unlocked=true.
+        close();
+        _lanPeerBrowseVault(peerName, displayName);
+      } catch (e) {
+        const s = String(e);
+        if (s.includes('wrong')) errMsg.textContent = 'Yanlış PIN.';
+        else if (s.includes('lock')) errMsg.textContent = 'Çok fazla deneme — bekle.';
+        else errMsg.textContent = s;
+        submit.disabled = false; submit.textContent = 'Unlock';
+      }
+    };
+    submit.onclick = tryUnlock;
+    pinInput.addEventListener('keydown', ev => { if (ev.key === 'Enter') tryUnlock(); });
+    return;
+  }
+  // Step 3 — unlocked: pull photos and render grid.
+  lockBtn.style.display = '';
+  body.innerHTML = '<div style="color:var(--text3);font-size:12px">Loading photos…</div>';
+  let listResp;
+  try {
+    listResp = await invoke('lan_peer_list_photos', {
+      peerName,
+      vaultOnly: true,
+      offset: 0,
+      limit: 200,
+    });
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--red-light);font-size:12px">List failed: ${_esc(String(e))}</div>`;
+    return;
+  }
+  _photos = (listResp && Array.isArray(listResp.photos)) ? listResp.photos : [];
+  const total = (listResp && listResp.total) || _photos.length;
+  status.textContent = `${_photos.length.toLocaleString()} / ${total.toLocaleString()} photo${total === 1 ? '' : 's'}`;
+  if (_photos.length === 0) {
+    body.innerHTML = '<div style="color:var(--text3);font-size:12px;font-style:italic;margin:auto">Vault boş.</div>';
+    return;
+  }
+  body.innerHTML = '';
+  const grid = document.createElement('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px';
+  body.appendChild(grid);
+
+  // Lazy-load thumbs with IntersectionObserver so opening the modal
+  // doesn't hammer Mac with 200 HTTP requests at once.
+  const io = ('IntersectionObserver' in window) ? new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const el = e.target;
+      io.unobserve(el);
+      const id = +el.dataset.id;
+      invoke('lan_peer_get_thumb', { peerName, photoId: id })
+        .then(b64 => { el.style.backgroundImage = `url(data:image/jpeg;base64,${b64})`; })
+        .catch(() => { el.style.background = '#3a2828'; });
+    }
+  }, { root: body, rootMargin: '200px' }) : null;
+
+  for (const ph of _photos) {
+    const cell = document.createElement('div');
+    cell.dataset.id = ph.id;
+    cell.style.cssText = 'aspect-ratio:1;background:var(--card2);border:1px solid var(--border);border-radius:6px;background-size:cover;background-position:center;cursor:pointer;position:relative';
+    cell.title = ph.filename || '';
+    cell.onclick = () => _lanPeerOpenPhoto(peerName, ph, _photos);
+    grid.appendChild(cell);
+    if (io) io.observe(cell);
+    else {
+      // No IntersectionObserver — load all up front (rare).
+      invoke('lan_peer_get_thumb', { peerName, photoId: ph.id })
+        .then(b64 => { cell.style.backgroundImage = `url(data:image/jpeg;base64,${b64})`; })
+        .catch(() => {});
+    }
+  }
+}
+
+// v1.5.316 — Fullscreen preview of one remote photo.  Stacks above
+// the browse modal at zIndex 10500.  ←/→ navigate within the same
+// list.  Esc / click-outside closes.
+async function _lanPeerOpenPhoto(peerName, photo, list) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:10500;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:24px';
+  const img = document.createElement('img');
+  img.style.cssText = 'max-width:96vw;max-height:90vh;object-fit:contain;border-radius:6px;background:#111';
+  const info = document.createElement('div');
+  info.style.cssText = 'font-size:11px;color:#aaa';
+  overlay.appendChild(img); overlay.appendChild(info);
+  document.body.appendChild(overlay);
+  let idx = list.findIndex(p => p.id === photo.id);
+  if (idx < 0) idx = 0;
+  async function show(i) {
+    idx = (i + list.length) % list.length;
+    const p = list[idx];
+    info.textContent = `${idx + 1} / ${list.length} · ${p.filename || ''}`;
+    img.src = '';
+    img.alt = 'Loading…';
+    try {
+      const b64 = await invoke('lan_peer_get_photo', { peerName, photoId: p.id });
+      img.src = `data:image/jpeg;base64,${b64}`;
+    } catch (e) {
+      info.textContent = `Failed: ${e}`;
+    }
+  }
+  function close() {
+    document.removeEventListener('keydown', onKey, true);
+    try { overlay.remove(); } catch(_) {}
+  }
+  function onKey(ev) {
+    if (ev.key === 'Escape') { ev.preventDefault(); close(); }
+    else if (ev.key === 'ArrowRight') { ev.preventDefault(); show(idx + 1); }
+    else if (ev.key === 'ArrowLeft')  { ev.preventDefault(); show(idx - 1); }
+  }
+  document.addEventListener('keydown', onKey, true);
+  overlay.addEventListener('mousedown', ev => { if (ev.target === overlay) close(); });
+  show(idx);
+}
+
 // v1.5.314 — unpair.  Confirm first because re-pairing requires a
 // physical trip to the remote machine to read another code.
 async function _lanPeerUnpair(pairedRow) {
