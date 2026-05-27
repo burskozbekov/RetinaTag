@@ -12237,6 +12237,28 @@ function _lanRenderPeers() {
       pairBtn.onclick = () => _lanPeerPairFlow(p);
       row.appendChild(pairBtn);
     }
+    // v1.5.331 — Ping button on every row (paired or not).  Hits
+    // /api/ping over LAN so the user can distinguish "peer is up"
+    // from "peer is offline" without going through devtools.
+    const pingBtn = document.createElement('button');
+    pingBtn.className = 'btn btn-secondary btn-xs';
+    pingBtn.title = 'Test connectivity (/api/ping)';
+    pingBtn.textContent = 'Ping';
+    pingBtn.onclick = async () => {
+      pingBtn.disabled = true;
+      pingBtn.textContent = '...';
+      try {
+        const r = await invoke('lan_peer_ping', { addr: p.addr, port: p.port });
+        if (r && r.ok) toast(`✓ ${p.addr}:${p.port} reachable`, 'success');
+        else            toast(`✕ ${p.addr}:${p.port} no response`, 'warn');
+      } catch (e) {
+        toast(`✕ ${p.addr}:${p.port} — ${e}`, 'error');
+      } finally {
+        pingBtn.disabled = false;
+        pingBtn.textContent = 'Ping';
+      }
+    };
+    row.appendChild(pingBtn);
     list.appendChild(row);
   }
 }

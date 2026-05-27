@@ -15696,6 +15696,23 @@ pub async fn lan_peer_unpair(
     .map_err(|e| e.to_string())?
 }
 
+/// v1.5.331 — connectivity probe.  Hits `GET /api/ping` against the
+/// given peer endpoint and returns whether it responded successfully.
+/// Used by the "Ping" button in Settings → Tools so the user can
+/// distinguish "peer is up but pair isn't completing" from "peer is
+/// offline / unreachable" without diving into devtools.  No auth
+/// required — /api/ping is the public health endpoint.
+#[tauri::command]
+pub async fn lan_peer_ping(addr: String, port: u16) -> Result<serde_json::Value, String> {
+    let client = crate::peer_client::PeerClient::new(&addr, port);
+    let ok = client.ping().await;
+    Ok(serde_json::json!({
+        "ok": ok,
+        "addr": addr,
+        "port": port,
+    }))
+}
+
 // ── v1.5.315 — Remote vault browse commands ────────────────────────
 // All of these resolve the bearer token + addr+port from the local
 // `lan_peer_tokens` table by peer_name, build a one-shot PeerClient,

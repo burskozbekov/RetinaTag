@@ -1449,6 +1449,7 @@ pub fn run() {
             commands::lan_peer_pair_complete,
             commands::lan_peer_list_paired,
             commands::lan_peer_unpair,
+            commands::lan_peer_ping,
             commands::lan_peer_vault_status,
             commands::lan_peer_vault_unlock,
             commands::lan_peer_vault_lock,
