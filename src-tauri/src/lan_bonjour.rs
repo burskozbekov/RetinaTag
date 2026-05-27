@@ -252,3 +252,221 @@ pub fn snapshot_peers() -> Vec<LanPeer> {
     v.sort_by(|a, b| a.name.cmp(&b.name));
     v
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// v1.5.317 — `dns-sd.exe` subprocess fallback.
+//
+// `mdns-sd` (the Rust crate) competes with Apple's `mDNSResponder`
+// for UDP/5353 on Windows when Bonjour Service is installed (iTunes,
+// Bonjour Print Services, Xcode, etc. all install it).  Apple's
+// daemon wins the multicast filter race in practice on the user's
+// machine — we'd see our own advertise echo but never the peer's
+// announce.  The OS-level CLI `dns-sd.exe` talks DIRECTLY to
+// mDNSResponder, so it sees every service Apple Bonjour sees.
+//
+// This task spawns `dns-sd.exe -B _retinatag._tcp` once, parses the
+// "Add/Rmv" lines from its stdout, and for each Add runs a one-shot
+// `dns-sd.exe -L <name> _retinatag._tcp local` to resolve host +
+// port + TXT records.  Resolved peers go into the same PEERS map
+// the mdns-sd browser uses, so the FE gets identical events
+// regardless of which backend won.
+//
+// Best-effort: if dns-sd.exe isn't on PATH (user never installed
+// Bonjour Print Services / iTunes) we log and exit; the in-process
+// mdns-sd browser is still running and might pick things up.
+// ─────────────────────────────────────────────────────────────────────
+
+pub fn start_browse_dnssd(app_handle: tauri::AppHandle) -> Result<tokio::task::JoinHandle<()>, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::io::{BufRead, BufReader};
+    use tauri::Emitter;
+
+    // Quick existence probe — if dns-sd isn't there, bail before we
+    // spawn anything.
+    let _ = std::process::Command::new("dns-sd.exe")
+        .arg("-V")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x08000000)
+        .status()
+        .map_err(|e| format!("dns-sd.exe not found: {e}"))?;
+
+    let self_name = hostname_safe();
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let mut child = match std::process::Command::new("dns-sd.exe")
+            .args(["-B", SERVICE_TYPE.trim_end_matches('.'), "local"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(0x08000000)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[lan/dnssd] spawn failed: {e}");
+                return;
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => return,
+        };
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let Ok(line) = line else { continue };
+            // dns-sd -B output sample:
+            //   Browsing for _retinatag._tcp
+            //   Timestamp     A/R Flags if Domain   Service Type     Instance Name
+            //    3:41:36.880  Add     2  9 local.   _retinatag._tcp. KOMPEDER
+            //
+            // We only care about Add / Rmv rows after the header.
+            let trimmed = line.trim();
+            if !trimmed.contains("Add") && !trimmed.contains("Rmv") {
+                continue;
+            }
+            // Tokenize on whitespace; the last field is the instance
+            // name (may contain spaces in pathological cases, but the
+            // standard Mac/PC names don't).
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() < 6 {
+                continue;
+            }
+            // Layout: [time, A/R, flags, if, domain, type, name...]
+            let action = parts[1];
+            let name = parts[parts.len() - 1].to_string();
+            // Skip our own advertise.
+            if name.eq_ignore_ascii_case(&self_name) {
+                continue;
+            }
+            if action == "Rmv" {
+                let removed = {
+                    let mut map = peers_map().lock().unwrap_or_else(|e| e.into_inner());
+                    map.remove(&name)
+                };
+                if removed.is_some() {
+                    let _ = app_handle.emit("lan-peer-lost", &name);
+                }
+                continue;
+            }
+            // action == "Add" — resolve the service to host+port+TXT.
+            let resolved = resolve_via_dnssd(&name);
+            if let Some(peer) = resolved {
+                {
+                    let mut map = peers_map().lock().unwrap_or_else(|e| e.into_inner());
+                    map.insert(name.clone(), peer.clone());
+                }
+                let _ = app_handle.emit("lan-peer-found", &peer);
+            }
+        }
+        // dns-sd exited unexpectedly — kill the child if still alive
+        // and log; the in-process mdns-sd browser remains as backup.
+        let _ = child.kill();
+        eprintln!("[lan/dnssd] subprocess exited");
+    });
+    Ok(handle)
+}
+
+/// One-shot `dns-sd -L` call returning the host+port+TXT for a single
+/// instance name.  Synchronous; runs inside the spawn_blocking task.
+fn resolve_via_dnssd(instance_name: &str) -> Option<LanPeer> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    // dns-sd -L doesn't exit on its own — it streams updates.  We
+    // need to spawn it, read until we see a "can be reached at"
+    // line + the TXT block, then kill.
+    let mut child = std::process::Command::new("dns-sd.exe")
+        .args(["-L", instance_name, SERVICE_TYPE.trim_end_matches('.'), "local"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(0x08000000)
+        .spawn()
+        .ok()?;
+
+    let stdout = child.stdout.take()?;
+    let reader = std::io::BufReader::new(stdout);
+    use std::io::BufRead;
+
+    let mut host = String::new();
+    let mut port: u16 = 0;
+    let mut hostname = String::new();
+    let mut platform = String::new();
+    let mut version = String::new();
+    let mut got_target = false;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+
+    for line in reader.lines() {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        let Ok(line) = line else { continue };
+        let trimmed = line.trim();
+        // Sample line:
+        //   "Bugras-MBP.local.:9876 can be reached at Bugras-MBP.local.:9876 (interface 9)"
+        if trimmed.contains("can be reached at") {
+            // Extract "host:port" from the right-hand side of "at ".
+            if let Some(at_idx) = trimmed.find("can be reached at ") {
+                let rest = &trimmed[at_idx + "can be reached at ".len()..];
+                let endpoint = rest.split_whitespace().next().unwrap_or("");
+                if let Some(colon) = endpoint.rfind(':') {
+                    host = endpoint[..colon].trim_end_matches('.').to_string();
+                    port = endpoint[colon + 1..].parse().unwrap_or(0);
+                    got_target = true;
+                }
+            }
+            continue;
+        }
+        // TXT lines look like:  hostname=KOMPEDER
+        //                       platform=windows
+        //                       version=1.5.316
+        if let Some(eq) = trimmed.find('=') {
+            let key = trimmed[..eq].trim();
+            let val_raw = trimmed[eq + 1..].trim();
+            // dns-sd wraps TXT values in quotes sometimes; strip.
+            let val = val_raw.trim_matches('"').to_string();
+            match key {
+                "hostname" => hostname = val,
+                "platform" => platform = val,
+                "version"  => version  = val,
+                _ => {}
+            }
+            // dns-sd typically dumps all TXT lines together with the
+            // target.  Once we have target + at least one TXT key,
+            // we can break early — saves a few hundred ms per peer.
+            if got_target && !hostname.is_empty() {
+                break;
+            }
+        }
+    }
+    let _ = child.kill();
+
+    if !got_target || host.is_empty() || port == 0 {
+        return None;
+    }
+    // Resolve host to an IPv4.  `host` is typically "<name>.local.";
+    // we ask std::net to do the lookup, falling through to the bare
+    // host string if it can't (PC's hosts file or mDNS resolver
+    // handles .local. on most setups).
+    let addr = (host.as_str(), port).to_socket_addrs()
+        .ok()
+        .and_then(|mut iter| iter.find_map(|a| match a {
+            std::net::SocketAddr::V4(v4) => Some(v4.ip().to_string()),
+            _ => None,
+        }))
+        .unwrap_or_else(|| host.clone());
+
+    Some(LanPeer {
+        name: instance_name.to_string(),
+        addr,
+        port,
+        hostname,
+        platform,
+        version,
+        last_seen: chrono::Utc::now().timestamp(),
+    })
+}
+
+use std::net::ToSocketAddrs;

@@ -1101,6 +1101,20 @@ pub fn run() {
                         Err(e) => eprintln!("[lan] Bonjour browse failed: {}", e),
                     }
                 });
+                // v1.5.317 — On Windows where Apple's mDNSResponder is
+                // running (Bonjour Service, iTunes, Print Services), the
+                // in-process `mdns-sd` crate frequently loses the UDP
+                // 5353 multicast race and the browser above stays empty.
+                // `dns-sd.exe` talks straight to mDNSResponder so it
+                // sees every service Apple's stack sees.  We spawn it
+                // in parallel; both writers feed the same PEERS map.
+                let app_handle_for_dnssd = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    match crate::lan_bonjour::start_browse_dnssd(app_handle_for_dnssd) {
+                        Ok(_h) => eprintln!("[lan] dns-sd browsing {}", crate::lan_bonjour::SERVICE_TYPE),
+                        Err(e) => eprintln!("[lan] dns-sd browse skipped: {}", e),
+                    }
+                });
             }
 
             // v1.5.302 — Pre-warm powershell.exe + PresentationCore so the
