@@ -2703,6 +2703,21 @@ select.tb-select:focus{border-color:var(--red-dark)}
                 <span id="lanPeersHint" style="font-size:11px;color:var(--text3)"></span>
               </div>
               <div id="lanPeerList" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
+              <!-- v1.5.323 — Manual peer add. Bonjour discovery sometimes
+                   fails on misconfigured networks (Wi-Fi isolation, multiple
+                   VLANs, Apple Bonjour daemon stealing the socket).  This
+                   lets the user type "ip:port" directly and bypass mDNS. -->
+              <details style="margin-top:8px">
+                <summary style="cursor:pointer;color:var(--text3);font-size:11px">📝 Add peer manually (bypass Bonjour)</summary>
+                <div style="display:flex;gap:6px;align-items:center;margin-top:8px">
+                  <input id="lanManualPeerAddr" placeholder="192.168.1.111:9876" class="input"
+                    style="flex:1;padding:6px 10px;font-size:12px;background:var(--card2);border:1px solid var(--border);border-radius:6px;color:var(--cream);font-family:'JetBrains Mono','Consolas',monospace" />
+                  <button class="btn btn-secondary btn-xs" id="btnLanManualPeerAdd">Add</button>
+                </div>
+                <div style="font-size:10px;color:var(--text3);margin-top:6px">
+                  Bonjour normalde otomatik bulur. Mac'in IP'sini System Settings → Network'ten alıp buraya yazıp Add'e bas. Eklenince Pair butonu görünür.
+                </div>
+              </details>
             </div>
           </div>
 
@@ -12557,6 +12572,43 @@ function _showIncomingPairCodeModal(code, deviceName) {
 document.addEventListener('DOMContentLoaded', () => {
   const refresh = document.getElementById('btnLanRefreshPeers');
   if (refresh) refresh.onclick = _lanPeersRefresh;
+  // v1.5.323 — manual peer add for users on networks where Bonjour
+  // doesn't propagate.  Inject a synthetic peer with the typed
+  // ip:port; from there the existing Pair flow works unchanged.
+  const manualBtn = document.getElementById('btnLanManualPeerAdd');
+  const manualInp = document.getElementById('lanManualPeerAddr');
+  if (manualBtn && manualInp) {
+    const submit = () => {
+      const raw = (manualInp.value || '').trim();
+      if (!raw) return;
+      // Accept "192.168.1.111", "192.168.1.111:9876", or
+      // "hostname.local:9876".  Default port is 9876.
+      let addr = raw, port = 9876;
+      const colon = raw.lastIndexOf(':');
+      if (colon > 0 && colon < raw.length - 1) {
+        const tail = raw.slice(colon + 1);
+        const p = parseInt(tail, 10);
+        if (Number.isInteger(p) && p > 0 && p < 65536) {
+          addr = raw.slice(0, colon);
+          port = p;
+        }
+      }
+      const name = `manual:${addr}:${port}`;
+      const peer = {
+        name, addr, port,
+        hostname: addr,
+        platform: 'unknown',
+        version: 'unknown',
+        last_seen: Math.floor(Date.now() / 1000),
+      };
+      _lanPeerMap.set(name, peer);
+      _lanRenderPeers();
+      manualInp.value = '';
+      toast(`Peer added: ${addr}:${port}. Click Pair on the new row.`, 'success');
+    };
+    manualBtn.onclick = submit;
+    manualInp.addEventListener('keydown', ev => { if (ev.key === 'Enter') submit(); });
+  }
   // Initial draw — empty until the first event lands, then the
   // background listener takes over.
   _lanPeersRefresh();
