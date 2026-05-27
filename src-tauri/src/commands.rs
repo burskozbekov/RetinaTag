@@ -4734,8 +4734,17 @@ pub async fn get_smart_collection_photos(
 ) -> Result<Vec<PhotoSummary>, String> {
     let rules: Vec<CollectionRule> = serde_json::from_str(&rules_json)
         .map_err(|e| format!("Invalid rules JSON: {}", e))?;
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::query_smart_collection(&conn, &rules).map_err(|e| e.to_string())
+    // v1.5.326 — Smart-collection queries fan into multiple JOINs +
+    // WHERE permutations across photos / tags / face_regions; on the
+    // 66 k library that easily hits 200-500 ms.  Off the runtime so
+    // it doesn't stall the Smart Collection panel's render.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::query_smart_collection(&conn, &rules).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 7. EXIF / GPS ───────────────────────────────────────────────────────────
