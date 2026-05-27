@@ -12147,25 +12147,68 @@ function _lanRenderPeers() {
   const list = document.getElementById('lanPeerList');
   const hint = document.getElementById('lanPeersHint');
   if (!list) return;
-  if (_lanPeerMap.size === 0) {
+  // v1.5.324 — Merge LIVE-discovered peers with PAIRED-but-offline
+  // peers.  If you paired with a Mac yesterday and Bonjour dropped
+  // it today, the row should still appear (greyed out) so you can
+  // re-try Browse rather than have it vanish from the UI.
+  const merged = new Map(); // name → {peer, paired, online}
+  for (const p of _lanPeerMap.values()) {
+    if (!p || !p.name) continue;
+    merged.set(p.name, { peer: p, paired: _lanPairedPeerMap.has(p.name), online: true });
+  }
+  for (const row of _lanPairedPeerMap.values()) {
+    if (!row || !row.peer_name || merged.has(row.peer_name)) continue;
+    // Paired-but-not-discovered: synthesize a peer object from the
+    // stored token row so the Pair flow's `addr` / `port` keys still
+    // work for a Browse attempt.
+    merged.set(row.peer_name, {
+      peer: {
+        name: row.peer_name,
+        addr: row.addr,
+        port: row.port,
+        hostname: row.hostname || row.peer_name,
+        platform: row.platform || 'unknown',
+        version: row.version || '',
+      },
+      paired: true,
+      online: false,
+    });
+  }
+  if (merged.size === 0) {
     list.innerHTML = '<div style="font-size:11px;color:var(--text3);font-style:italic">Henüz başka cihaz görünmüyor. Mac\'te uygulamanın açık olduğundan ve aynı Wi-Fi\'da olduğunuzdan emin ol.</div>';
     if (hint) hint.textContent = '';
     return;
   }
-  if (hint) hint.textContent = `${_lanPeerMap.size} cihaz`;
-  // Stable order by name.
-  const peers = [..._lanPeerMap.values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const onlineCount = [...merged.values()].filter(x => x.online).length;
+  if (hint) {
+    hint.textContent = onlineCount === merged.size
+      ? `${merged.size} cihaz`
+      : `${onlineCount} online / ${merged.size} toplam`;
+  }
+  // Stable order: online first, then paired-offline; alphabetical within.
+  const rows = [...merged.values()].sort((a, b) => {
+    if (a.online !== b.online) return a.online ? -1 : 1;
+    return (a.peer.name || '').localeCompare(b.peer.name || '');
+  });
   list.innerHTML = '';
-  for (const p of peers) {
+  for (const entry of rows) {
+    const p = entry.peer;
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--card2);border:1px solid var(--border);border-radius:6px';
+    // v1.5.324 — Offline (paired-but-not-discovered) rows dim down so
+    // it's obvious the peer isn't broadcasting; Browse still allowed
+    // because the user might know the peer is reachable anyway.
+    const bg = entry.online ? 'var(--card2)' : 'rgba(50,50,55,0.4)';
+    const opacity = entry.online ? '1' : '0.6';
+    row.style.cssText = `display:flex;align-items:center;gap:10px;padding:8px 10px;background:${bg};border:1px solid var(--border);border-radius:6px;opacity:${opacity}`;
     const icon = document.createElement('div');
     icon.style.cssText = 'font-size:18px;flex-shrink:0';
     icon.textContent = _lanPlatformIcon(p);
     const name = document.createElement('div');
     name.style.cssText = 'flex:1;color:var(--cream);font-size:12px;min-width:0';
     const ver = p.version ? ` · v${_esc(p.version)}` : '';
-    name.innerHTML = `<div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(p.hostname || p.name || 'unknown')}</div>
+    const offlineTag = entry.online ? '' :
+      ' <span style="color:var(--text3);font-size:10px;font-weight:400">· offline</span>';
+    name.innerHTML = `<div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(p.hostname || p.name || 'unknown')}${offlineTag}</div>
       <div style="font-size:10px;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(p.addr || '')}:${p.port || ''}${ver}</div>`;
     row.appendChild(icon);
     row.appendChild(name);
