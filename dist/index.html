@@ -12119,7 +12119,8 @@ document.addEventListener('DOMContentLoaded', () => {
 // also calls lan_list_peers on Settings open to seed from an
 // already-warm browser (e.g. user reopened Settings 30 s after
 // launch — peers have been ticking in the whole time).
-const _lanPeerMap = new Map();   // name → peer
+const _lanPeerMap = new Map();        // name → discovered peer (Bonjour)
+const _lanPairedPeerMap = new Map();  // peer_name → paired-token row
 function _lanPlatformIcon(p) {
   const pf = (p && p.platform || '').toLowerCase();
   if (pf.includes('mac'))    return '🍎';
@@ -12153,6 +12154,25 @@ function _lanRenderPeers() {
       <div style="font-size:10px;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(p.addr || '')}:${p.port || ''}${ver}</div>`;
     row.appendChild(icon);
     row.appendChild(name);
+    // v1.5.314 — Pair button or paired badge per peer.
+    const paired = _lanPairedPeerMap.get(p.name);
+    if (paired) {
+      const badge = document.createElement('span');
+      badge.style.cssText = 'font-size:11px;color:var(--green-light,#7bc77b);padding:3px 8px;border:1px solid var(--green-light,#7bc77b);border-radius:10px;flex-shrink:0';
+      badge.textContent = '✓ paired';
+      const unpair = document.createElement('button');
+      unpair.className = 'btn btn-secondary btn-xs';
+      unpair.textContent = 'Unpair';
+      unpair.onclick = () => _lanPeerUnpair(paired);
+      row.appendChild(badge);
+      row.appendChild(unpair);
+    } else {
+      const pairBtn = document.createElement('button');
+      pairBtn.className = 'btn btn-primary btn-xs';
+      pairBtn.textContent = 'Pair';
+      pairBtn.onclick = () => _lanPeerPairFlow(p);
+      row.appendChild(pairBtn);
+    }
     list.appendChild(row);
   }
 }
@@ -12163,11 +12183,92 @@ async function _lanPeersRefresh() {
     if (Array.isArray(peers)) {
       for (const p of peers) if (p && p.name) _lanPeerMap.set(p.name, p);
     }
+    await _lanPairedPeersRefresh();
     _lanRenderPeers();
   } catch (e) {
     const list = document.getElementById('lanPeerList');
     if (list) list.innerHTML = `<div style="font-size:11px;color:var(--red-light)">Error: ${_esc(String(e))}</div>`;
   }
+}
+// v1.5.314 — paired-peer cache (tokens we've obtained).  Keyed by
+// peer_name so _lanRenderPeers can light up the ✓ badge for whichever
+// rows correspond to already-paired remotes.
+async function _lanPairedPeersRefresh() {
+  try {
+    const paired = await invoke('lan_peer_list_paired');
+    _lanPairedPeerMap.clear();
+    if (Array.isArray(paired)) {
+      for (const row of paired) {
+        if (row && row.peer_name) _lanPairedPeerMap.set(row.peer_name, row);
+      }
+    }
+  } catch (_) { /* keep old map on failure */ }
+}
+// v1.5.314 — Pair flow.  Two-step user interaction:
+//   1. POST /api/pair/request to the peer → modal shows on remote
+//      with a 6-digit code.
+//   2. User reads the code off the remote, types it here, we POST
+//      /api/pair/complete, store the returned token, refresh list.
+async function _lanPeerPairFlow(p) {
+  if (!p || !p.addr || !p.port) return;
+  // Step 1 — request the code modal on the peer.
+  try {
+    await invoke('lan_peer_pair_request', { addr: p.addr, port: p.port });
+  } catch (e) {
+    toast(`Pair request failed: ${e}`, 'error');
+    return;
+  }
+  // Step 2 — ask the user for the 6-digit code shown on the peer.
+  const code = await inputModal({
+    title: `Pair with ${p.hostname || p.name}`,
+    message: `${p.hostname || p.name} ekranındaki 6 haneli kodu gir.\n(Code 5 dakika içinde geçersiz olur.)`,
+    placeholder: '123456',
+    okLabel: 'Pair',
+  });
+  if (!code) return;
+  const trimmed = String(code).replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(trimmed)) {
+    toast('Code 6 rakam olmalı.', 'warn');
+    return;
+  }
+  // Step 3 — complete the pair.  Backend stores the token and emits
+  // back the row id; we refresh so the badge appears.
+  try {
+    await invoke('lan_peer_pair_complete', {
+      peerName: p.name,
+      addr: p.addr,
+      port: p.port,
+      code: trimmed,
+      hostname: p.hostname || null,
+      platform: p.platform || null,
+      version: p.version || null,
+    });
+    toast(`Paired with ${p.hostname || p.name}`, 'success');
+  } catch (e) {
+    toast(`Pair failed: ${e}`, 'error');
+    return;
+  }
+  await _lanPairedPeersRefresh();
+  _lanRenderPeers();
+}
+// v1.5.314 — unpair.  Confirm first because re-pairing requires a
+// physical trip to the remote machine to read another code.
+async function _lanPeerUnpair(pairedRow) {
+  const ok = await confirmModal({
+    title: 'Unpair this desktop',
+    message: `"${pairedRow.peer_name}" eşleşmesi kaldırılacak. Tekrar eşlemek için Mac'in ekranındaki kodu okumalısın.`,
+    okLabel: 'Unpair', danger: true,
+  });
+  if (!ok) return;
+  try {
+    await invoke('lan_peer_unpair', { id: pairedRow.id });
+    toast('Unpaired', 'info');
+  } catch (e) {
+    toast(`Unpair failed: ${e}`, 'error');
+    return;
+  }
+  await _lanPairedPeersRefresh();
+  _lanRenderPeers();
 }
 // Live updates without polling — fired by lan_bonjour::start_browse.
 (async () => {
