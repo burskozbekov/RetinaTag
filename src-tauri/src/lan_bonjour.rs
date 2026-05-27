@@ -394,7 +394,9 @@ fn resolve_via_dnssd(instance_name: &str) -> Option<LanPeer> {
     let mut hostname = String::new();
     let mut platform = String::new();
     let mut version = String::new();
+    let mut explicit_addr = String::new();
     let mut got_target = false;
+    let mut txt_lines_seen = 0u32;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
 
@@ -419,44 +421,88 @@ fn resolve_via_dnssd(instance_name: &str) -> Option<LanPeer> {
             }
             continue;
         }
-        // TXT lines look like:  hostname=KOMPEDER
-        //                       platform=windows
-        //                       version=1.5.316
+        // TXT lines.  v1.5.318 — different platforms ship different
+        // TXT key sets.  Mac v1.5.276 sends:
+        //   platform=macos proto=1 port=9876 version=1.5.276 addr=192.168.1.111
+        // PC v1.5.310+ sends:
+        //   version=1.5.310 platform=windows hostname=KOMPEDER
+        // Accept the union, fall back gracefully on missing keys.
         if let Some(eq) = trimmed.find('=') {
-            let key = trimmed[..eq].trim();
-            let val_raw = trimmed[eq + 1..].trim();
-            // dns-sd wraps TXT values in quotes sometimes; strip.
-            let val = val_raw.trim_matches('"').to_string();
-            match key {
-                "hostname" => hostname = val,
-                "platform" => platform = val,
-                "version"  => version  = val,
-                _ => {}
+            // Skip lines that look like "Browsing for ..." or contain
+            // " = " (those are the header lines, not TXT pairs).
+            if trimmed.contains(' ') && !trimmed.contains(" =") {
+                // A single dns-sd output line can carry MULTIPLE TXT
+                // pairs separated by whitespace: "platform=macos
+                // proto=1 port=9876".  Split on whitespace and walk
+                // each k=v pair.
+                let mut any_pair = false;
+                for pair in trimmed.split_whitespace() {
+                    if let Some(eq2) = pair.find('=') {
+                        any_pair = true;
+                        let key = pair[..eq2].trim();
+                        let val = pair[eq2 + 1..].trim().trim_matches('"').to_string();
+                        match key {
+                            "hostname" => hostname = val,
+                            "platform" => platform = val,
+                            "version"  => version  = val,
+                            "addr"     => explicit_addr = val,
+                            _ => {}
+                        }
+                    }
+                }
+                if any_pair {
+                    txt_lines_seen += 1;
+                }
+            } else {
+                let key = trimmed[..eq].trim();
+                let val = trimmed[eq + 1..].trim().trim_matches('"').to_string();
+                match key {
+                    "hostname" => hostname = val,
+                    "platform" => platform = val,
+                    "version"  => version  = val,
+                    "addr"     => explicit_addr = val,
+                    _ => {}
+                }
+                txt_lines_seen += 1;
             }
-            // dns-sd typically dumps all TXT lines together with the
-            // target.  Once we have target + at least one TXT key,
-            // we can break early — saves a few hundred ms per peer.
-            if got_target && !hostname.is_empty() {
+            // Break after we have the target line + at least one
+            // TXT line consumed.  Some platforms (Mac v1.5.276) emit
+            // everything on a single line so this fires immediately
+            // after the target.
+            if got_target && txt_lines_seen > 0 {
                 break;
             }
         }
     }
     let _ = child.kill();
 
-    if !got_target || host.is_empty() || port == 0 {
+    if !got_target || port == 0 {
         return None;
     }
-    // Resolve host to an IPv4.  `host` is typically "<name>.local.";
-    // we ask std::net to do the lookup, falling through to the bare
-    // host string if it can't (PC's hosts file or mDNS resolver
-    // handles .local. on most setups).
-    let addr = (host.as_str(), port).to_socket_addrs()
-        .ok()
-        .and_then(|mut iter| iter.find_map(|a| match a {
-            std::net::SocketAddr::V4(v4) => Some(v4.ip().to_string()),
-            _ => None,
-        }))
-        .unwrap_or_else(|| host.clone());
+    // Pick the address.  Order: (1) explicit `addr` TXT key — Mac
+    // ships its LAN IP this way, no DNS round-trip needed.
+    // (2) std::net lookup of `host` — works on PC↔PC where host is
+    // the Windows COMPUTERNAME which Bonjour A-resolves. (3) raw
+    // host string — last resort, reqwest will try to resolve it.
+    let addr = if !explicit_addr.is_empty() && explicit_addr.parse::<std::net::Ipv4Addr>().is_ok() {
+        explicit_addr.clone()
+    } else if !host.is_empty() {
+        (host.as_str(), port).to_socket_addrs()
+            .ok()
+            .and_then(|mut iter| iter.find_map(|a| match a {
+                std::net::SocketAddr::V4(v4) => Some(v4.ip().to_string()),
+                _ => None,
+            }))
+            .unwrap_or_else(|| host.clone())
+    } else {
+        return None;
+    };
+
+    // If the peer didn't send a hostname (Mac case), use the
+    // instance name — that's what the FE displays in the row title.
+    if hostname.is_empty() {
+        hostname = instance_name.to_string();
+    }
 
     Some(LanPeer {
         name: instance_name.to_string(),
