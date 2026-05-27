@@ -4640,8 +4640,15 @@ pub async fn merge_tags(
     target: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<usize, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::merge_tags(&conn, &source, &target).map_err(|e| e.to_string())
+    // v1.5.328 — Tag-manager mutators can touch thousands of rows
+    // (one tag may apply to 5-10 k photos). Off the runtime.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::merge_tags(&conn, &source, &target).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -4650,8 +4657,13 @@ pub async fn rename_tag_global(
     new_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<usize, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::rename_tag(&conn, &old_name, &new_name).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::rename_tag(&conn, &old_name, &new_name).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -4659,16 +4671,28 @@ pub async fn delete_tag_global(
     tag: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<usize, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::delete_tag_globally(&conn, &tag).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::delete_tag_globally(&conn, &tag).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn get_tag_details(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<TagInfo>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_tag_details(&conn).map_err(|e| e.to_string())
+    // get_tag_details aggregates per-tag photo counts across the
+    // tags table — significant work on a library with 200 k+ tags.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_tag_details(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 6. Collections / Smart Albums ───────────────────────────────────────────
