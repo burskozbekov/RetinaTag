@@ -2557,14 +2557,26 @@ pub async fn export_data(
     strip_gps: Option<bool>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ExportResult, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
+    // v1.5.330 — Exports walk every photo (66 k rows) + every tag
+    // (200 k rows) and serialise to CSV/JSON/MD on disk.  On the
+    // user's library that's seconds, not milliseconds — the tokio
+    // runtime would be hard-stalled.  spawn_blocking lifts the whole
+    // walk off the runtime; the FE can keep firing other commands
+    // (refreshStats, lightbox loads, etc.) while the export runs.
+    let db = state.db.clone();
     let scrub = strip_gps.unwrap_or(false);
-    let count = match format.as_str() {
-        "csv" => export::export_csv_with_options(&conn, &output_path, scrub).map_err(|e| e.to_string())?,
-        "json" => export::export_json_with_options(&conn, &output_path, scrub).map_err(|e| e.to_string())?,
-        "md" | "markdown" => export::export_markdown(&conn, &output_path, scrub).map_err(|e| e.to_string())?,
-        _ => return Err("Unknown format. Use 'csv', 'json', or 'md'".into()),
-    };
+    let output_for_task = output_path.clone();
+    let count: usize = tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        match format.as_str() {
+            "csv" => export::export_csv_with_options(&conn, &output_for_task, scrub).map_err(|e| e.to_string()),
+            "json" => export::export_json_with_options(&conn, &output_for_task, scrub).map_err(|e| e.to_string()),
+            "md" | "markdown" => export::export_markdown(&conn, &output_for_task, scrub).map_err(|e| e.to_string()),
+            _ => Err("Unknown format. Use 'csv', 'json', or 'md'".into()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     Ok(ExportResult { path: output_path, count })
 }
 
