@@ -16,7 +16,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post},
@@ -63,6 +63,8 @@ pub async fn run_server(
         .route("/api/vault/status", get(vault_status))
         .route("/api/vault/unlock", post(vault_unlock))
         .route("/api/vault/lock", post(vault_lock))
+        // v1.5.321 — photo listing for paired peers.
+        .route("/api/photos", get(list_photos))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
     let bind = format!("0.0.0.0:{}", PORT);
@@ -272,6 +274,90 @@ async fn vault_lock(
         app_state.vault_set_kek(None);
     }
     StatusCode::OK.into_response()
+}
+
+// ── v1.5.321 — /api/photos ─────────────────────────────────────────────
+// Paginated list of photos for a paired peer to render in its remote-
+// library view.  Same shape as Mac's spec:
+//   GET /api/photos?vault_only=<bool>&offset=N&limit=M
+//   → {photos: [...], total, offset, limit}
+// vault_only=true requires the vault to be currently unlocked; 401
+// otherwise so the FE can prompt for PIN.
+
+#[derive(Deserialize)]
+struct ListPhotosQuery {
+    #[serde(default)]
+    vault_only: Option<bool>,
+    #[serde(default)]
+    offset: Option<i64>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ListPhotosResponse {
+    photos: Vec<crate::models::PhotoSummary>,
+    total:  i64,
+    offset: i64,
+    limit:  i64,
+}
+
+async fn list_photos(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(params): Query<ListPhotosQuery>,
+) -> impl IntoResponse {
+    // Auth.
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        if auth_device_id(&headers, &conn).is_none() {
+            return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
+        }
+    }
+    let vault_only = params.vault_only.unwrap_or(false);
+    let offset = params.offset.unwrap_or(0).max(0);
+    // Soft cap at 500 per page — keeps a single response under a few
+    // hundred kB even when filenames + tag arrays balloon, lets the
+    // peer paginate visibly.
+    let limit = params.limit.unwrap_or(200).clamp(1, 500);
+
+    // Vault-only gate: if the vault is currently locked we DON'T leak
+    // the existence / count of vault photos.  Caller should POST
+    // /api/vault/unlock first.
+    if vault_only {
+        let unlocked = if let Some(ref handle) = state.app_handle {
+            use tauri::Manager;
+            let app_state = handle.state::<crate::AppState>();
+            app_state.vault_is_unlocked()
+        } else { false };
+        if !unlocked {
+            return (StatusCode::UNAUTHORIZED, "Vault locked").into_response();
+        }
+    }
+
+    // Run the actual query off the axum runtime thread.  db::get_photos
+    // on a 66 k library is 50-200 ms cold.
+    let db = state.db.clone();
+    let result: Result<(Vec<crate::models::PhotoSummary>, i64), String> =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<crate::models::PhotoSummary>, i64), String> {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            crate::db::get_photos(
+                &conn, offset, limit, None, None, None, Some(vault_only),
+            ).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok((photos, total)) => Json(ListPhotosResponse {
+            photos, total, offset, limit,
+        }).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("list_photos: {e}")).into_response(),
+    }
 }
 
 // ── /api/upload ─────────────────────────────────────────────────────────
