@@ -12643,7 +12643,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const manualBtn = document.getElementById('btnLanManualPeerAdd');
   const manualInp = document.getElementById('lanManualPeerAddr');
   if (manualBtn && manualInp) {
-    const submit = () => {
+    const submit = async () => {
       const raw = (manualInp.value || '').trim();
       if (!raw) return;
       // Accept "192.168.1.111", "192.168.1.111:9876", or
@@ -12658,6 +12658,22 @@ document.addEventListener('DOMContentLoaded', () => {
           port = p;
         }
       }
+      // v1.5.332 — Ping the address before adding the row so the user
+      // gets immediate feedback (reachable / unreachable) instead of
+      // having to click Pair first and wait for a confusing timeout.
+      manualBtn.disabled = true;
+      manualBtn.textContent = 'Pinging…';
+      let pingOk = false;
+      try {
+        const r = await invoke('lan_peer_ping', { addr, port });
+        pingOk = !!(r && r.ok);
+      } catch (_) { /* treat as unreachable */ }
+      manualBtn.disabled = false;
+      manualBtn.textContent = 'Add';
+      if (!pingOk) {
+        toast(`${addr}:${port} ulaşılamıyor. IP doğru mu? Mac açık mı?`, 'warn');
+        return;
+      }
       const name = `manual:${addr}:${port}`;
       const peer = {
         name, addr, port,
@@ -12669,7 +12685,7 @@ document.addEventListener('DOMContentLoaded', () => {
       _lanPeerMap.set(name, peer);
       _lanRenderPeers();
       manualInp.value = '';
-      toast(`Peer added: ${addr}:${port}. Click Pair on the new row.`, 'success');
+      toast(`✓ ${addr}:${port} eklendi — Pair'e bas`, 'success');
     };
     manualBtn.onclick = submit;
     manualInp.addEventListener('keydown', ev => { if (ev.key === 'Enter') submit(); });
