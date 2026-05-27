@@ -16,9 +16,9 @@
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Multipart, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -65,6 +65,9 @@ pub async fn run_server(
         .route("/api/vault/lock", post(vault_lock))
         // v1.5.321 — photo listing for paired peers.
         .route("/api/photos", get(list_photos))
+        // v1.5.322 — thumb + full-photo byte streaming for paired peers.
+        .route("/api/thumb/:id", get(thumb_for_id))
+        .route("/api/photo/:id", get(photo_for_id))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
     let bind = format!("0.0.0.0:{}", PORT);
@@ -357,6 +360,227 @@ async fn list_photos(
             photos, total, offset, limit,
         }).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("list_photos: {e}")).into_response(),
+    }
+}
+
+// ── v1.5.322 — /api/thumb/:id + /api/photo/:id ─────────────────────────
+// Byte-streaming endpoints for paired peers.  Same auth gate as
+// /api/photos.  For vault photos (.rtenc on disk) we decrypt in-memory
+// before sending — the peer never sees ciphertext nor needs our KEK.
+
+fn mime_for_ext(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png"          => "image/png",
+        "gif"          => "image/gif",
+        "webp"         => "image/webp",
+        "bmp"          => "image/bmp",
+        "heic" | "heif" => "image/heic",
+        "tiff" | "tif" => "image/tiff",
+        "mp4" | "m4v"  => "video/mp4",
+        "mov"          => "video/quicktime",
+        "webm"         => "video/webm",
+        "mkv"          => "video/x-matroska",
+        _              => "application/octet-stream",
+    }
+}
+
+async fn thumb_for_id(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    AxumPath(photo_id): AxumPath<i64>,
+) -> impl IntoResponse {
+    // Auth.
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        if auth_device_id(&headers, &conn).is_none() {
+            return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
+        }
+    }
+    // Resolve photo + hash.
+    let (path, hash) = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        match crate::db::get_photo_path_and_hash(&conn, photo_id) {
+            Ok(v) => v,
+            Err(_) => return (StatusCode::NOT_FOUND, format!("photo {photo_id} not found")).into_response(),
+        }
+    };
+    // Vault gate: if the path is a .rtenc, vault must be unlocked.
+    let is_vault = crate::vault_files::is_encrypted_path(std::path::Path::new(&path));
+    if is_vault {
+        let unlocked = if let Some(ref handle) = state.app_handle {
+            use tauri::Manager;
+            let app_state = handle.state::<crate::AppState>();
+            app_state.vault_is_unlocked()
+        } else { false };
+        if !unlocked {
+            return (StatusCode::UNAUTHORIZED, "Vault locked").into_response();
+        }
+    }
+    // Off the runtime: thumbnail creation can read+resize a big image.
+    let thumbs_dir = if let Some(ref handle) = state.app_handle {
+        use tauri::Manager;
+        let app_state = handle.state::<crate::AppState>();
+        app_state.thumbnails_dir.clone()
+    } else {
+        // Fallback (shouldn't happen in normal operation).
+        std::env::temp_dir().join("retinatag-thumbs")
+    };
+    let db = state.db.clone();
+    let kek_opt: Option<[u8; 32]> = if is_vault {
+        if let Some(ref handle) = state.app_handle {
+            use tauri::Manager;
+            let app_state = handle.state::<crate::AppState>();
+            // Snapshot the KEK into a stack-local to avoid holding the
+            // mutex into spawn_blocking (the lock can't cross await).
+            let mut snap = None;
+            if let Ok(g) = app_state.vault_kek.lock() {
+                snap = *g;
+            }
+            snap
+        } else { None }
+    } else { None };
+    let result: Result<Vec<u8>, String> = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        if is_vault {
+            let kek = kek_opt.ok_or_else(|| "no kek".to_string())?;
+            // Try the encrypted-thumb DB blob first; fall back to
+            // decrypting the .rtenc + downsizing to 256 px.
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            if let Ok(Some(b)) = crate::db::get_encrypted_thumb(&conn, photo_id) {
+                drop(conn);
+                let plain = crate::vault_crypto::open(&kek, &b).map_err(|e| e.to_string())?;
+                return Ok(plain);
+            }
+            drop(conn);
+            let enc_path = std::path::PathBuf::from(&path);
+            let plain = crate::vault_files::decrypt_to_bytes(&enc_path, &kek)?;
+            // Resize to a 256-px JPEG so the peer doesn't pull a
+            // 12-megapixel HEIC for a thumbnail.
+            let img = image::load_from_memory(&plain).map_err(|e| e.to_string())?;
+            let img = img.thumbnail(256, 256);
+            let mut buf = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut buf, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
+            Ok(buf.into_inner())
+        } else {
+            // Non-vault: standard cached 256-px JPEG path.
+            let _b64 = crate::thumbnail::get_or_create_thumbnail(&path, &hash, &thumbs_dir, 256)
+                .map_err(|e| e.to_string())?;
+            let cache_name = crate::thumbnail::thumb_cache_name(&hash);
+            let thumb_path = thumbs_dir.join(&cache_name);
+            std::fs::read(&thumb_path).map_err(|e| format!("read thumb: {e}"))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+
+    match result {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .body(axum::body::Body::from(bytes))
+            .unwrap()
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("thumb: {e}")).into_response(),
+    }
+}
+
+async fn photo_for_id(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    AxumPath(photo_id): AxumPath<i64>,
+) -> impl IntoResponse {
+    // Auth.
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        if auth_device_id(&headers, &conn).is_none() {
+            return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
+        }
+    }
+    // Resolve photo.
+    let path = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        match crate::db::get_photo_path_and_hash(&conn, photo_id) {
+            Ok((p, _)) => p,
+            Err(_) => return (StatusCode::NOT_FOUND, format!("photo {photo_id} not found")).into_response(),
+        }
+    };
+    let is_vault = crate::vault_files::is_encrypted_path(std::path::Path::new(&path));
+    if is_vault {
+        let unlocked = if let Some(ref handle) = state.app_handle {
+            use tauri::Manager;
+            let app_state = handle.state::<crate::AppState>();
+            app_state.vault_is_unlocked()
+        } else { false };
+        if !unlocked {
+            return (StatusCode::UNAUTHORIZED, "Vault locked").into_response();
+        }
+    }
+    // For vault photos, decrypt in spawn_blocking + figure the inner
+    // extension for Content-Type.  For non-vault, just stream.
+    let kek_opt: Option<[u8; 32]> = if is_vault {
+        if let Some(ref handle) = state.app_handle {
+            use tauri::Manager;
+            let app_state = handle.state::<crate::AppState>();
+            let mut snap = None;
+            if let Ok(g) = app_state.vault_kek.lock() {
+                snap = *g;
+            }
+            snap
+        } else { None }
+    } else { None };
+    let path_for_task = path.clone();
+    let result: Result<(Vec<u8>, String), String> = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, String), String> {
+        let p = std::path::PathBuf::from(&path_for_task);
+        if is_vault {
+            let kek = kek_opt.ok_or_else(|| "no kek".to_string())?;
+            let plain = crate::vault_files::decrypt_to_bytes(&p, &kek)?;
+            // Inner extension lives inside the .rtenc filename so the
+            // peer can pick the right player / decoder.
+            let inner_ext = crate::vault_files::original_path_for(&p)
+                .as_ref()
+                .and_then(|pp| pp.extension())
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            Ok((plain, inner_ext))
+        } else {
+            let bytes = std::fs::read(&p).map_err(|e| format!("read photo: {e}"))?;
+            let ext = p.extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            Ok((bytes, ext))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+
+    match result {
+        Ok((bytes, ext)) => {
+            let mime = mime_for_ext(&ext);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime)
+                .header(header::CONTENT_LENGTH, bytes.len())
+                .body(axum::body::Body::from(bytes))
+                .unwrap()
+                .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("photo: {e}")).into_response(),
     }
 }
 
