@@ -572,16 +572,66 @@ async fn photo_for_id(
     match result {
         Ok((bytes, ext)) => {
             let mime = mime_for_ext(&ext);
+            // v1.5.325 — Range header support.  HTML5 <video> issues
+            // `Range: bytes=N-M` requests for seek-bar scrubbing; without
+            // 206 Partial Content responses the browser re-fetches the
+            // whole file on every seek (and disables the seek bar for
+            // streams it can't byte-index).  We have the full body in
+            // memory already (vault decrypts in-memory; non-vault is
+            // `std::fs::read`), so slicing the Vec<u8> is cheap.
+            let total = bytes.len() as u64;
+            let range_hdr = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+            if let Some((start, end)) = range_hdr.and_then(|h| parse_range_header(h, total)) {
+                let slice = bytes[start as usize ..= end as usize].to_vec();
+                let content_range = format!("bytes {start}-{end}/{total}");
+                return Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_TYPE, mime)
+                    .header(header::CONTENT_RANGE, content_range)
+                    .header(header::CONTENT_LENGTH, slice.len())
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .body(axum::body::Body::from(slice))
+                    .unwrap()
+                    .into_response();
+            }
+            // No (or unparseable) Range header — full body.
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime)
-                .header(header::CONTENT_LENGTH, bytes.len())
+                .header(header::CONTENT_LENGTH, total)
+                .header(header::ACCEPT_RANGES, "bytes")
                 .body(axum::body::Body::from(bytes))
                 .unwrap()
                 .into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("photo: {e}")).into_response(),
     }
+}
+
+/// Parse a single-range `Range: bytes=N-M` header against a known
+/// content length.  Returns `(start, end_inclusive)` clamped into
+/// `[0, total)`.  Returns `None` for multi-range, suffix-range
+/// (`bytes=-N` last N bytes — easy to add later if a caller wants
+/// it), or malformed inputs.  Following RFC 7233 enough for HTML5
+/// `<video>` which only ever asks for `bytes=N-` or `bytes=N-M`.
+fn parse_range_header(hdr: &str, total: u64) -> Option<(u64, u64)> {
+    let rest = hdr.strip_prefix("bytes=")?;
+    if rest.contains(',') { return None; }
+    let mut it = rest.split('-');
+    let s = it.next()?.trim();
+    let e = it.next()?.trim();
+    if it.next().is_some() { return None; }
+    if s.is_empty() { return None; } // suffix range not supported
+    let start: u64 = s.parse().ok()?;
+    if start >= total { return None; }
+    let end: u64 = if e.is_empty() {
+        total.saturating_sub(1)
+    } else {
+        e.parse().ok()?
+    };
+    let end = end.min(total.saturating_sub(1));
+    if start > end { return None; }
+    Some((start, end))
 }
 
 // ── /api/upload ─────────────────────────────────────────────────────────
