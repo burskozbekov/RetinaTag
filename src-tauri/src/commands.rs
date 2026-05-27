@@ -2161,8 +2161,18 @@ pub async fn check_ffmpeg() -> Result<bool, String> {
 pub async fn get_settings(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(String, String)>, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_all_settings(&conn).map_err(|e| e.to_string())
+    // v1.5.333 — Settings modal load batches a fetch of every key in
+    // app_settings; even though it's small (~30-50 rows), it runs on
+    // every Settings tab switch.  Off the worker keeps the runtime
+    // free for parallel `refreshStats`/`get_photos` calls that fire
+    // alongside.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_all_settings(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2171,12 +2181,17 @@ pub async fn save_setting(
     value: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    if value.is_empty() {
-        db::delete_setting(&conn, &key).map_err(|e| e.to_string())
-    } else {
-        db::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
-    }
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        if value.is_empty() {
+            db::delete_setting(&conn, &key).map_err(|e| e.to_string())
+        } else {
+            db::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Manual location edit ─────────────────────────────────────────────────────
@@ -2187,8 +2202,13 @@ pub async fn set_estimated_location(
     name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::set_location_name(&conn, photo_id, &name).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::set_location_name(&conn, photo_id, &name).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Provider status ──────────────────────────────────────────────────────────
