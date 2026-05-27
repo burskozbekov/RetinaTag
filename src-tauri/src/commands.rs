@@ -10294,65 +10294,81 @@ pub async fn search_by_color(hex_color: String, tolerance: f32, state: tauri::St
     let tb = u8::from_str_radix(&hex[4..6], 16).map_err(|_| "bad hex")? as f32;
     let tol = tolerance.max(10.0);
 
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    // v1.5.63 — Faz 1: vault filter on color search.
-    let mut stmt = conn.prepare(
-        "SELECT id, path, filename, status, provider_used,
-                (SELECT COUNT(*) FROM tags WHERE photo_id = p.id) AS tag_count,
-                COALESCE((SELECT GROUP_CONCAT(tag, '|||') FROM (SELECT tag FROM tags WHERE photo_id = p.id LIMIT 10)), '') AS tag_list,
-                p.media_type, p.date_taken, p.duration_secs, p.rating, p.favorite, p.dominant_colors
-         FROM photos p WHERE p.dominant_colors IS NOT NULL AND p.private = 0"
-    ).map_err(|e| e.to_string())?;
+    // v1.5.327 — Off the tokio worker. Full sweep over the photos
+    // table with the dominant-colors filter is 100-300 ms on the
+    // user's library, plus the per-row JSON parse + Euclidean distance
+    // calc adds CPU. Wrapping in spawn_blocking keeps the runtime free.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<PhotoSummary>, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        // v1.5.63 — Faz 1: vault filter on color search.
+        let mut stmt = conn.prepare(
+            "SELECT id, path, filename, status, provider_used,
+                    (SELECT COUNT(*) FROM tags WHERE photo_id = p.id) AS tag_count,
+                    COALESCE((SELECT GROUP_CONCAT(tag, '|||') FROM (SELECT tag FROM tags WHERE photo_id = p.id LIMIT 10)), '') AS tag_list,
+                    p.media_type, p.date_taken, p.duration_secs, p.rating, p.favorite, p.dominant_colors
+             FROM photos p WHERE p.dominant_colors IS NOT NULL AND p.private = 0"
+        ).map_err(|e| e.to_string())?;
 
-    let results: Vec<PhotoSummary> = stmt.query_map([], |row| {
-        let colors_json: String = row.get(12)?;
-        // Check if any dominant color matches
-        let matches = if let Ok(colors) = serde_json::from_str::<Vec<String>>(&colors_json) {
-            colors.iter().any(|c| {
-                let h = c.trim_start_matches('#');
-                if h.len() != 6 { return false; }
-                let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(0) as f32;
-                let g = u8::from_str_radix(&h[2..4], 16).unwrap_or(0) as f32;
-                let b = u8::from_str_radix(&h[4..6], 16).unwrap_or(0) as f32;
-                let dist = ((r-tr).powi(2) + (g-tg).powi(2) + (b-tb).powi(2)).sqrt();
-                dist <= tol
-            })
-        } else { false };
+        let results: Vec<PhotoSummary> = stmt.query_map([], |row| {
+            let colors_json: String = row.get(12)?;
+            // Check if any dominant color matches
+            let matches = if let Ok(colors) = serde_json::from_str::<Vec<String>>(&colors_json) {
+                colors.iter().any(|c| {
+                    let h = c.trim_start_matches('#');
+                    if h.len() != 6 { return false; }
+                    let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(0) as f32;
+                    let g = u8::from_str_radix(&h[2..4], 16).unwrap_or(0) as f32;
+                    let b = u8::from_str_radix(&h[4..6], 16).unwrap_or(0) as f32;
+                    let dist = ((r-tr).powi(2) + (g-tg).powi(2) + (b-tb).powi(2)).sqrt();
+                    dist <= tol
+                })
+            } else { false };
 
-        if matches {
-            let tag_list: String = row.get(6)?;
-            let tags: Vec<String> = if tag_list.is_empty() { vec![] } else { tag_list.split("|||").map(|s| s.to_string()).collect() };
-            Ok(Some(PhotoSummary {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                filename: row.get(2)?,
-                status: row.get(3)?,
-                provider_used: row.get(4)?,
-                tag_count: row.get(5)?,
-                tags,
-                media_type: row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "image".to_string()),
-                date_taken: row.get(8)?,
-                duration_secs: row.get(9)?,
-                rating: row.get(10)?,
-                favorite: row.get::<_, i32>(11)? != 0,
-            }))
-        } else {
-            Ok(None)
-        }
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .filter_map(|r| r)
-    .collect();
+            if matches {
+                let tag_list: String = row.get(6)?;
+                let tags: Vec<String> = if tag_list.is_empty() { vec![] } else { tag_list.split("|||").map(|s| s.to_string()).collect() };
+                Ok(Some(PhotoSummary {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    filename: row.get(2)?,
+                    status: row.get(3)?,
+                    provider_used: row.get(4)?,
+                    tag_count: row.get(5)?,
+                    tags,
+                    media_type: row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "image".to_string()),
+                    date_taken: row.get(8)?,
+                    duration_secs: row.get(9)?,
+                    rating: row.get(10)?,
+                    favorite: row.get::<_, i32>(11)? != 0,
+                }))
+            } else {
+                Ok(None)
+            }
+        }).map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .filter_map(|r| r)
+        .collect();
 
-    Ok(results)
+        Ok(results)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Library Analytics ──────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_library_analytics(state: tauri::State<'_, AppState>) -> Result<LibraryAnalytics, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::get_library_analytics(&conn).map_err(|e| e.to_string())
+    // v1.5.327 — analytics pulls aggregates across the whole library
+    // (counts by status, by media type, by year). spawn_blocking.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_library_analytics(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Calendar View ──────────────────────────────────────────────────────────
