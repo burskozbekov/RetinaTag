@@ -59,6 +59,10 @@ pub async fn run_server(
         .route("/api/pair/request", post(pair_request))
         .route("/api/pair/complete", post(pair_complete))
         .route("/api/upload", post(upload))
+        // v1.5.320 — vault flow endpoints (Mac-spec parity).
+        .route("/api/vault/status", get(vault_status))
+        .route("/api/vault/unlock", post(vault_unlock))
+        .route("/api/vault/lock", post(vault_lock))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
     let bind = format!("0.0.0.0:{}", PORT);
@@ -155,6 +159,119 @@ async fn pair_complete(
         .into_response(),
         Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
     }
+}
+
+// ── v1.5.320 — /api/vault/{status,unlock,lock} ─────────────────────────
+// These endpoints let a paired peer (Mac, other PC) drive THIS
+// machine's vault.  Auth gated by the same Bearer token middleware
+// the upload path uses.  The vault KEK lives in AppState.vault_kek
+// (Mutex<Option<[u8; 32]>>); we mutate it via the AppHandle.
+
+#[derive(Serialize)]
+struct VaultStatusResponse {
+    has_pin:  bool,
+    unlocked: bool,
+}
+
+async fn vault_status(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        if auth_device_id(&headers, &conn).is_none() {
+            return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
+        }
+    }
+    let has_pin = match state.db.lock() {
+        Ok(c) => crate::db::vault_has_pin(&c),
+        Err(_) => false,
+    };
+    let mut unlocked = false;
+    if let Some(ref handle) = state.app_handle {
+        use tauri::Manager;
+        let app_state = handle.state::<crate::AppState>();
+        unlocked = app_state.vault_is_unlocked();
+    }
+    Json(VaultStatusResponse { has_pin, unlocked }).into_response()
+}
+
+#[derive(Deserialize)]
+struct VaultUnlockBody {
+    pin: String,
+}
+
+async fn vault_unlock(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(req): Json<VaultUnlockBody>,
+) -> impl IntoResponse {
+    // Auth.
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        if auth_device_id(&headers, &conn).is_none() {
+            return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
+        }
+    }
+    // Derive KEK on the blocking pool (Argon2id can hit 1 s on a
+    // slow CPU; running it on the runtime thread would stall axum).
+    let db_arc = state.db.clone();
+    let pin_owned = req.pin.clone();
+    let kek_result: Result<Option<([u8; 32], Option<String>)>, String> =
+        tokio::task::spawn_blocking(move || -> Result<Option<([u8; 32], Option<String>)>, String> {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            crate::db::vault_unlock_kek(&conn, &pin_owned).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|inner| inner);
+    let kek_opt = match kek_result {
+        Ok(opt) => opt,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("unlock: {e}")).into_response();
+        }
+    };
+    let Some((kek, _phrase)) = kek_opt else {
+        // Wrong PIN.  Mac's spec uses 401 for this case (vs 429 for
+        // lockout, which we don't implement on PC yet — out of scope
+        // for this release).
+        return (StatusCode::UNAUTHORIZED, "wrong PIN").into_response();
+    };
+    // Stash the KEK in AppState so the future remote-photo endpoints
+    // (and any local FE code) see the vault as unlocked.
+    if let Some(ref handle) = state.app_handle {
+        use tauri::Manager;
+        let app_state = handle.state::<crate::AppState>();
+        app_state.vault_set_kek(Some(kek));
+    }
+    StatusCode::OK.into_response()
+}
+
+async fn vault_lock(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
+        };
+        if auth_device_id(&headers, &conn).is_none() {
+            return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
+        }
+    }
+    if let Some(ref handle) = state.app_handle {
+        use tauri::Manager;
+        let app_state = handle.state::<crate::AppState>();
+        app_state.vault_set_kek(None);
+    }
+    StatusCode::OK.into_response()
 }
 
 // ── /api/upload ─────────────────────────────────────────────────────────

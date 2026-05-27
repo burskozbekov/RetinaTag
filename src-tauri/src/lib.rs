@@ -254,6 +254,11 @@ pub struct AppState {
     /// Mutex<Option> means it never lands on disk and is zero-padded on
     /// drop. Thumbnails are only decryptable while this is `Some(_)`.
     pub vault_kek: Mutex<Option<[u8; 32]>>,
+    // v1.5.320 — helper methods sit at the impl block at the end of
+    // this file (search for `impl AppState`).  They keep the
+    // mutex-lock temporaries inside the method body so callers like
+    // lan_server's vault handlers don't fight the borrow checker
+    // over `State<'_, AppState>` deref chains.
     /// v1.5.155 — Plaintext temp files we wrote so the lightbox could play
     /// vault videos via WebView2's blob/file source. WebView2 can't stream
     /// from a `.rtenc` directly, so `vault_decrypt_to_temp` materialises
@@ -306,6 +311,29 @@ pub struct AppState {
     /// configured). Same `Arc<Mutex<...>>` reasoning as
     /// `shared_vault_master_key` above.
     pub shared_vault_root: Arc<Mutex<Option<std::path::PathBuf>>>,
+}
+
+// v1.5.320 — Small helpers that keep `vault_kek` mutex-lock temporaries
+// strictly inside the method body.  Callers like lan_server's vault
+// HTTP handlers were tripping E0597 trying to read/mutate `vault_kek`
+// through a `State<'_, AppState>` deref — the LockResult temporary
+// held a borrow chain back to the State binding, and the borrow
+// checker pessimistically dropped the binding before the temp.
+// Wrapping the work behind `&self`-only methods sidesteps the chain
+// entirely: the temp lives + dies inside this impl block, the caller
+// just sees a returned bool / `Option<[u8;32]>`.
+impl AppState {
+    pub fn vault_is_unlocked(&self) -> bool {
+        self.vault_kek
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+    }
+    pub fn vault_set_kek(&self, kek: Option<[u8; 32]>) {
+        if let Ok(mut g) = self.vault_kek.lock() {
+            *g = kek;
+        }
+    }
 }
 
 /// Suppress Windows "The application was unable to start correctly (0xc0000142)"
