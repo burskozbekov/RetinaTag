@@ -188,24 +188,32 @@ pub async fn get_scan_history(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let limit = limit.unwrap_or(50).clamp(1, 500);
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let rows = db::get_scan_history(&conn, limit).map_err(|e| e.to_string())?;
-    let list: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|(id, folder, started_at, finished_at, new_files, skipped, total, error)| {
-            serde_json::json!({
-                "id": id,
-                "folder": folder,
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "new_files": new_files,
-                "skipped": skipped,
-                "total": total,
-                "error": error,
+    // v1.5.329 — Scan-history list is paginated up to 500 rows;
+    // ORDER BY started_at DESC scans the whole scan_history table.
+    // Off the tokio worker.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let rows = db::get_scan_history(&conn, limit).map_err(|e| e.to_string())?;
+        let list: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(id, folder, started_at, finished_at, new_files, skipped, total, error)| {
+                serde_json::json!({
+                    "id": id,
+                    "folder": folder,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "new_files": new_files,
+                    "skipped": skipped,
+                    "total": total,
+                    "error": error,
+                })
             })
-        })
-        .collect();
-    Ok(serde_json::Value::Array(list))
+            .collect();
+        Ok(serde_json::Value::Array(list))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
