@@ -15627,3 +15627,95 @@ pub async fn lan_peer_unpair(
     .map_err(|e| e.to_string())?
 }
 
+// ── v1.5.315 — Remote vault browse commands ────────────────────────
+// All of these resolve the bearer token + addr+port from the local
+// `lan_peer_tokens` table by peer_name, build a one-shot PeerClient,
+// and proxy the call.  Keeps the token out of the FE's hands entirely
+// (the FE only ever passes around peer_name).
+
+async fn _peer_client_for(
+    peer_name: &str,
+    db: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+) -> Result<crate::peer_client::PeerClient, String> {
+    let owned_name = peer_name.to_string();
+    let row = tauri::async_runtime::spawn_blocking(move || -> Result<Option<(String, String, u16)>, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::get_lan_peer_token_by_name(&conn, &owned_name).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let (token, addr, port) = row.ok_or_else(|| "peer not paired".to_string())?;
+    Ok(crate::peer_client::PeerClient::new(&addr, port).with_token(token))
+}
+
+#[tauri::command]
+pub async fn lan_peer_vault_status(
+    peer_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::peer_client::VaultStatus, String> {
+    let client = _peer_client_for(&peer_name, state.db.clone()).await?;
+    client.vault_status().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn lan_peer_vault_unlock(
+    peer_name: String,
+    pin: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let client = _peer_client_for(&peer_name, state.db.clone()).await?;
+    client.vault_unlock(&pin).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn lan_peer_vault_lock(
+    peer_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let client = _peer_client_for(&peer_name, state.db.clone()).await?;
+    client.vault_lock().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn lan_peer_list_photos(
+    peer_name: String,
+    vault_only: bool,
+    offset: i64,
+    limit: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::peer_client::PhotoListResponse, String> {
+    let client = _peer_client_for(&peer_name, state.db.clone()).await?;
+    client
+        .list_photos(vault_only, offset, limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Returns a base64-encoded JPEG thumbnail.  Same wire format as the
+/// local `get_thumbnail` command so the FE can swap the source
+/// without reshaping the consumer.
+#[tauri::command]
+pub async fn lan_peer_get_thumb(
+    peer_name: String,
+    photo_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let client = _peer_client_for(&peer_name, state.db.clone()).await?;
+    let bytes = client.get_thumb(photo_id).await.map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Returns a base64-encoded full photo.  Heavy for video / HEIC but
+/// matches the existing `get_photo_full` shape so the lightbox can
+/// dispatch on `_lbCurrentSource` in v1.5.316.
+#[tauri::command]
+pub async fn lan_peer_get_photo(
+    peer_name: String,
+    photo_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let client = _peer_client_for(&peer_name, state.db.clone()).await?;
+    let bytes = client.get_photo(photo_id).await.map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+

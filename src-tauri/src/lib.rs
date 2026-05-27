@@ -1403,6 +1403,12 @@ pub fn run() {
             commands::lan_peer_pair_complete,
             commands::lan_peer_list_paired,
             commands::lan_peer_unpair,
+            commands::lan_peer_vault_status,
+            commands::lan_peer_vault_unlock,
+            commands::lan_peer_vault_lock,
+            commands::lan_peer_list_photos,
+            commands::lan_peer_get_thumb,
+            commands::lan_peer_get_photo,
             // v1.5.283 — libmpv embed.  Only the standalone-window
             // commands are wired into JS (Settings → Tools → "Test mpv
             // color"); the in-window overlay commands (mpv_show_in_window
