@@ -41,15 +41,22 @@ const MAX_BODY_BYTES: usize = 2 * 1024 * 1024 * 1024;
 #[derive(Clone)]
 pub struct ServerState {
     pub db: Arc<Mutex<Connection>>,
+    /// v1.5.319 — used by /api/pair/request to emit a Tauri event so
+    /// PC's FE can pop the code modal when a peer initiates pairing.
+    pub app_handle: Option<tauri::AppHandle>,
 }
 
 /// Spin the server on 0.0.0.0:PORT. Returns the JoinHandle the caller
 /// can use to shut down. Failures bind/listen are returned as Err so
 /// setup() can surface them.
-pub async fn run_server(db: Arc<Mutex<Connection>>) -> Result<JoinHandle<()>, String> {
-    let state = ServerState { db };
+pub async fn run_server(
+    db: Arc<Mutex<Connection>>,
+    app_handle: tauri::AppHandle,
+) -> Result<JoinHandle<()>, String> {
+    let state = ServerState { db, app_handle: Some(app_handle) };
     let app: Router = Router::new()
         .route("/api/ping", get(ping))
+        .route("/api/pair/request", post(pair_request))
         .route("/api/pair/complete", post(pair_complete))
         .route("/api/upload", post(upload))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -62,6 +69,47 @@ pub async fn run_server(db: Arc<Mutex<Connection>>) -> Result<JoinHandle<()>, St
         let _ = axum::serve(listener, app).await;
     });
     Ok(handle)
+}
+
+/// v1.5.319 — peer-initiated pairing. Mac (or another PC) posts here
+/// when it wants to pair WITH us; we mint a code and surface it via
+/// a Tauri event so PC's FE can pop a modal showing it.  The remote
+/// will then ask its user to type the code, and POST it back to our
+/// /api/pair/complete in the usual way.
+#[derive(Deserialize)]
+struct PairRequestBody {
+    device_name: String,
+}
+
+#[derive(Serialize, Clone)]
+struct IncomingPairEvent {
+    code:        String,
+    device_name: String,
+    /// RFC3339 timestamp the code expires (lan_pairing::mint_code
+    /// gives a 5-minute TTL).
+    expires_at:  String,
+}
+
+async fn pair_request(
+    State(state): State<ServerState>,
+    Json(req): Json<PairRequestBody>,
+) -> impl IntoResponse {
+    use tauri::Emitter;
+    let code = crate::lan_pairing::mint_code();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+    if let Some(ref handle) = state.app_handle {
+        let _ = handle.emit(
+            "lan-incoming-pair-request",
+            IncomingPairEvent {
+                code: code.clone(),
+                device_name: req.device_name.clone(),
+                expires_at: expires_at.clone(),
+            },
+        );
+    }
+    // 202 Accepted: we've started the pairing flow, peer should now
+    // wait for the user to type the code back via /api/pair/complete.
+    StatusCode::ACCEPTED.into_response()
 }
 
 #[derive(Serialize)]

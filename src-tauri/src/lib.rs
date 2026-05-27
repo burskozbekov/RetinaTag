@@ -1063,8 +1063,12 @@ pub fn run() {
                 use tauri::Manager;
                 let state = app.state::<AppState>();
                 let db = state.db.clone();
+                // v1.5.319 — server now accepts AppHandle so the new
+                // /api/pair/request endpoint can emit a Tauri event
+                // when a peer initiates pairing.
+                let app_handle_for_server = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    match crate::lan_server::run_server(db).await {
+                    match crate::lan_server::run_server(db, app_handle_for_server).await {
                         Ok(_h) => {
                             eprintln!("[lan] HTTP server up on 0.0.0.0:{}", crate::lan_server::PORT);
                         }

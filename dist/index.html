@@ -12513,8 +12513,47 @@ async function _lanPeerUnpair(pairedRow) {
       _lanPeerMap.delete(name);
       _lanRenderPeers();
     });
+    // v1.5.319 — A peer (Mac or another PC) initiated pairing WITH
+    // us. Backend has already minted the code; we just pop a modal
+    // showing it for 5 minutes so the user can read it off PC and
+    // type into the peer.  The peer will then POST /api/pair/complete
+    // back to us with the typed code → lan_pairing::complete_pairing
+    // closes the loop.
+    await window.__TAURI__.event.listen('lan-incoming-pair-request', (ev) => {
+      const p = ev && ev.payload;
+      if (!p || !p.code) return;
+      _showIncomingPairCodeModal(p.code, p.device_name || 'unknown device');
+    });
   } catch (_) { /* events arrive late or not at all on a slow init */ }
 })();
+function _showIncomingPairCodeModal(code, deviceName) {
+  // If a previous incoming-pair modal is open, close it first.
+  const existing = document.getElementById('_incomingPairModal');
+  if (existing) try { existing.remove(); } catch(_) {}
+  const overlay = document.createElement('div');
+  overlay.id = '_incomingPairModal';
+  overlay.className = 'modal-overlay open';
+  overlay.style.zIndex = '10500';
+  overlay.innerHTML = `
+    <div class="modal-box" style="width:440px">
+      <div class="modal-head"><h2 style="margin:0;font-size:14px;font-weight:700;color:var(--cream)">📨 Pair request</h2></div>
+      <div class="modal-body" style="padding:18px 24px;color:var(--text2);font-size:13px;line-height:1.5">
+        <div style="margin-bottom:14px"><b style="color:var(--amber)">${_esc(deviceName)}</b> seninle pair olmak istiyor.</div>
+        <div style="margin-bottom:6px;color:var(--text3);font-size:11px">Bu kodu peer'ın ekranına yaz:</div>
+        <div style="font-family:'JetBrains Mono','Consolas',monospace;font-size:30px;font-weight:700;letter-spacing:8px;color:var(--cream);padding:14px 24px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;text-align:center;margin-bottom:12px">${_esc(code)}</div>
+        <div style="font-size:11px;color:var(--text3)">Kod 5 dakika içinde geçersiz olur. Pair tamamlanınca peer otomatik olarak bağlanacak.</div>
+      </div>
+      <div class="modal-foot" style="padding:0 20px 18px;display:flex;justify-content:flex-end">
+        <button class="btn btn-secondary btn-sm" id="_incomingPairClose">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => { try { overlay.remove(); } catch(_) {} };
+  overlay.querySelector('#_incomingPairClose').onclick = close;
+  overlay.addEventListener('mousedown', ev => { if (ev.target === overlay) close(); });
+  // Auto-close after 5 min so a stale code modal doesn't linger.
+  setTimeout(close, 5 * 60 * 1000);
+}
 document.addEventListener('DOMContentLoaded', () => {
   const refresh = document.getElementById('btnLanRefreshPeers');
   if (refresh) refresh.onclick = _lanPeersRefresh;
