@@ -493,8 +493,57 @@ pub async fn search_photos(
         all_terms.sort();
         all_terms.dedup();
 
+        // v1.5.360 — Strip stop-words + tiny tokens from translated
+        // terms.  "yediğim yemekler" (foods I ate) translated to
+        // ["food", "I", "ate", "had", "meal"] used to slam through
+        // search_photos_multi → AND-fail → OR-fallback that matched
+        // every photo tagged "i" or "had", returning 1200+ unrelated
+        // results on a Paris library.  The English path already
+        // applies a stop-word filter (v1.5.71); doing the same here
+        // for the Turkish→English path closes the symmetric gap.
+        //
+        // The filter is applied to a separate copy used ONLY for the
+        // tag/description multi-match queries below; the original
+        // `trimmed` (Turkish) still flows through person and
+        // exact-path searches because Turkish names / folder names
+        // can be < 3 chars and shouldn't be stripped.
+        const SEARCH_STOP_WORDS: &[&str] = &[
+            // English filler / verb scraps the translator routinely
+            // emits when paraphrasing a Turkish sentence.
+            "i", "a", "an", "the", "is", "are", "was", "were", "be", "been",
+            "and", "or", "of", "to", "in", "on", "at", "for", "with", "by",
+            "from", "my", "me", "we", "us", "our", "you", "your", "he",
+            "she", "it", "they", "them", "his", "her", "their", "as",
+            "if", "then", "but", "so", "do", "did", "does", "done",
+            "have", "has", "had", "having",
+            "ate", "eaten", "eat", "eats", "eating",
+            "go", "goes", "went", "gone", "going", "get", "gets", "got",
+            "see", "saw", "seen", "look", "looked", "looking",
+            "this", "that", "these", "those", "there", "here",
+            "some", "any", "all", "no", "not", "very", "much", "many",
+            "what", "which", "who", "when", "where", "why", "how",
+        ];
+        let multi_terms: Vec<String> = all_terms.iter()
+            .filter(|t| {
+                let tt = t.trim();
+                if tt.chars().count() < 3 { return false; }
+                let lc = tt.to_lowercase();
+                !SEARCH_STOP_WORDS.iter().any(|w| *w == lc.as_str())
+            })
+            .cloned()
+            .collect();
+
         let conn = state.db.lock().map_err(|_| "db lock")?;
-        let mut results = db::search_photos_multi(&conn, &all_terms).map_err(|e| e.to_string())?;
+        // v1.5.360 — use the stop-word-filtered set for the broad
+        // tag/description match.  When the filter strips everything
+        // (e.g. a single short Turkish noun), fall back to the
+        // unfiltered set so we don't dead-end empty.
+        let multi_input: &[String] = if multi_terms.is_empty() {
+            &all_terms
+        } else {
+            &multi_terms
+        };
+        let mut results = db::search_photos_multi(&conn, multi_input).map_err(|e| e.to_string())?;
         // Also search by person name and merge
         if let Ok(person_results) = db::search_photos_by_person(&conn, &trimmed) {
             merge_photo_results(&mut results, person_results);
@@ -503,8 +552,10 @@ pub async fn search_photos(
         if let Ok(path_results) = db::search_photos_by_path(&conn, &trimmed) {
             merge_photo_results(&mut results, path_results);
         }
-        // Also search AI descriptions (with all translated terms)
-        for term in &all_terms {
+        // Also search AI descriptions (only with meaningful terms — running
+        // search_photos_by_description("i") used to LIKE-match half the
+        // library; see v1.5.360 stop-word note above).
+        for term in multi_input {
             if let Ok(desc_results) = db::search_photos_by_description(&conn, term) {
                 merge_photo_results(&mut results, desc_results);
             }
