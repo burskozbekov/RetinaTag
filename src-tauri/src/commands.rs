@@ -1539,17 +1539,30 @@ pub async fn fix_sideways_thumbnails(
         eprintln!("[thumb-fix] {}", msg);
     }
 
+    // v1.5.359 — pull off the tokio runtime.  Unbounded
+    // `SELECT id, path, hash FROM photos WHERE hash IS NOT NULL`
+    // materialises every row on this user's 66 k library; ~100-300 ms
+    // synchronous SQLite + Vec building before the spawn_blocking
+    // below ever fired.  Same template as v1.5.351 / 353 / 354 /
+    // 355 / 356 / 357 / 358.
     let rows: Vec<(i64, String, String)> = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let mut stmt = conn
-            .prepare("SELECT id, path, hash FROM photos WHERE hash IS NOT NULL")
-            .map_err(|e| e.to_string())?;
-        let v: Vec<(i64, String, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        v
+        let db = state.db.clone();
+        tauri::async_runtime::spawn_blocking(
+            move || -> Result<Vec<(i64, String, String)>, String> {
+                let conn = db.lock().map_err(|_| "db lock".to_string())?;
+                let mut stmt = conn
+                    .prepare("SELECT id, path, hash FROM photos WHERE hash IS NOT NULL")
+                    .map_err(|e| e.to_string())?;
+                let rows: Vec<(i64, String, String)> = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                Ok(rows)
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())??
     };
 
     let total = rows.len();
