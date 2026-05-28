@@ -235,10 +235,19 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
 .search-box.focused{position:fixed;top:10vh;left:50%;transform:translateX(-50%);
   width:90vw;max-width:720px;min-width:unset;z-index:1500;flex:none;
   transition:all .22s cubic-bezier(.2,.7,.1,1)}
-.search-box.focused #searchInput{font-size:20px;padding:18px 26px 18px 52px;
-  border-radius:24px;border-color:var(--red-dark);background:var(--card2);
-  box-shadow:0 12px 48px rgba(0,0,0,.55),0 0 0 4px rgba(184,58,18,.18)}
-.search-box.focused svg{left:18px;width:22px;height:22px;stroke-width:2.2}
+/* v1.5.363 — Focused input was barely visible against the blurred
+   backdrop because the default focus background (var(--card2) =
+   #2A1A1A) is darker than the 55%-black backdrop tint.  Bump to
+   a lighter solid color + brighter border + stronger placeholder/
+   caret contrast so the box clearly pops above the blur. */
+.search-box.focused #searchInput{font-size:20px !important;
+  padding:20px 28px 20px 54px !important;
+  border-radius:26px !important;border:2px solid var(--red) !important;
+  background:#3A2424 !important;color:#FFF1E6 !important;
+  caret-color:#FFB07A !important;
+  box-shadow:0 18px 60px rgba(0,0,0,.7),0 0 0 6px rgba(184,58,18,.22) !important}
+.search-box.focused #searchInput::placeholder{color:rgba(255,210,180,.55) !important}
+.search-box.focused svg{left:20px;width:22px;height:22px;stroke-width:2.4;stroke:#FFB07A}
 .search-box.focused #searchHelpBtn,
 .search-box.focused #searchStar,
 .search-box.focused #searchClearX,
