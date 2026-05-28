@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.347"
+version = "1.5.348"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -140,6 +140,13 @@ windows-core = "0.58"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+# v1.5.348 — Tests reference `tempfile::TempDir` (shared_vault.rs:442)
+# but the crate was never listed as a dev-dependency, so `cargo test`
+# fails to compile.  Adding it as a dev-dep so the existing xmp /
+# vault tests can actually run.
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 panic = "abort"

@@ -591,6 +591,20 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
     let mut current_li = String::new();
     let mut in_li = false;
 
+    // v1.5.348 — RetinaTag (and Lightroom, when not using attribute
+    // form) emits Rating + Label as ELEMENT children of rdf:Description:
+    //   <xmp:Rating>4</xmp:Rating>
+    //   <xmp:Label>Red</xmp:Label>
+    // Previous parser only picked these up as attributes on the
+    // Description element, so XMPs RetinaTag itself wrote could not be
+    // re-read — round-trip rating/favourite via .xmp sidecar was silently
+    // broken.  Track when we're inside one of these scalar elements so
+    // the Text event can be captured and parsed in End.
+    let mut current_scalar = String::new();
+    #[derive(PartialEq)]
+    enum Scalar { None, Rating, Label }
+    let mut in_scalar = Scalar::None;
+
     let mut out = XmpRead::default();
     // Use a set to dedupe across the three keyword bags.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -641,10 +655,24 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
                         }
                     }
                 }
+                // v1.5.348 — element-form Rating/Label.  Only arm when
+                // we're not inside a section (Keywords/Description),
+                // otherwise a stray <Label> inside dc:description would
+                // hijack the text capture.
+                if section == Section::None {
+                    if ends_with(name, b"Rating") {
+                        in_scalar = Scalar::Rating;
+                        current_scalar.clear();
+                    } else if ends_with(name, b"Label") {
+                        in_scalar = Scalar::Label;
+                        current_scalar.clear();
+                    }
+                }
             }
             Ok(Event::End(e)) => {
-                let name = e.name();
-                if section != Section::None && ends_with(name.as_ref(), b"li") {
+                let name_bytes = e.name();
+                let name = name_bytes.as_ref();
+                if section != Section::None && ends_with(name, b"li") {
                     let val = current_li.trim().to_string();
                     if !val.is_empty() {
                         match section {
@@ -666,6 +694,24 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
                     in_li = false;
                     current_li.clear();
                 }
+                // v1.5.348 — close element-form Rating/Label.  Match on
+                // the same End name to avoid grabbing a value from a
+                // mis-nested tag.  `get_or_insert` so the attribute-form
+                // wins if both forms exist (Lightroom-paired XMPs).
+                if in_scalar == Scalar::Rating && ends_with(name, b"Rating") {
+                    if let Ok(n) = current_scalar.trim().parse::<i32>() {
+                        out.rating.get_or_insert(n);
+                    }
+                    in_scalar = Scalar::None;
+                    current_scalar.clear();
+                } else if in_scalar == Scalar::Label && ends_with(name, b"Label") {
+                    let v = current_scalar.trim().to_string();
+                    if !v.is_empty() {
+                        out.label.get_or_insert(v);
+                    }
+                    in_scalar = Scalar::None;
+                    current_scalar.clear();
+                }
                 if section != Section::None {
                     depth_in_section -= 1;
                     if depth_in_section <= 0 {
@@ -678,9 +724,14 @@ pub fn parse_xmp_xml(xml: &str) -> Result<XmpRead> {
                 let s = t.unescape().unwrap_or_default();
                 current_li.push_str(&s);
             }
-            // Also pick up rating / label / RetinaTag-written element
-            // form: <xmp:Rating>4</xmp:Rating>, <xmp:Label>Red</xmp:Label>.
-            Ok(Event::Start(_)) => {}
+            // v1.5.348 — capture the body of <xmp:Rating> / <xmp:Label>.
+            // Separate arm from `in_li` so concurrent open states don't
+            // collide; in practice only one is active at a time but the
+            // disjoint guards keep that local.
+            Ok(Event::Text(t)) if in_scalar != Scalar::None => {
+                let s = t.unescape().unwrap_or_default();
+                current_scalar.push_str(&s);
+            }
             Ok(Event::Empty(_)) => {}
             Ok(Event::Eof) => break,
             Err(e) => return Err(anyhow::anyhow!("XMP parse: {}", e)),

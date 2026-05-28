@@ -4681,7 +4681,7 @@ dependencies = [
 
 [[package]]
 name = "retina-tag"
-version = "1.5.347"
+version = "1.5.348"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4719,6 +4719,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
