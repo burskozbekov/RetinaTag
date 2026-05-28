@@ -8171,9 +8171,19 @@ $('searchInput').oninput=e=>{
     // CLIP-only photos with `_visualMatch=true` so the card render can
     // show a 👁 badge (visible-search marker), letting the user tell
     // tag-driven results from semantic-driven ones at a glance.
+    //
+    // v1.5.364 — Order flipped: CLIP results FIRST, tag results SECOND.
+    // semantic_search returns photos sorted by cosine-similarity
+    // descending, so the topmost rows are now the user's most-meaningful
+    // matches.  Tag results still merge in below for broader recall —
+    // tag-exact queries like "kedi" (where CLIP has no hits) work
+    // unchanged because semanticUnique is empty in that case.  Fixes
+    // the complaint that natural-language queries like "food i had in
+    // france" surfaced 1200 noisy LIKE-matched photos before the
+    // ~30 actually-meaningful CLIP-driven matches.
     if(semanticUnique.length>0){
       for(const ph of semanticUnique){ try{ ph._visualMatch = true; }catch(_){} }
-      photos=[...tagResults,...semanticUnique];totalPhotos=photos.length;
+      photos=[...semanticUnique,...tagResults];totalPhotos=photos.length;
     }
     tagCount=tagResults.length;
     const total=tagCount+semanticUnique.length;
