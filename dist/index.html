@@ -221,6 +221,29 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
 .search-box.person-active #searchInput{color:transparent;caret-color:transparent}
 .search-box.person-active #searchInput::placeholder{color:transparent}
 .search-box.person-active .search-hint{display:none}
+/* v1.5.362 — Spotlight-style focused search overlay (mirrors Mac v1.5.282).
+   Click the search bar (or hit /) → it morphs into a large centered overlay
+   with backdrop blur.  20 px font for legibility; the user's main complaint
+   on the toolbar-sized version was "search neden okuyamıyorum".  No live
+   dropdowns/autocomplete in this mode — Enter-only.  Helper buttons
+   (?, ★, X) hidden so 20 px text doesn't collide with them. */
+.search-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  z-index:1499;opacity:0;pointer-events:none;
+  transition:opacity .22s cubic-bezier(.2,.7,.1,1)}
+.search-backdrop.active{opacity:1;pointer-events:auto}
+.search-box.focused{position:fixed;top:10vh;left:50%;transform:translateX(-50%);
+  width:90vw;max-width:720px;min-width:unset;z-index:1500;flex:none;
+  transition:all .22s cubic-bezier(.2,.7,.1,1)}
+.search-box.focused #searchInput{font-size:20px;padding:18px 26px 18px 52px;
+  border-radius:24px;border-color:var(--red-dark);background:var(--card2);
+  box-shadow:0 12px 48px rgba(0,0,0,.55),0 0 0 4px rgba(184,58,18,.18)}
+.search-box.focused svg{left:18px;width:22px;height:22px;stroke-width:2.2}
+.search-box.focused #searchHelpBtn,
+.search-box.focused #searchStar,
+.search-box.focused #searchClearX,
+.search-box.focused .search-hint,
+.search-box.focused #recentSearches{display:none !important}
 select.tb-select{padding:7px 10px;border-radius:20px;border:1px solid var(--border2);background:var(--card);
   color:var(--text2);font-size:12px;outline:none;cursor:pointer;font-family:var(--font);transition:border-color .2s}
 select.tb-select:focus{border-color:var(--red-dark)}
@@ -7637,26 +7660,72 @@ function clearPersonFilter(){
   loadPhotos();
 }
 $('searchPersonClear').onclick=(e)=>{e.stopPropagation();clearPersonFilter();};
-// Focusing the input while person filter is active should clear the filter
+// v1.5.362 — Spotlight-style focused search overlay (Mac v1.5.282 parity).
+// Open/close helpers + Enter-only pipeline trigger.  See CSS block
+// `.search-box.focused` + `.search-backdrop` for the visual side.
+function _searchFocusOpen(){
+  const sb = document.querySelector('.search-box');
+  let bk = document.getElementById('searchBackdrop');
+  if(!bk){
+    bk = document.createElement('div');
+    bk.id = 'searchBackdrop';
+    bk.className = 'search-backdrop';
+    // mousedown so close happens before blur fires; preventDefault
+    // keeps the click from re-stealing focus on the input field.
+    bk.addEventListener('mousedown', e => {
+      if(e.target === bk){ e.preventDefault(); _searchFocusClose(); }
+    });
+    document.body.appendChild(bk);
+  }
+  bk.classList.add('active');
+  if(sb) sb.classList.add('focused');
+}
+function _searchFocusClose(){
+  const sb = document.querySelector('.search-box');
+  const bk = document.getElementById('searchBackdrop');
+  if(bk) bk.classList.remove('active');
+  if(sb) sb.classList.remove('focused');
+  // Hide the recent-searches dropdown too (it shouldn't appear in
+  // focused mode but might be lingering from a prior session).
+  const r = document.getElementById('recentSearches');
+  if(r) r.style.display = 'none';
+  try{ $('searchInput').blur(); }catch(_){}
+}
+// Run the search pipeline programmatically.  We dispatch an input event
+// (not "trusted" because we created it) so the existing oninput body
+// runs through.  isTrusted=false is the agreed-on signal that means
+// "this came from code, run the heavy pipeline".  See oninput handler
+// below for the gate.
+function _runFullSearch(){
+  const ev = new Event('input', { bubbles: true });
+  $('searchInput').dispatchEvent(ev);
+}
+window._searchFocusOpen = _searchFocusOpen;
+window._searchFocusClose = _searchFocusClose;
+window._runFullSearch = _runFullSearch;
+
+// Focus → open spotlight overlay (clear person filter on the way).
 $('searchInput').addEventListener('focus',()=>{
   if(_currentPersonFilter)clearPersonFilter();
-  _renderRecentSearches();
+  _searchFocusOpen();
 });
 $('searchInput').addEventListener('blur',()=>{
-  // Delay so clicks on a chip register before the panel hides
+  // We do NOT close the overlay on blur — the user might be moving
+  // focus to click a hint or button.  Backdrop click or Esc handles
+  // close.  Just hide any lingering recents dropdown.
   setTimeout(()=>{const r=$('recentSearches');if(r)r.style.display='none';},180);
 });
-// v1.5.271 — ESC closes the Quick Filters / Recent / Saved suggestion
-// dropdown. User: "yav bu çıkmasın ya da esc e basınca kapansın! çok
-// sinir bozucu öneri menüsü". Blur alone wasn't enough — sometimes
-// the user wants the panel gone without losing the cursor (e.g. they
-// just opened it accidentally on a slash-key focus). ESC also blurs
-// the input so a second ESC tap doesn't re-open it.
+// v1.5.362 — Enter runs the full pipeline; Esc closes the overlay.
+//   v1.5.271 original ESC handler only hid the recent-searches dropdown;
+//   now Esc collapses the whole focused overlay back into the toolbar.
 $('searchInput').addEventListener('keydown', e => {
+  if(e.key === 'Enter'){
+    e.preventDefault();
+    _runFullSearch();
+    return;
+  }
   if(e.key === 'Escape'){
-    const r = document.getElementById('recentSearches');
-    if(r) r.style.display = 'none';
-    try{ e.target.blur(); }catch(_){}
+    _searchFocusClose();
     e.stopPropagation();
   }
 });
@@ -8001,17 +8070,30 @@ function _searchProgressHide(){
 $('searchInput').oninput=e=>{
   clearTimeout(searchTimer);
   const q=e.target.value.trim();
-  // v1.5.49 — Live tag autocomplete dropdown while typing. Replaces the
-  // previous "hide on type" behavior — now suggestions appear as you go.
-  _renderRecentSearches();
-  // v1.5.57 — Mutually-exclusive right-side icons:
-  //   empty input → show ? (help)
-  //   typed input → show × (clear) + ☆ (save), hide ?
+  // v1.5.362 — Affordance refresh runs on EVERY input event (typing AND
+  // programmatic dispatches).  This keeps the X / ★ / ? buttons in sync
+  // with the input value regardless of how the value changed.
   const hasVal = !!e.target.value;
   const x=$('searchClearX'); if(x) x.style.display=hasVal?'block':'none';
   const help=$('searchHelpBtn'); if(help) help.style.display=hasVal?'none':'block';
-  // v1.5.51 — Refresh star to reflect saved state.
   if(typeof _refreshSearchStar === 'function') _refreshSearchStar();
+
+  // v1.5.362 — Enter-only pipeline gate.  Real user keystrokes
+  // (isTrusted=true) DO NOT fire the search pipeline anymore — only the
+  // affordances update.  When Enter is pressed (or a chip / recent-
+  // search caller dispatches a synthetic input event), `isTrusted` is
+  // false and we fall through to the heavy pipeline below.  This mirrors
+  // Mac v1.5.282 behaviour exactly.
+  if (e.isTrusted === true) {
+    // User typing — wait for Enter.  We still do NOT clear curSearch
+    // here: previous results stay on screen until the user actually
+    // commits a new query.  (Pre-v1.5.362 behaviour cleared on empty
+    // input mid-typing, which felt jumpy.)
+    return;
+  }
+
+  // Programmatic dispatch — run the full pipeline.  Empty query clears
+  // the previous search.
   if(!q){curSearch='';_searchProgressHide();_hideRefineBar();loadPhotos();$('searchHint').textContent='';return;}
   $('searchHint').textContent='🔍';
   _searchProgressShow();
