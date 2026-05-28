@@ -458,7 +458,36 @@ async fn thumb_for_id(
                 return Ok(plain);
             }
             drop(conn);
+            // v1.5.349 — VIDEO vault items: image::load_from_memory
+            // can't decode .MOV/.MP4/.MKV bytes and would return a
+            // 500 to the peer.  Detect by stripping the .rtenc suffix
+            // and checking the inner extension against
+            // VIDEO_EXTENSIONS.  When we don't have a cached
+            // encrypted thumb (handled above) we return a structured
+            // 404 instead — the peer's UI already renders a
+            // film-strip placeholder for missing video thumbs (PC
+            // shipped that in v1.5.334), so a clean 404 keeps the
+            // failure visible without a confusing 500.
+            //
+            // Note: synthesising a real video frame here would need
+            // ffmpeg on PATH (not guaranteed) plus a temp-file
+            // decrypt + cleanup; deferring that to a follow-up
+            // release.  The encrypted-thumb cache above is the
+            // happy-path once a vault video has been viewed locally.
             let enc_path = std::path::PathBuf::from(&path);
+            let inner = enc_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.strip_suffix(".rtenc").unwrap_or(n))
+                .unwrap_or("");
+            let inner_ext = std::path::Path::new(inner)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if crate::scanner::VIDEO_EXTENSIONS.contains(&inner_ext.as_str()) {
+                return Err("__thumb_404__:video thumb not cached".to_string());
+            }
             let plain = crate::vault_files::decrypt_to_bytes(&enc_path, &kek)?;
             // Resize to a 256-px JPEG so the peer doesn't pull a
             // 12-megapixel HEIC for a thumbnail.
@@ -487,6 +516,13 @@ async fn thumb_for_id(
             .body(axum::body::Body::from(bytes))
             .unwrap()
             .into_response(),
+        // v1.5.349 — sentinel prefix lets the vault-video branch
+        // request a clean 404 from inside spawn_blocking without
+        // smuggling a StatusCode through the Result.
+        Err(e) if e.starts_with("__thumb_404__:") => {
+            let body = e.trim_start_matches("__thumb_404__:").to_string();
+            (StatusCode::NOT_FOUND, body).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("thumb: {e}")).into_response(),
     }
 }
