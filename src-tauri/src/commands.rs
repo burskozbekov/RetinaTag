@@ -2107,9 +2107,17 @@ pub async fn set_photo_date_taken(
 pub async fn backfill_dates(
     state: tauri::State<'_, AppState>,
 ) -> Result<usize, String> {
+    // v1.5.355 — pull off the tokio runtime.  LIMIT 5000 caps the
+    // query but the materialised Vec<(i64, String)> still costs
+    // ~50 ms cold; same v1.5.351/353/354 template.
     let photos = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::get_photos_without_date(&conn).map_err(|e| e.to_string())?
+        let db = state.db.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(i64, String)>, String> {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            db::get_photos_without_date(&conn).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??
     };
     let db_arc = state.db.clone();
     let count = tokio::task::spawn_blocking(move || {
