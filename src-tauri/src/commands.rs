@@ -5317,34 +5317,48 @@ pub async fn compute_blur_scores(
         .and_then(|s| if s.trim().is_empty() { None } else { Some(s.clone()) });
     let limit = batch_size.unwrap_or(5000).max(1);
 
-    // Collect photos that need scoring
+    // Collect photos that need scoring.
+    // v1.5.356 — pull off the tokio runtime.  LIMIT-capped (default
+    // 5000) but materialising the Vec<(i64, String, String)> is still
+    // ~50 ms cold on a cold cache; same v1.5.351/353/354/355 template.
     let photos: Vec<(i64, String, String)> = {
-        let conn = state.db.lock().map_err(|_| "db lock".to_string())?;
-        if let Some(f) = &folder_filter {
-            // Prefix match via substr() instead of LIKE '%'-concat — LIKE
-            // would interpret `%` and `_` inside the path as wildcards.
-            let mut stmt = conn.prepare(
-                "SELECT id, path, hash FROM photos
-                 WHERE blur_score IS NULL
-                   AND media_type = 'image'
-                   AND (folder = ?1 OR substr(path, 1, length(?1)) = ?1)
-                 ORDER BY id DESC
-                 LIMIT ?2"
-            ).map_err(|e| e.to_string())?;
-            let v: Vec<(i64, String, String)> = stmt.query_map(rusqlite::params![f, limit], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                ))
-            }).map_err(|e| e.to_string())?
-              .filter_map(|r| r.ok())
-              .collect();
-            v
-        } else {
-            db::get_photos_without_blur_score(&conn, limit)
-                .map_err(|e| e.to_string())?
-        }
+        let db = state.db.clone();
+        let folder_filter_for_pull = folder_filter.clone();
+        tauri::async_runtime::spawn_blocking(
+            move || -> Result<Vec<(i64, String, String)>, String> {
+                let conn = db.lock().map_err(|_| "db lock".to_string())?;
+                if let Some(f) = &folder_filter_for_pull {
+                    // Prefix match via substr() instead of LIKE '%'-concat —
+                    // LIKE would interpret `%` and `_` inside the path as
+                    // wildcards.
+                    let mut stmt = conn.prepare(
+                        "SELECT id, path, hash FROM photos
+                         WHERE blur_score IS NULL
+                           AND media_type = 'image'
+                           AND (folder = ?1 OR substr(path, 1, length(?1)) = ?1)
+                         ORDER BY id DESC
+                         LIMIT ?2"
+                    ).map_err(|e| e.to_string())?;
+                    let rows: Vec<(i64, String, String)> = stmt
+                        .query_map(rusqlite::params![f, limit], |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                            ))
+                        })
+                        .map_err(|e| e.to_string())?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    Ok(rows)
+                } else {
+                    db::get_photos_without_blur_score(&conn, limit)
+                        .map_err(|e| e.to_string())
+                }
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())??
     };
 
     if photos.is_empty() {

@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.355"
+version = "1.5.356"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
