@@ -5140,9 +5140,19 @@ pub async fn compute_phashes(
     use rayon::iter::{IntoParallelIterator, ParallelIterator};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // v1.5.354 — pull off the tokio runtime.  Even with a LIMIT, the
+    // query can return tens of thousands of rows on this library and
+    // collecting them all into a Vec<(i64, String, String)> is enough
+    // synchronous work to look like a freeze before the spawn_blocking
+    // below ever runs.  Same shape as v1.5.351 (scan_and_cluster_faces).
     let photos: Vec<(i64, String, String)> = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::get_photos_without_phash_with_hash(&conn, 100_000).map_err(|e| e.to_string())?
+        let db = state.db.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(i64, String, String)>, String> {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            db::get_photos_without_phash_with_hash(&conn, 100_000).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??
     };
 
     let total = photos.len();
