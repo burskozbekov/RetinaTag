@@ -10008,17 +10008,25 @@ pub async fn batch_add_tags_with_xmp(
     tags: Vec<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<BatchTagXmpResult, String> {
-    // ── Step 1: write to DB ──────────────────────────────────────────────────
-    let tags_added = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::batch_add_tags(&conn, &photo_ids, &tags).map_err(|e| e.to_string())?
-    };
-
-    // ── Step 2: gather XmpData for each photo (same shape as write_xmp_all) ──
-    let all_xmp: Vec<xmp::XmpData> = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let mut result = Vec::with_capacity(photo_ids.len());
-        for id in &photo_ids {
+    // ── Steps 1 + 2: batch_add_tags + per-photo XmpData gather, off the
+    //                 tokio runtime.
+    // v1.5.352 — the previous shape held the sync DB mutex on the tokio
+    // worker for the duration of Step 1 (one batch insert) AND Step 2
+    // (three indexed queries per photo: photo row + tags + face_regions).
+    // For a 50-photo batch that's ~150 queries with the mutex pinned to
+    // the renderer thread, easily long enough to look like a freeze on
+    // a slow disk.  Wrapping both in spawn_blocking lets the gather run
+    // off-runtime while the renderer paints the toast / spinner.
+    let db_for_gather = state.db.clone();
+    let photo_ids_for_gather = photo_ids.clone();
+    let tags_for_gather = tags.clone();
+    let (tags_added, all_xmp): (usize, Vec<xmp::XmpData>) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(usize, Vec<xmp::XmpData>), String> {
+        let conn = db_for_gather.lock().map_err(|_| "db lock".to_string())?;
+        let tags_added = db::batch_add_tags(&conn, &photo_ids_for_gather, &tags_for_gather)
+            .map_err(|e| e.to_string())?;
+        let mut result = Vec::with_capacity(photo_ids_for_gather.len());
+        for id in &photo_ids_for_gather {
             // Core photo fields. If a row is missing (shouldn't happen), skip it.
             let row = conn.query_row(
                 "SELECT path, COALESCE(width,0), COALESCE(height,0),
@@ -10108,8 +10116,10 @@ pub async fn batch_add_tags_with_xmp(
                 vault_oid,
             });
         }
-        result
-    };
+        Ok((tags_added, result))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     // ── Step 3: write sidecars off the main thread ───────────────────────────
     let (xmp_written, xmp_failed) = tokio::task::spawn_blocking(move || {
