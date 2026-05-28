@@ -14723,29 +14723,39 @@ pub async fn save_gps_cluster_as_collection(
     name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<i64, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    // Collect the cluster's photo ids first so we don't hold the prepared
-    // statement open while create_collection inserts.
-    let photo_ids: Vec<i64> = {
-        let mut stmt = conn
-            .prepare("SELECT photo_id FROM gps_cluster_photos WHERE cluster_id = ?1")
+    // v1.5.368 — entire body off the tokio runtime.  Used to hold
+    // state.db.lock() through a per-photo loop of add_photo_to_collection
+    // INSERTs.  For a cluster of 1000 photos that's 1001 inserts with the
+    // renderer thread parked behind the mutex.  Same shape as v1.5.357
+    // (save_all_folders_as_collections).
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<i64, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        // Collect the cluster's photo ids first so we don't hold the prepared
+        // statement open while create_collection inserts.
+        let photo_ids: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT photo_id FROM gps_cluster_photos WHERE cluster_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let ids: Vec<i64> = stmt
+                .query_map(rusqlite::params![cluster_id], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            ids
+        };
+        if photo_ids.is_empty() {
+            return Err("Cluster has no photos".into());
+        }
+        let coll_id = db::create_collection(&conn, &name, "manual", None)
             .map_err(|e| e.to_string())?;
-        let ids: Vec<i64> = stmt
-            .query_map(rusqlite::params![cluster_id], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        ids
-    };
-    if photo_ids.is_empty() {
-        return Err("Cluster has no photos".into());
-    }
-    let coll_id = db::create_collection(&conn, &name, "manual", None)
-        .map_err(|e| e.to_string())?;
-    for pid in &photo_ids {
-        let _ = db::add_photo_to_collection(&conn, coll_id, *pid);
-    }
-    Ok(coll_id)
+        for pid in &photo_ids {
+            let _ = db::add_photo_to_collection(&conn, coll_id, *pid);
+        }
+        Ok(coll_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Duplicate Smart Merge ──────────────────────────────────────────────────
