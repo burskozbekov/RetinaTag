@@ -4900,33 +4900,58 @@ pub async fn extract_all_gps(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<usize, String> {
-    let photos: Vec<(i64, String)> = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, path FROM photos WHERE gps_lat IS NULL"
-        ).map_err(|e| e.to_string())?;
-        let rows: Vec<(i64, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        rows
-    };
+    // v1.5.353 — the entire flow was on the tokio runtime:
+    //   1. SELECT id, path FROM photos WHERE gps_lat IS NULL — moderate.
+    //   2. Loop reads EXIF from disk for every photo without GPS (1-10 ms
+    //      per file × thousands of photos = minutes of blocking I/O).
+    //   3. Per-hit `state.db.lock() + UPDATE` inline.
+    // Result: clicking "Extract GPS" froze the renderer until the entire
+    // library was walked.  Wrap the work in spawn_blocking; emit progress
+    // via the cloned app_handle from inside so the toast still ticks.
+    let db = state.db.clone();
+    let ah = app_handle.clone();
+    let found = tauri::async_runtime::spawn_blocking(
+        move || -> Result<usize, String> {
+            use tauri::Emitter;
+            let photos: Vec<(i64, String)> = {
+                let conn = db.lock().map_err(|_| "db lock".to_string())?;
+                let mut stmt = conn
+                    .prepare("SELECT id, path FROM photos WHERE gps_lat IS NULL")
+                    .map_err(|e| e.to_string())?;
+                let rows: Vec<(i64, String)> = stmt
+                    .query_map([], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                rows
+            };
 
-    let total = photos.len();
-    let mut found = 0usize;
+            let total = photos.len();
+            let mut found = 0usize;
 
-    for (i, (id, path)) in photos.iter().enumerate() {
-        if let Ok(exif) = exif_reader::read_exif(path) {
-            if let (Some(lat), Some(lon)) = (exif.gps_lat, exif.gps_lon) {
-                let conn = state.db.lock().map_err(|_| "db lock")?;
-                db::update_photo_gps(&conn, *id, lat, lon, exif.gps_alt).ok();
-                found += 1;
+            for (i, (id, path)) in photos.iter().enumerate() {
+                if let Ok(exif) = exif_reader::read_exif(path) {
+                    if let (Some(lat), Some(lon)) = (exif.gps_lat, exif.gps_lon) {
+                        if let Ok(conn) = db.lock() {
+                            db::update_photo_gps(&conn, *id, lat, lon, exif.gps_alt).ok();
+                            found += 1;
+                        }
+                    }
+                }
+                if i % 100 == 0 {
+                    let _ = ah.emit(
+                        "gps-progress",
+                        serde_json::json!({"done": i+1, "total": total, "found": found}),
+                    );
+                }
             }
-        }
-        if i % 100 == 0 {
-            app_handle.emit("gps-progress", serde_json::json!({"done": i+1, "total": total, "found": found})).ok();
-        }
-    }
+            Ok(found)
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())??;
     Ok(found)
 }
 
