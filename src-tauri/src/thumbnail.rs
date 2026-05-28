@@ -126,10 +126,136 @@ pub fn wpf_decode_to_jpeg_resized_bytes(
     max_dim: u32,
     quality: u8,
 ) -> Result<Vec<u8>> {
+    // v1.5.347 — try the native Windows Imaging Component path first.
+    // No powershell.exe spawn, no PresentationCore assembly load —
+    // ~80–150 ms saved on every HEIC open (cold start was the
+    // dominant part of the user's "HEIC hala yavaş" complaint, see
+    // chat history before v1.5.302).  Falls back to the existing
+    // PowerShell+WPF path silently if WIC fails — e.g. if the HEIF
+    // Image Extension Store package isn't installed on this box.
+    match wic_decode_to_jpeg_bytes(photo_path, max_dim, quality) {
+        Ok(bytes) => return Ok(bytes),
+        Err(e) => {
+            eprintln!("[wic] {} fast-path failed: {} — falling back to WPF", label, e);
+        }
+    }
     let temp_jpg = wpf_decode_internal_to_temp(photo_path, label, Some((max_dim, quality)))?;
     let bytes = std::fs::read(&temp_jpg).with_context(|| format!("read converted {} JPEG", label))?;
     std::fs::remove_file(&temp_jpg).ok();
     Ok(bytes)
+}
+
+/// v1.5.347 — Decode + resize + JPEG-encode via Windows Imaging
+/// Component, the same codec stack File Explorer's thumbnailer and
+/// Photos.app use.  Reads HEIC / HEIF / RAW formats directly
+/// (provided the Microsoft Store-distributed image extensions are
+/// installed) without spawning any external process.
+#[cfg(target_os = "windows")]
+fn wic_decode_to_jpeg_bytes(
+    photo_path: &str,
+    max_dim: u32,
+    quality: u8,
+) -> Result<Vec<u8>> {
+    use std::sync::Once;
+    use windows::core::Interface;
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::GENERIC_READ;
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    };
+
+    // One CoInitializeEx per process — repeat calls return S_FALSE
+    // or RPC_E_CHANGED_MODE which we ignore.  MTA so the WIC factory
+    // pointer is safe across whichever tokio/rayon worker picks up
+    // this call.
+    static COM_INIT: Once = Once::new();
+    COM_INIT.call_once(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    });
+
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
+                .context("CoCreateInstance(WICImagingFactory)")?;
+
+        let path_w = HSTRING::from(photo_path);
+        let decoder: IWICBitmapDecoder = factory
+            .CreateDecoderFromFilename(
+                &path_w,
+                None,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnDemand,
+            )
+            .context("CreateDecoderFromFilename")?;
+
+        let frame: IWICBitmapFrameDecode = decoder.GetFrame(0).context("GetFrame(0)")?;
+        let mut w: u32 = 0;
+        let mut h: u32 = 0;
+        frame.GetSize(&mut w, &mut h).context("GetSize")?;
+        if w == 0 || h == 0 {
+            return Err(anyhow::anyhow!("WIC reports zero dims for {}", photo_path));
+        }
+
+        // Convert pixel format to BGRA8 first — HEIC frames are often
+        // YUV-derived which JPEG encoder can't accept directly.
+        let converter: IWICFormatConverter = factory
+            .CreateFormatConverter()
+            .context("CreateFormatConverter")?;
+        converter
+            .Initialize(
+                &frame,
+                &GUID_WICPixelFormat32bppBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeMedianCut,
+            )
+            .context("FormatConverter.Initialize")?;
+
+        // Optional resize.  WICBitmapInterpolationModeFant gives a
+        // nicer downscale than NearestNeighbor / Linear; cheap on
+        // 12 MP→2 K reductions.
+        let (src, fw, fh): (IWICBitmapSource, u32, u32) = if w > max_dim || h > max_dim {
+            let scale = (max_dim as f32) / (w.max(h) as f32);
+            let tw = ((w as f32) * scale).round().max(1.0) as u32;
+            let th = ((h as f32) * scale).round().max(1.0) as u32;
+            let scaler = factory.CreateBitmapScaler().context("CreateBitmapScaler")?;
+            scaler
+                .Initialize(&converter, tw, th, WICBitmapInterpolationModeFant)
+                .context("Scaler.Initialize")?;
+            (scaler.cast()?, tw, th)
+        } else {
+            (converter.cast()?, w, h)
+        };
+
+        // Pull BGRA pixels into a buffer, then transpose to RGB for
+        // the JPEG encoder.  4 bytes per pixel × fw × fh.
+        let stride: u32 = fw
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("stride overflow"))?;
+        let buf_size: usize = (stride as usize)
+            .checked_mul(fh as usize)
+            .ok_or_else(|| anyhow::anyhow!("buf size overflow"))?;
+        let mut bgra: Vec<u8> = vec![0u8; buf_size];
+        src.CopyPixels(std::ptr::null(), stride, &mut bgra)
+            .context("CopyPixels")?;
+
+        // BGRA → RGB (skip alpha — JPEG is opaque).
+        let mut rgb: Vec<u8> = Vec::with_capacity((fw as usize) * (fh as usize) * 3);
+        for px in bgra.chunks_exact(4) {
+            rgb.push(px[2]);
+            rgb.push(px[1]);
+            rgb.push(px[0]);
+        }
+
+        let mut out: Vec<u8> = Vec::with_capacity(rgb.len() / 8);
+        let mut enc =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+        enc.encode(&rgb, fw, fh, image::ExtendedColorType::Rgb8)
+            .context("JPEG encode")?;
+        Ok(out)
+    }
 }
 
 #[cfg(target_os = "windows")]

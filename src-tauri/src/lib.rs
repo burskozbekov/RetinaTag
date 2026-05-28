@@ -214,6 +214,7 @@ mod lan_pairing;
 mod lan_server;
 mod lan_bonjour;
 mod peer_client;
+mod mft_scan;
 
 // v1.5.283 — Native video pipeline via libmpv (Windows only).  Replaces
 // WebView2's HEVC HDR path for iPhone Dolby Vision content so colours
@@ -1449,6 +1450,7 @@ pub fn run() {
             commands::lan_peer_pair_complete,
             commands::lan_peer_list_paired,
             commands::lan_peer_unpair,
+            commands::find_local_photos_by_filenames,
             commands::lan_peer_ping,
             commands::lan_peer_vault_status,
             commands::lan_peer_vault_unlock,

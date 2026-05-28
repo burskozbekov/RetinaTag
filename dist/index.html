@@ -12143,6 +12143,51 @@ function _lanPlatformIcon(p) {
   if (pf.includes('linux'))  return '🐧';
   return '🖥';
 }
+// v1.5.342 — Bonjour instance name is often "192-168-1-111" (the IP
+// with dashes — Apple's default when the user hasn't set a personal
+// hostname).  Surfacing that raw number in the UI is confusing.
+// Prefer hostname if it looks meaningful; otherwise substitute a
+// platform-based label so the user sees "Mac" or "Windows PC" instead.
+// v1.5.344 — user override beats everything.  Stored in localStorage
+// keyed by Bonjour instance name so multiple Macs / PCs each get
+// their own rename, and survives reloads / re-pairs.
+function _lanPeerLabelOverrideKey(peerName) {
+  return 'lan_peer_label:' + (peerName || '');
+}
+function _lanGetPeerLabelOverride(peerName) {
+  try { return localStorage.getItem(_lanPeerLabelOverrideKey(peerName)) || ''; }
+  catch (_) { return ''; }
+}
+function _lanSetPeerLabelOverride(peerName, label) {
+  try {
+    const k = _lanPeerLabelOverrideKey(peerName);
+    if (label) localStorage.setItem(k, label);
+    else localStorage.removeItem(k);
+  } catch (_) {}
+}
+function _lanPrettyPeerName(p) {
+  if (!p) return '';
+  // User-set override beats automatic labels.
+  const override = _lanGetPeerLabelOverride(p.name);
+  if (override) return override;
+  const host = (p.hostname || '').trim();
+  const name = (p.name || '').trim();
+  const looksLikeIpDashed = (s) =>
+    /^\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}$/.test(s);
+  // Best candidate first: hostname that isn't the IP-dash placeholder.
+  if (host && !looksLikeIpDashed(host)) return host;
+  if (name && !looksLikeIpDashed(name)) return name;
+  // v1.5.343 — just the platform label, no parens / no IP.  Clean
+  // folder name like Finder / Explorer would show.  If the user has
+  // multiple Macs on the LAN and needs to disambiguate, they can set
+  // a personal name in System Settings → General → About → Name and
+  // the hostname branch above will pick it up.
+  const pf = (p.platform || '').toLowerCase();
+  if (pf.includes('mac'))    return 'Mac';
+  if (pf.includes('win'))    return 'Windows PC';
+  if (pf.includes('linux'))  return 'Linux PC';
+  return 'Device';
+}
 function _lanRenderPeers() {
   const list = document.getElementById('lanPeerList');
   const hint = document.getElementById('lanPeersHint');
@@ -12486,6 +12531,32 @@ async function _lanPeerBrowseVault(peerName, displayName) {
   grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px';
   body.appendChild(grid);
 
+  // v1.5.334 — Each cell starts with a media-type placeholder (film
+  // icon for video, photo icon for image) plus the filename. If the
+  // /api/thumb call later succeeds, we overlay the actual thumb.
+  // Without this, vault-only-video peers (Mac case: 23 .MOV.rtenc
+  // and zero JPEG thumbs) showed a blank-grid full of empty cells.
+  function _setCellPlaceholder(cell, photo, hadError) {
+    // Remove any previous overlay.
+    const old = cell.querySelector('.lp-overlay');
+    if (old) try { old.remove(); } catch(_) {}
+    const isVideo = (photo.media_type === 'video');
+    const overlay = document.createElement('div');
+    overlay.className = 'lp-overlay';
+    overlay.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:8px;pointer-events:none;text-align:center';
+    const icon = document.createElement('div');
+    icon.style.cssText = 'font-size:32px;line-height:1;color:' + (hadError ? 'var(--red-light)' : 'var(--text3)');
+    icon.textContent = hadError ? '⚠' : (isVideo ? '🎬' : '🖼');
+    const name = document.createElement('div');
+    name.style.cssText = 'font-size:9px;color:var(--text3);margin-top:6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    // Strip the .rtenc suffix the FE doesn't need to display.
+    const filename = (photo.filename || '').replace(/\.rtenc$/i, '');
+    name.textContent = filename;
+    overlay.appendChild(icon);
+    if (filename) overlay.appendChild(name);
+    cell.appendChild(overlay);
+  }
+
   // Lazy-load thumbs with IntersectionObserver so opening the modal
   // doesn't hammer Mac with 200 HTTP requests at once.
   const io = ('IntersectionObserver' in window) ? new IntersectionObserver((entries) => {
@@ -12494,25 +12565,42 @@ async function _lanPeerBrowseVault(peerName, displayName) {
       const el = e.target;
       io.unobserve(el);
       const id = +el.dataset.id;
+      const photoForCell = _photos.find(p => p.id === id);
       invoke('lan_peer_get_thumb', { peerName, photoId: id })
-        .then(b64 => { el.style.backgroundImage = `url(data:image/jpeg;base64,${b64})`; })
-        .catch(() => { el.style.background = '#3a2828'; });
+        .then(b64 => {
+          // Thumb succeeded — show it, drop the placeholder overlay.
+          el.style.backgroundImage = `url(data:image/jpeg;base64,${b64})`;
+          const ov = el.querySelector('.lp-overlay');
+          if (ov) try { ov.remove(); } catch(_) {}
+        })
+        .catch(() => {
+          // Thumb failed — keep / refresh the placeholder. For videos
+          // this is the expected path (Mac doesn't generate video
+          // thumbs yet); for images this surfaces the error.
+          if (photoForCell) _setCellPlaceholder(el, photoForCell, photoForCell.media_type !== 'video');
+        });
     }
   }, { root: body, rootMargin: '200px' }) : null;
 
   for (const ph of _photos) {
     const cell = document.createElement('div');
     cell.dataset.id = ph.id;
-    cell.style.cssText = 'aspect-ratio:1;background:var(--card2);border:1px solid var(--border);border-radius:6px;background-size:cover;background-position:center;cursor:pointer;position:relative';
+    cell.style.cssText = 'aspect-ratio:1;background:var(--card2);border:1px solid var(--border);border-radius:6px;background-size:cover;background-position:center;cursor:pointer;position:relative;overflow:hidden';
     cell.title = ph.filename || '';
     cell.onclick = () => _lanPeerOpenPhoto(peerName, ph, _photos);
+    // v1.5.334 — placeholder rendered up-front so users see SOMETHING
+    // even if the thumb fetch hasn't fired yet (or fails).
+    _setCellPlaceholder(cell, ph, false);
     grid.appendChild(cell);
     if (io) io.observe(cell);
     else {
-      // No IntersectionObserver — load all up front (rare).
       invoke('lan_peer_get_thumb', { peerName, photoId: ph.id })
-        .then(b64 => { cell.style.backgroundImage = `url(data:image/jpeg;base64,${b64})`; })
-        .catch(() => {});
+        .then(b64 => {
+          cell.style.backgroundImage = `url(data:image/jpeg;base64,${b64})`;
+          const ov = cell.querySelector('.lp-overlay');
+          if (ov) try { ov.remove(); } catch(_) {}
+        })
+        .catch(() => _setCellPlaceholder(cell, ph, ph.media_type !== 'video'));
     }
   }
 }
@@ -12522,24 +12610,59 @@ async function _lanPeerBrowseVault(peerName, displayName) {
 // list.  Esc / click-outside closes.
 async function _lanPeerOpenPhoto(peerName, photo, list) {
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:10500;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:24px';
-  const img = document.createElement('img');
-  img.style.cssText = 'max-width:96vw;max-height:90vh;object-fit:contain;border-radius:6px;background:#111';
+  // v1.5.336 — z-index bumped to 99999 so the viewer beats every
+  // possible parent modal (vault modal at ~10000, settings modal,
+  // etc.).  Pre-v1.5.336 clicking a Mac item from inside the unified
+  // vault modal opened an overlay that got buried under it.
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:99999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:24px';
+  // v1.5.334 — Media holder; we swap an <img> or <video> in here per
+  // photo based on media_type.  Pre-v1.5.334 we always used <img>,
+  // which silently failed for the vault-of-videos case (.MOV bytes
+  // shoved into <img src>).
+  const mediaHolder = document.createElement('div');
+  mediaHolder.style.cssText = 'display:flex;align-items:center;justify-content:center;width:96vw;max-height:90vh';
   const info = document.createElement('div');
   info.style.cssText = 'font-size:11px;color:#aaa';
-  overlay.appendChild(img); overlay.appendChild(info);
+  overlay.appendChild(mediaHolder); overlay.appendChild(info);
   document.body.appendChild(overlay);
   let idx = list.findIndex(p => p.id === photo.id);
   if (idx < 0) idx = 0;
+  // v1.5.334 — Map filename extension to a video mime.  Mac stores
+  // vault items as `<orig>.<ext>.rtenc`; our /api/photo decrypts and
+  // returns the inner bytes, but the FE only knows the filename, not
+  // the actual codec.  Pick a generous mime that browsers tolerate.
+  function _videoMime(filename) {
+    const stripped = (filename || '').replace(/\.rtenc$/i, '').toLowerCase();
+    if (stripped.endsWith('.mp4') || stripped.endsWith('.m4v')) return 'video/mp4';
+    if (stripped.endsWith('.mov')) return 'video/mp4';   // most MOV is H.264 inside
+    if (stripped.endsWith('.webm')) return 'video/webm';
+    if (stripped.endsWith('.mkv')) return 'video/x-matroska';
+    return 'video/mp4';
+  }
   async function show(i) {
     idx = (i + list.length) % list.length;
     const p = list[idx];
-    info.textContent = `${idx + 1} / ${list.length} · ${p.filename || ''}`;
-    img.src = '';
-    img.alt = 'Loading…';
+    info.textContent = `${idx + 1} / ${list.length} · ${(p.filename || '').replace(/\.rtenc$/i, '')} · loading…`;
+    mediaHolder.innerHTML = '';
+    const isVideo = (p.media_type === 'video');
     try {
       const b64 = await invoke('lan_peer_get_photo', { peerName, photoId: p.id });
-      img.src = `data:image/jpeg;base64,${b64}`;
+      if (isVideo) {
+        const v = document.createElement('video');
+        v.controls = true;
+        v.autoplay = true;
+        v.preload = 'auto';
+        v.style.cssText = 'max-width:96vw;max-height:90vh;background:#111;border-radius:6px';
+        v.src = `data:${_videoMime(p.filename)};base64,${b64}`;
+        v.onerror = () => { info.textContent = `Video decode failed — codec may be unsupported in WebView2.`; };
+        mediaHolder.appendChild(v);
+      } else {
+        const img = document.createElement('img');
+        img.style.cssText = 'max-width:96vw;max-height:90vh;object-fit:contain;border-radius:6px;background:#111';
+        img.src = `data:image/jpeg;base64,${b64}`;
+        mediaHolder.appendChild(img);
+      }
+      info.textContent = `${idx + 1} / ${list.length} · ${(p.filename || '').replace(/\.rtenc$/i, '')}`;
     } catch (e) {
       info.textContent = `Failed: ${e}`;
     }
@@ -16895,6 +17018,12 @@ async function vaultTryUnlock() {
       _vaultClearFails();
       err.textContent = '';
       document.getElementById('vaultPinInput').value = '';
+      // v1.5.335 — Unified vault.  Same PIN should unlock every paired
+      // peer (Mac, other PC) at the same time so the user sees one
+      // grid with every device's items.  Best-effort: a peer with a
+      // different PIN, a locked-out peer, or one that's offline just
+      // doesn't contribute items — no error is surfaced.
+      _vaultUnlockRemotePeers(pin).catch(() => {});
       // Legacy vault upgrade: backend regenerated the KEK + recovery
       // phrase on the fly. Surface the new mnemonic to the user before
       // we let them in — their old phrase (if any) is now invalid.
@@ -17537,15 +17666,156 @@ document.addEventListener('click', (e) => {
 });
 async function vaultRefresh() {
   try {
-    _vaultPhotosCache = await invoke('list_private_photos') || [];
+    const local = await invoke('list_private_photos') || [];
     // Folders are best-effort — if the command fails (older builds,
     // locked vault), we silently keep an empty list and render the
     // photos flat. The vault still works exactly as it did pre-v1.5.161.
     try { _vaultFoldersCache = await invoke('list_vault_folders') || []; }
     catch(_) { _vaultFoldersCache = []; }
+    // v1.5.335 — Pull paired-peer vault items in parallel and merge.
+    // Each remote item is shaped to look like a local PhotoSummary
+    // (same fields the renderer expects) with three extra fields:
+    //   _remote     : true
+    //   _peer_name  : Bonjour name (for the API call)
+    //   _peer_id    : original positive id from the peer's DB
+    // The exposed `id` is flipped negative so it can't collide with a
+    // local id of the same numeric value (separate SQLite databases
+    // have independent autoincrement sequences).
+    const remote = await _vaultFetchRemoteItems();
+    _vaultPhotosCache = local.concat(remote);
     _vaultRender(_vaultPhotosCache);
   } catch(err) { toast('Load failed: '+err,'error'); }
 }
+
+// v1.5.335 — Iterate every paired peer.  For each, check vault
+// status (free); if unlocked, list a page of vault items (paginated
+// when total > 200).  Returns the union shaped as local-photo-like
+// rows.  Errors are silently swallowed per peer — one bad peer
+// shouldn't black out everyone else's items.
+async function _vaultFetchRemoteItems() {
+  let paired;
+  try {
+    paired = await invoke('lan_peer_list_paired') || [];
+  } catch (_) { return []; }
+  if (!Array.isArray(paired) || paired.length === 0) return [];
+  const all = [];
+  for (const row of paired) {
+    const peerName = row && row.peer_name;
+    if (!peerName) continue;
+    try {
+      const vs = await invoke('lan_peer_vault_status', { peerName });
+      if (!vs || !vs.unlocked) continue;   // locked peers contribute nothing
+    } catch (_) { continue; }
+    try {
+      let offset = 0;
+      const limit = 500;
+      for (let iter = 0; iter < 20; iter++) {
+        const resp = await invoke('lan_peer_list_photos', {
+          peerName, vaultOnly: true, offset, limit,
+        });
+        const photos = resp && Array.isArray(resp.photos) ? resp.photos : [];
+        for (const p of photos) {
+          if (!p || typeof p.id !== 'number') continue;
+          const filenameClean = (p.filename || '').replace(/\.rtenc$/i, '');
+          // v1.5.345 — read peer's own vault folder name if it ships
+          // one (Mac Option A from the coord brief: `vault_folder_name`
+          // on each photo).  Trimmed empty → null so a peer that
+          // returns "" doesn't create a no-name folder card.  The
+          // synthetic-folder builder below switches to one card PER
+          // (peer × folder) instead of one card per peer when this
+          // is present.
+          const peerFolderName = ((p.vault_folder_name || '') + '').trim() || null;
+          all.push({
+            // ── PhotoSummary-shaped (what _vaultRender expects) ──
+            id:           -1 * (p.id + 1),   // negative + +1 to keep 0 safe
+            path:         p.path || '',
+            filename:     filenameClean,
+            status:       p.status || 'remote',
+            provider_used: p.provider_used || null,
+            tag_count:    p.tag_count || 0,
+            tags:         p.tags || [],
+            media_type:   p.media_type || 'image',
+            date_taken:   p.date_taken || null,
+            duration_secs: p.duration_secs || null,
+            rating:       p.rating || 0,
+            favorite:     !!p.favorite,
+            // ── Vault-folder fields the renderer reads ──
+            vault_folder_id: null,           // peer-folder grouping uses _peer_folder_name
+            _peer_folder_name: peerFolderName,
+            // ── Remote-routing fields (v1.5.335) ──
+            _remote:      true,
+            _peer_name:   peerName,
+            _peer_id:     p.id,
+            // v1.5.342 — pretty up the IP-as-name fallback. We pass
+            // both name + hostname + platform to the helper so it can
+            // pick the best human-readable label.
+            _peer_label:  _lanPrettyPeerName({ name: peerName, hostname: row.hostname, platform: row.platform }),
+          });
+        }
+        const total = (resp && typeof resp.total === 'number') ? resp.total : photos.length;
+        offset += photos.length;
+        if (photos.length === 0 || offset >= total) break;
+      }
+    } catch (_) { /* peer fetch failed — skip */ }
+  }
+  // v1.5.338 — Match peer items to LOCAL PC photos by filename.
+  // Mac DB sometimes flags items as vault without ever sealing them,
+  // so Mac's /api/photo returns 404.  But the originals usually live
+  // on the SMB-shared library PC has direct access to.  When we find
+  // a local match, the click + thumb paths use it instead of the
+  // broken LAN round-trip.
+  if (all.length > 0) {
+    const names = all.map(p => p.filename).filter(Boolean);
+    try {
+      const localMap = await invoke('find_local_photos_by_filenames', { filenames: names });
+      if (localMap && typeof localMap === 'object') {
+        for (const item of all) {
+          const hit = localMap[item.filename];
+          // v1.5.340 — backend now returns {id, path, media_type}.
+          // Stash the path + media_type so the click handler can feed
+          // the gallery lightbox a real PhotoSummary-shaped row
+          // (pre-v1.5.340 the path was empty and the lightbox tried
+          // to play `convertFileSrc('')` which silently failed).
+          if (hit && typeof hit === 'object' && typeof hit.id === 'number') {
+            item._local_id = hit.id;
+            item._local_path = hit.path || '';
+            if (hit.media_type) item.media_type = hit.media_type;
+          }
+        }
+      }
+    } catch(_) { /* lookup failed — items stay LAN-only */ }
+  }
+  return all;
+}
+
+// v1.5.335 — Try the same PIN against every paired peer.  Called from
+// vaultTryUnlock right after the local unlock succeeds; runs in the
+// background so the local UI doesn't wait on remote round-trips.
+async function _vaultUnlockRemotePeers(pin) {
+  let paired = [];
+  try { paired = await invoke('lan_peer_list_paired') || []; }
+  catch (_) { return; }
+  for (const row of paired) {
+    const peerName = row && row.peer_name;
+    if (!peerName) continue;
+    try {
+      const vs = await invoke('lan_peer_vault_status', { peerName });
+      if (vs && vs.unlocked) continue;  // already open
+      if (vs && !vs.has_pin) continue;  // peer has no vault PIN set
+    } catch (_) { continue; }
+    try {
+      await invoke('lan_peer_vault_unlock', { peerName, pin });
+      // Trigger another vaultRefresh now that this peer is unlocked;
+      // the local unlock's openVault() has already fired one, so use
+      // a tiny debounce to avoid stacking.
+      clearTimeout(_vaultRemoteRefreshDebounce);
+      _vaultRemoteRefreshDebounce = setTimeout(() => {
+        try { vaultRefresh(); } catch(_) {}
+      }, 200);
+    } catch (_) { /* wrong PIN on peer — silently skip */ }
+  }
+}
+let _vaultRemoteRefreshDebounce = null;
 // v1.5.161 — drill into a folder. Re-renders the grid scoped to that
 // folder (and surfaces its direct child folders as cards). null = top.
 // v1.5.193 — Mouse XButton1 (back) and XButton2 (forward) are wired to
@@ -17643,6 +17913,19 @@ window.addEventListener('auxclick', (e) => {
 
 function _vaultEnterFolder(folderId){
   _vaultCurrentFolderId = folderId;
+  // v1.5.336 — leaving peer scope when navigating into a local folder
+  // (and vice-versa).  null = top level for whichever axis we're on.
+  _vaultPeerScope = null;
+  _vaultRender(_vaultPhotosCache);
+  _vaultBumpActivity();
+}
+// v1.5.336 — enter / leave a peer-only sub-view.  Pass null to go
+// back to the top-level mixed grid (peer folder cards + local
+// folders + flat local items).
+let _vaultPeerScope = null;
+function _vaultEnterPeerScope(peerName){
+  _vaultPeerScope = peerName;
+  _vaultCurrentFolderId = null;
   _vaultRender(_vaultPhotosCache);
   _vaultBumpActivity();
 }
@@ -17785,16 +18068,46 @@ async function _vaultRender(list){
   let displayPhotos = list;
   let displayFolders = [];
   let breadcrumb = '';
-  if (!isFiltered && Array.isArray(_vaultFoldersCache) && _vaultFoldersCache.length) {
+  // v1.5.336 — Peer scope: when set, render shows ONLY items from
+  // that peer. Top level shows a synthetic folder card per online
+  // peer so the user navigates "🍎 Mac → its 23 items" instead of
+  // mixing peer items into the local grid (user feedback: "folder
+  // folder olmalı her şey").
+  if (!isFiltered && _vaultPeerScope) {
+    displayFolders = [];
+    // v1.5.345 — peer scope can be a bare peer name OR "<peer>\n<folder>"
+    // when the peer advertises folder names.  Split on \n.
+    const sep = _vaultPeerScope.indexOf('\n');
+    const scopePeer   = sep < 0 ? _vaultPeerScope : _vaultPeerScope.slice(0, sep);
+    const scopeFolder = sep < 0 ? null            : _vaultPeerScope.slice(sep + 1);
+    displayPhotos = list.filter(p =>
+      p._remote &&
+      p._peer_name === scopePeer &&
+      (scopeFolder == null || (p._peer_folder_name || '') === scopeFolder)
+    );
+    // Use the prettified label for the breadcrumb root, plus the
+    // folder name when we're inside one.
+    const peerItem = list.find(p => p._remote && p._peer_name === scopePeer);
+    const peerLabelForBreadcrumb = (peerItem && peerItem._peer_label) || scopePeer;
+    const tail = scopeFolder
+      ? ` <span style="color:var(--text3)">/</span> <span style="color:var(--cream)">📁 ${_esc(scopeFolder)}</span>`
+      : '';
+    breadcrumb = `<div style="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:8px 4px;font-size:13px;color:var(--text2)">` +
+                 `<button onclick="_vaultEnterPeerScope(null)" style="background:rgba(255,255,255,.08);border:none;color:var(--cream);padding:4px 10px;border-radius:12px;cursor:pointer;font-size:12px">← All</button>` +
+                 `<span style="color:var(--text3)">/</span>` +
+                 `<span style="color:var(--cream)">🖥 ${_esc(peerLabelForBreadcrumb)}</span>` +
+                 tail +
+                 `</div>`;
+  } else if (!isFiltered && Array.isArray(_vaultFoldersCache) && _vaultFoldersCache.length) {
     if (_vaultCurrentFolderId == null) {
       displayFolders = _vaultFoldersCache.filter(f => f.parent_id == null);
       // At top level, show photos with NO folder (legacy / standalone drops).
       // Photos that live inside folders are reachable by clicking the folder.
-      displayPhotos = list.filter(p => p.vault_folder_id == null);
+      displayPhotos = list.filter(p => p.vault_folder_id == null && !p._remote);
     } else {
       const cur = _vaultFoldersCache.find(f => f.id === _vaultCurrentFolderId);
       displayFolders = _vaultFoldersCache.filter(f => f.parent_id === _vaultCurrentFolderId);
-      displayPhotos = list.filter(p => p.vault_folder_id === _vaultCurrentFolderId);
+      displayPhotos = list.filter(p => !p._remote && p.vault_folder_id === _vaultCurrentFolderId);
       // Build breadcrumb by walking up parent_id chain.
       const trail = [];
       let node = cur;
@@ -17811,6 +18124,54 @@ async function _vaultRender(list){
                        : `<button onclick="_vaultEnterFolder(${n.id})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:13px;padding:0">${_esc(n.name)}</button>`)
                    ).join('') +
                    `</div>`;
+    }
+  } else if (!isFiltered && !_vaultPeerScope && _vaultCurrentFolderId == null) {
+    // No local folders at all — but we still want to hide remote
+    // items from the top level so peer cards group them.
+    displayPhotos = list.filter(p => !p._remote);
+  }
+  // v1.5.336/345 — Synthetic peer folder cards at top level.
+  //
+  // Default (peer doesn't advertise folders): ONE card per peer with
+  // the device label ("Mac").
+  //
+  // Mac-Option-A path (peer ships `vault_folder_name` per photo): ONE
+  // card per (peer × folder) using the folder name verbatim.  Photos
+  // without a folder name on the peer still land in a single device-
+  // labelled card so nothing gets lost.
+  if (!isFiltered && !_vaultPeerScope && _vaultCurrentFolderId == null) {
+    // Key shape: "<peer_name> <folder_name_or_empty>" so two
+    // different peers with the same folder name don't merge.
+    const groupKey = (p) => p._peer_name + ' ' + (p._peer_folder_name || '');
+    const groups = new Map();    // key → { peerName, folderName, count, peerLabel }
+    for (const p of list) {
+      if (!p._remote) continue;
+      const key = groupKey(p);
+      if (!groups.has(key)) {
+        groups.set(key, {
+          peerName:   p._peer_name,
+          folderName: p._peer_folder_name || null,
+          count:      0,
+          peerLabel:  p._peer_label || p._peer_name,
+        });
+      }
+      groups.get(key).count++;
+    }
+    for (const g of groups.values()) {
+      // Display name: peer's folder name when present, else the
+      // device label.  Photo-count badge stays the same.
+      const cardName = g.folderName || g.peerLabel || g.peerName;
+      displayFolders.unshift({
+        // Encode peer+folder into the id so the click handler can
+        // route to the right scope.
+        id: 'peer:' + g.peerName + (g.folderName ? ' ' + g.folderName : ''),
+        name: cardName,
+        parent_id: null,
+        photo_count: g.count,
+        _peerFolder: true,
+        _peer_name: g.peerName,
+        _peer_folder_name: g.folderName,
+      });
     }
   }
 
@@ -17877,20 +18238,82 @@ async function _vaultRender(list){
     // disappear too, not just spawn a temporary plaintext mirror.
     // Reveal/re-lock backend commands stay registered for advanced
     // use; the card UI just doesn't expose them by default any more.
+    // v1.5.336 — Peer folders skip the Unlock-folder (📤) button; the
+    // peer's vault is its own, we can't drag photos out from PC.
+    // v1.5.344 — peer folders get a Rename (✏️) button instead so
+    // the user can replace the default "Mac" / hostname with their
+    // own folder name ("Yasemin Ozbek", etc.).  Persisted via
+    // localStorage so it survives reload + repair.
+    const folderActions = f._peerFolder
+      ? `<div style="position:absolute;top:4px;right:4px;display:flex;gap:4px;opacity:0;transition:opacity 0.15s" data-folder-actions>` +
+          `<button title="Rename this folder" data-peer-rename style="background:rgba(0,0,0,.75);border:none;color:#fff;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer">✏️</button>` +
+        `</div>`
+      : `<div style="position:absolute;top:4px;right:4px;display:flex;gap:4px;opacity:0;transition:opacity 0.15s" data-folder-actions>` +
+          `<button title="Unlock folder — decrypt everything back to the original location and remove from vault" data-vault-unlock style="background:rgba(0,0,0,.75);border:none;color:#fff;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer">📤</button>` +
+        `</div>`;
+    // v1.5.337 — peer folder glyph is 🖥 (desktop monitor) not 🍎
+    // (which renders as a peach in some emoji fonts on Windows).
+    const folderGlyph = f._peerFolder ? '🖥' : '📁';
+    const folderDisplayName = f.name;
     card.innerHTML =
-      `<div style="position:absolute;top:4px;right:4px;display:flex;gap:4px;opacity:0;transition:opacity 0.15s" data-folder-actions>` +
-        `<button title="Unlock folder — decrypt everything back to the original location and remove from vault" data-vault-unlock style="background:rgba(0,0,0,.75);border:none;color:#fff;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer">📤</button>` +
-      `</div>` +
-      `<div style="font-size:32px;line-height:1">📁</div>` +
-      `<div style="color:var(--cream);font-size:12px;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(f.name)}</div>` +
+      folderActions +
+      `<div style="font-size:32px;line-height:1">${folderGlyph}</div>` +
+      `<div style="color:var(--cream);font-size:12px;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(folderDisplayName)}</div>` +
       `<div style="color:var(--text3);font-size:10px">${f.photo_count} item${f.photo_count===1?'':'s'}</div>`;
     card.onmouseenter = () => { const a = card.querySelector('[data-folder-actions]'); if (a) a.style.opacity = '1'; };
     card.onmouseleave = () => { const a = card.querySelector('[data-folder-actions]'); if (a) a.style.opacity = '0'; };
-    card.onclick = (ev) => {
+    card.onclick = async (ev) => {
       const t = ev.target;
       if (t && t.closest && t.closest('[data-vault-unlock]')) {
         ev.stopPropagation();
         _vaultUnlockFolder(f);
+        return;
+      }
+      // v1.5.344 — Rename click on a peer folder.  Persists in
+      // localStorage so refreshes / re-pairs keep the user's chosen
+      // name.
+      if (t && t.closest && t.closest('[data-peer-rename]')) {
+        ev.stopPropagation();
+        const current = _lanGetPeerLabelOverride(f._peer_name)
+          || (await (async () => {
+            // Fall through to whatever the current label is (Mac /
+            // hostname).  Hand the inputModal a sensible default.
+            const peerItem = (_vaultPhotosCache || []).find(
+              p => p._remote && p._peer_name === f._peer_name
+            );
+            return (peerItem && peerItem._peer_label) || f.name || '';
+          })());
+        const next = await inputModal({
+          title: 'Rename folder',
+          message: 'Pick whatever feels right — this is local to your PC and just renames the card here.',
+          defaultValue: current,
+          okLabel: 'Rename',
+        });
+        if (next === null) return;          // user cancelled
+        const trimmed = String(next).trim();
+        _lanSetPeerLabelOverride(f._peer_name, trimmed);
+        // Refresh _peer_label on every cached item so source badges
+        // + breadcrumb + folder card all repaint with the new name.
+        for (const p of (_vaultPhotosCache || [])) {
+          if (p._remote && p._peer_name === f._peer_name) {
+            p._peer_label = trimmed || _lanPrettyPeerName({
+              name: p._peer_name, hostname: '', platform: 'macos',
+            });
+          }
+        }
+        _vaultRender(_vaultPhotosCache);
+        return;
+      }
+      // v1.5.336 — peer folder vs. local folder.  Synthetic peer
+      // folders use a string id and the `_peerFolder` flag; clicking
+      // enters peer-only scope.
+      // v1.5.345 — when the peer ships a folder name, scope is
+      // "<peer>\n<folder>" so we filter to just that folder's items.
+      if (f._peerFolder) {
+        const scope = f._peer_folder_name
+          ? (f._peer_name + '\n' + f._peer_folder_name)
+          : f._peer_name;
+        _vaultEnterPeerScope(scope);
         return;
       }
       _vaultEnterFolder(f.id);
@@ -17947,30 +18370,47 @@ async function _vaultRender(list){
     const _fn = _esc(ph.filename || '');
     const tagCount = typeof ph.tag_count === 'number' ? ph.tag_count : (Array.isArray(ph.tags) ? ph.tags.length : 0);
     const status = ph.status || 'pending';
+    // v1.5.335 — Source badge for remote items so the user can tell at
+    // a glance which device a photo lives on.  Local items get no
+    // badge (the absence IS the indicator).
+    // v1.5.337 — switched from 🍎 (rendered as peach in some emoji
+    // fonts on Windows — user feedback: "Niye şeftali koydun oraya?")
+    // to 🖥 (desktop monitor), which is unambiguously a computer
+    // glyph and reads correctly in every font we care about.
+    const sourceBadge = ph._remote
+      ? `<span style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.75);color:#fff;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:600;z-index:3" title="${_esc(ph._peer_label || ph._peer_name || '')}">🖥 ${_esc(ph._peer_label || ph._peer_name || '')}</span>`
+      : '';
+    // Unhide button is meaningful only for LOCAL vault items — the
+    // peer's vault is its own; we can't "unhide" a Mac photo from PC.
+    const unhideButton = ph._remote
+      ? ''
+      : `<button class="vault-unhide-btn" title="Unlock — remove from vault" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.7);border:none;color:#fff;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer;opacity:0;transition:opacity .15s;z-index:3">Unlock</button>`;
     card.innerHTML =
-      `<div class="thumb-placeholder" style="aspect-ratio:1;height:auto;flex:1" data-vault-thumb>${mb}${favBadge}${ratingBadge}` +
+      `<div class="thumb-placeholder" style="aspect-ratio:1;height:auto;flex:1" data-vault-thumb>${mb}${favBadge}${ratingBadge}${sourceBadge}` +
         `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>` +
       `</div>` +
       `<div class="photo-info"><div class="photo-name" title="${_fn}">${_fn}</div>` +
         `<div class="photo-meta"><span class="status-dot ${status}"></span>${tagCount} tag${tagCount !== 1 ? 's' : ''}</div>` +
       `</div>` +
-      `<button class="vault-unhide-btn" title="Unlock — remove from vault" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.7);border:none;color:#fff;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer;opacity:0;transition:opacity .15s;z-index:3">Unlock</button>`;
+      unhideButton;
 
     // Hover reveals the Unhide button (matches gallery pattern of
     // chrome-on-hover) so the card looks clean while browsing but the
     // action is one move away.
-    card.addEventListener('mouseenter', () => {
-      const b = card.querySelector('.vault-unhide-btn'); if (b) b.style.opacity = '1';
-    });
-    card.addEventListener('mouseleave', () => {
-      const b = card.querySelector('.vault-unhide-btn'); if (b) b.style.opacity = '0';
-    });
-    // Unhide click — same toggle_photo_private call as before.
-    card.querySelector('.vault-unhide-btn').onclick = async (ev) => {
-      ev.stopPropagation();
-      await invoke('toggle_photo_private', { photoId: ph.id });
-      vaultRefresh();
-    };
+    if (!ph._remote) {
+      card.addEventListener('mouseenter', () => {
+        const b = card.querySelector('.vault-unhide-btn'); if (b) b.style.opacity = '1';
+      });
+      card.addEventListener('mouseleave', () => {
+        const b = card.querySelector('.vault-unhide-btn'); if (b) b.style.opacity = '0';
+      });
+      // Unhide click — same toggle_photo_private call as before.
+      card.querySelector('.vault-unhide-btn').onclick = async (ev) => {
+        ev.stopPropagation();
+        await invoke('toggle_photo_private', { photoId: ph.id });
+        vaultRefresh();
+      };
+    }
     // v1.5.171 — Multi-select on Ctrl/Cmd+click and Shift+range; plain
     // click still opens the lightbox to preserve muscle memory. Mirrors
     // gallery's selectedIds / lastClickedIdx flow with a tiny tweak:
@@ -18006,6 +18446,52 @@ async function _vaultRender(list){
         return;
       }
       // Plain click → lightbox (existing behaviour).
+      // v1.5.335 — Remote items go through the LAN viewer instead;
+      // the local vault lightbox calls get_photo_full / decrypt which
+      // wouldn't know how to reach the peer's bytes.
+      // v1.5.338 — If we matched a LOCAL PC photo for this remote
+      // item, open it via PC's own gallery lightbox.  The original
+      // file is on the shared SMB volume; no LAN detour needed.
+      // v1.5.339 — fixed: the function is `openLightbox(photoId)`
+      // (the wrong-name `lbOpen` check from v1.5.338 was always
+      // falsey because `lbOpen` is a local bool elsewhere in the
+      // file, NOT a global function — every click fell through to
+      // the LAN path and showed "Failed: get_photo: HTTP 404").
+      if (ph._remote) {
+        if (typeof ph._local_id === 'number' && typeof openLightbox === 'function') {
+          // Curate the per-peer list so ←/→ in the lightbox stays
+          // inside this Mac folder.  _lbContextPhotos is the
+          // gallery's documented mount point for an external list.
+          const localList = renderList
+            .filter(p => p._remote && p._peer_name === ph._peer_name && typeof p._local_id === 'number')
+            .map(p => {
+              // v1.5.340 — feed the lightbox real {id, path, media_type}
+              // so its asset:// playback path resolves immediately.
+              // Empty-path items can't be played by <video src=…>.
+              return {
+                id: p._local_id,
+                filename: p.filename,
+                media_type: p.media_type,
+                path: p._local_path || '',
+              };
+            });
+          try {
+            window._lbContextPhotos = localList;
+            window._lbContextLabel  = `🖥 ${ph._peer_label || ph._peer_name}`;
+            openLightbox(ph._local_id);
+            return;
+          } catch (_) {
+            // Lightbox failed — fall through to LAN.
+          }
+        }
+        const sameDevice = renderList
+          .filter(p => p._remote && p._peer_name === ph._peer_name)
+          .map(p => ({ id: p._peer_id, filename: p.filename, media_type: p.media_type }));
+        _lanPeerOpenPhoto(ph._peer_name, {
+          id: ph._peer_id, filename: ph.filename, media_type: ph.media_type,
+        }, sameDevice);
+        return;
+      }
       _vaultLbList = renderList;
       vaultLbOpen(here);
     };
@@ -18019,10 +18505,48 @@ async function _vaultRender(list){
     // need refreshing.)
 
     // Parallel thumb fetch (v1.5.163 behaviour preserved).
+    // v1.5.335 — Branch on _remote.  Local items still go through
+    // get_private_thumbnail (encrypted-thumb blob fast path).  Remote
+    // items resolve through lan_peer_get_thumb which returns base64
+    // JPEG bytes from the peer; if the peer hasn't generated a thumb
+    // for the item (Mac case: vault video without ffmpeg pre-pass),
+    // we leave the SVG placeholder + the media-type icon in place.
     (async () => {
       let src = '';
-      try { src = await invoke('get_private_thumbnail', { photoId: ph.id }); }
-      catch(_) { try { src = await invoke('get_thumbnail', { photoId: ph.id }); } catch(__) { return; } }
+      if (ph._remote) {
+        // v1.5.338 — Prefer the LOCAL thumb whenever we matched the
+        // filename in PC's own DB.  Mac's /api/thumb 404s for items
+        // it never sealed; local thumb is already cached and renders
+        // in milliseconds (no LAN round-trip).
+        // v1.5.341 — bug fix: `get_thumbnail` returns RAW base64 (no
+        // data: prefix), so assigning it to img.src loaded nothing.
+        // Switched to `get_thumbnail_path` + convertFileSrc — same
+        // pattern the gallery uses for its hot path, returns an
+        // asset:// URL that <img src> handles natively.
+        if (typeof ph._local_id === 'number') {
+          try {
+            const thumbPath = await invoke('get_thumbnail_path', { photoId: ph._local_id });
+            if (thumbPath && typeof convertFileSrc === 'function') {
+              src = convertFileSrc(thumbPath);
+            } else if (thumbPath) {
+              // No convertFileSrc available — base64-encoded fallback.
+              const b64 = await invoke('get_thumbnail', { photoId: ph._local_id });
+              if (b64) src = `data:image/jpeg;base64,${b64}`;
+            }
+          } catch(_) { /* fall through to lan_peer_get_thumb */ }
+        }
+        if (!src) {
+          try {
+            const b64 = await invoke('lan_peer_get_thumb', {
+              peerName: ph._peer_name, photoId: ph._peer_id,
+            });
+            if (b64) src = `data:image/jpeg;base64,${b64}`;
+          } catch(_) { /* 404 / network — keep placeholder */ }
+        }
+      } else {
+        try { src = await invoke('get_private_thumbnail', { photoId: ph.id }); }
+        catch(_) { try { src = await invoke('get_thumbnail', { photoId: ph.id }); } catch(__) { return; } }
+      }
       if (!src) return;
       const thumbHost = card.querySelector('[data-vault-thumb]');
       if (!thumbHost) return;

@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.333"
+version = "1.5.347"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -125,6 +125,16 @@ windows = { version = "0.58", features = [
     # v1.5.285 — child HWND creation for libmpv video overlay
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
+    # v1.5.346 — NTFS MFT fast-scan via FSCTL_ENUM_USN_DATA.
+    # Ioctl: FSCTL_* constants + MFT_ENUM_DATA_V0 + USN_RECORD_V2.
+    # System_IO: DeviceIoControl + CloseHandle (already pulled in by
+    # Win32_Foundation but the IO feature is the documented home).
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+    # v1.5.347 — native HEIC decode via WIC (Windows Imaging
+    # Component), replacing the powershell.exe + WPF BitmapDecoder
+    # spawn that dominated first-open latency on HEIC.
+    "Win32_Graphics_Imaging",
 ] }
 windows-core = "0.58"
 

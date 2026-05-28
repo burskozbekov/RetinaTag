@@ -478,7 +478,31 @@ pub async fn scan_folder_impl(
     // when the cache landed inside the library dir).  We belt-and-brace it:
     // even though v1.5.281 moves the cache out of the library, a user could
     // still point a watch folder at AppData by accident.
+    //
+    // v1.5.346 — On Windows with a local NTFS volume we read the MFT
+    // directly via FSCTL_ENUM_USN_DATA — roughly 10-20× faster than
+    // WalkDir on the user's 66 k-file library (Everything's trick).
+    // Falls back to WalkDir silently for non-NTFS, network drives,
+    // or any open / IOCTL error.
     let all_paths: Vec<std::path::PathBuf> = tokio::task::spawn_blocking(move || {
+        // Shared media-and-not-thumbnail filter for both paths.
+        let is_wanted = |p: &std::path::Path| -> bool {
+            // Reject anything walking through a `thumbnails` segment.
+            for seg in p.components() {
+                if let std::path::Component::Normal(s) = seg {
+                    if s.to_string_lossy().eq_ignore_ascii_case("thumbnails") {
+                        return false;
+                    }
+                }
+            }
+            is_media_file(p)
+        };
+
+        let folder_path = std::path::Path::new(&folder_clone);
+        if let Some(paths) = crate::mft_scan::try_fast_scan(folder_path, &is_wanted) {
+            return paths;
+        }
+        // Slow fallback (non-NTFS / network / FSCTL failure).
         WalkDir::new(&folder_clone)
             .follow_links(true)
             .into_iter()

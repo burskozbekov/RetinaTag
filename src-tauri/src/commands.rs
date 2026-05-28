@@ -15700,6 +15700,67 @@ pub async fn lan_peer_list_paired(
     .map_err(|e| e.to_string())?
 }
 
+/// v1.5.338 — Batch filename lookup against the LOCAL photos table.
+///
+/// User flow that motivated this:
+///   • Mac flags 23 photos as vault (vault_oid set in Mac's DB) but
+///     never writes the .rtenc seal.  Mac's `/api/photo` returns
+///     "photo file missing" → PC's Browse Vault modal couldn't show
+///     thumbs or open files.
+///   • Original photos still live in the SMB-shared library that
+///     PC has direct access to (`D:\Fotograflar\...`).  PC's own
+///     photos table knows them by filename.
+///
+/// The remote-vault FE flow now sends every peer item's filename
+/// here in one call and, for each filename we can match, attaches a
+/// `_local_id` so subsequent thumb / open calls hit PC's local
+/// pipeline instead of bouncing through the broken /api/photo path.
+///
+/// Returns `{filename → {id, path, media_type}}` (only entries with
+/// at least one match are present).  We pick the SMALLEST id when
+/// more than one photo shares a filename — typically the oldest
+/// scanned import, which is what the user most often means by "the
+/// one I added".  Path + media_type are included so the FE can feed
+/// the gallery lightbox without a second round-trip.
+#[derive(serde::Serialize, Clone)]
+pub struct LocalPhotoHit {
+    pub id: i64,
+    pub path: String,
+    pub media_type: Option<String>,
+}
+
+#[tauri::command]
+pub async fn find_local_photos_by_filenames(
+    filenames: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, LocalPhotoHit>, String> {
+    if filenames.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<std::collections::HashMap<String, LocalPhotoHit>, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let mut out: std::collections::HashMap<String, LocalPhotoHit> = std::collections::HashMap::new();
+        for fname in &filenames {
+            if fname.is_empty() { continue; }
+            if let Ok((id, path, media_type)) = conn.query_row(
+                "SELECT id, path, media_type FROM photos WHERE filename = ?1 ORDER BY id LIMIT 1",
+                rusqlite::params![fname],
+                |r| Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                )),
+            ) {
+                out.insert(fname.clone(), LocalPhotoHit { id, path, media_type });
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Remove a paired peer (forget the token).  The peer continues to
 /// advertise on Bonjour; the user can re-pair anytime.
 #[tauri::command]

@@ -611,6 +611,22 @@ pub fn init_db(path: &str) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_scan_history_started ON scan_history(started_at DESC);"
     ).ok();
 
+    // v1.5.347 — index audit. `find_local_photos_by_filenames`
+    // (added in v1.5.338 for the Mac vault fallback) does a
+    // filename equality lookup that was previously full-scan on
+    // 66 k rows. Adding the index drops that path from ~150 ms
+    // to <1 ms.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_photos_filename ON photos(filename);"
+    ).ok();
+
+    // v1.5.347 — ANALYZE so the SQLite query planner has fresh
+    // statistics for index selection. Without this, after a big
+    // bulk insert (scan / migration), the planner may still think
+    // tables are empty and pick a scan over an index. Running on
+    // every open is cheap (~50–200 ms on this DB).
+    conn.execute_batch("ANALYZE;").ok();
+
     Ok(conn)
 }
 
