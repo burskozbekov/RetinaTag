@@ -783,10 +783,22 @@ async fn upload(
     //    authoritative date from the file's own metadata or the
     //    iOS-side filename. If neither yields anything we fall
     //    back to the current local year/month.
+    // v1.5.358 — extract_date_taken does synchronous EXIF / XMP disk
+    //    reads (5-30 ms per HEIC).  Running it directly on the axum
+    //    worker thread blocks the tokio runtime, which is shared with
+    //    the local renderer's IPC dispatch.  An iOS bulk upload of 20
+    //    photos used to back up the runtime queue with ~500 ms of
+    //    serialised EXIF reads — visible UI jank on the desktop side.
+    //    spawn_blocking releases the worker between files.
     use chrono::Datelike;
     let tmp_str = tmp_path.to_string_lossy().to_string();
+    let parsed = tokio::task::spawn_blocking(move || {
+        crate::scanner::extract_date_taken(&tmp_str)
+    })
+    .await
+    .ok()
+    .flatten();
     let (year, month) = {
-        let parsed = crate::scanner::extract_date_taken(&tmp_str);
         if let Some(dt) = parsed
             .as_deref()
             .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok())
