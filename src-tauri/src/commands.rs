@@ -8315,18 +8315,30 @@ pub async fn scan_and_cluster_faces(
         return Err("Face recognition models are missing. Please download them first.".to_string());
     }
 
-    // Get photos to process — careful scoping to satisfy borrow checker
-    let photos: Vec<(i64, String)> = {
-        let result: Result<Vec<(i64, String)>, String> = (|| {
-            let conn = state.db.lock().map_err(|_| "db lock".to_string())?;
-            let rows: Vec<(i64, String)> = if folder.is_empty() {
+    // Get photos to process.
+    // v1.5.351 — the whole-library branch (`folder.is_empty()`) does
+    // a full `SELECT id, path FROM photos` and collects every row
+    // into a Vec.  On a 66 k library that's 100–300 ms of synchronous
+    // SQLite work; before this fix it ran on the tokio runtime and
+    // froze the UI for the duration of the initial pull (even before
+    // the heavy detection-work spawn_blocking below ever started).
+    // Same v1.5.76-style miss the v1.5.293-333 perf passes paid down
+    // elsewhere — moving the pull onto a worker thread keeps the
+    // renderer alive while the query runs.
+    let db_for_pull = state.db.clone();
+    let folder_for_pull = folder.clone();
+    let photos: Vec<(i64, String)> = tauri::async_runtime::spawn_blocking(
+        move || -> Result<Vec<(i64, String)>, String> {
+            let conn = db_for_pull.lock().map_err(|_| "db lock".to_string())?;
+            if folder_for_pull.is_empty() {
                 let mut stmt = conn.prepare("SELECT id, path FROM photos")
                     .map_err(|e| e.to_string())?;
-                let result: Vec<(i64, String)> = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                let rows: Vec<(i64, String)> = stmt
+                    .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
                     .map_err(|e| e.to_string())?
                     .filter_map(|r| r.ok())
                     .collect();
-                result
+                Ok(rows)
             } else {
                 // Prefix match via substr() — `%`/`_` in the folder path
                 // must not be treated as LIKE wildcards.
@@ -8334,16 +8346,19 @@ pub async fn scan_and_cluster_faces(
                     "SELECT id, path FROM photos
                      WHERE folder = ?1 OR substr(path, 1, length(?1)) = ?1"
                 ).map_err(|e| e.to_string())?;
-                let result: Vec<(i64, String)> = stmt.query_map(rusqlite::params![&folder], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                let rows: Vec<(i64, String)> = stmt
+                    .query_map(rusqlite::params![&folder_for_pull], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })
                     .map_err(|e| e.to_string())?
                     .filter_map(|r| r.ok())
                     .collect();
-                result
-            };
-            Ok(rows)
-        })();
-        result?
-    };
+                Ok(rows)
+            }
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())??;
 
     if photos.is_empty() {
         return Err("No photos found in this folder.".to_string());
