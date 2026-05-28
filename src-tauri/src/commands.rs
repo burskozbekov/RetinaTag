@@ -14267,13 +14267,26 @@ pub async fn vault_set_pin_with_recovery(
 /// recovery_blob. Returns true iff the phrase decrypts the stored
 /// ciphertext. The FE uses this to gate "set a new PIN" in the
 /// recovery flow without allowing arbitrary phrases to wipe the vault.
+///
+/// v1.5.367 — Was a sync `pub fn` Tauri command, which Tauri 2 dispatches
+/// on the IPC thread.  Inside it called `derive_kek_from_mnemonic`
+/// (Argon2id, ~250 ms cold and up to a full second on slow CPUs), so
+/// every recovery-phrase keystroke that re-validated locked the IPC
+/// thread for that long.  Now async + spawn_blocking so the renderer
+/// stays responsive while the KEK derives — same pattern v1.5.67
+/// applied to `vault_unlock`.
 #[tauri::command]
-pub fn vault_verify_mnemonic(
+pub async fn vault_verify_mnemonic(
     phrase: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    db::vault_verify_mnemonic(&conn, &phrase).map_err(|e| e.to_string())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        db::vault_verify_mnemonic(&conn, &phrase).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// v1.5.68 — cross-device restore. On a new machine, the user types
