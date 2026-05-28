@@ -9659,10 +9659,21 @@ pub async fn index_clip_embeddings(
 ) -> Result<usize, String> {
     let base = clip_models_dir(&app);
 
-    // Photos that haven't been indexed with this tier yet
+    // Photos that haven't been indexed with this tier yet.
+    // v1.5.365 — pull off the tokio runtime.  On a 66 k library with
+    // no prior CLIP indexing, this returns every photo path — 50-300 ms
+    // of synchronous SQLite + String allocations on the renderer
+    // thread before the heavy spawn_blocking encoding work starts.
+    // Same template as v1.5.351 / 353 / 354 / 355 / 356 / 357 / 359.
     let photos: Vec<(i64, String)> = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::get_photos_without_clip_emb(&conn, tier.dir_name()).map_err(|e| e.to_string())?
+        let db = state.db.clone();
+        let tier_dir = tier.dir_name().to_string();
+        tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(i64, String)>, String> {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            db::get_photos_without_clip_emb(&conn, &tier_dir).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??
     };
 
     if photos.is_empty() {
