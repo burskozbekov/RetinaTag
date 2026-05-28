@@ -552,11 +552,16 @@ pub async fn search_photos(
         if let Ok(path_results) = db::search_photos_by_path(&conn, &trimmed) {
             merge_photo_results(&mut results, path_results);
         }
-        // Also search AI descriptions (only with meaningful terms — running
-        // search_photos_by_description("i") used to LIKE-match half the
-        // library; see v1.5.360 stop-word note above).
-        for term in multi_input {
-            if let Ok(desc_results) = db::search_photos_by_description(&conn, term) {
+        // Also search AI descriptions.
+        // v1.5.361 — Single multi-word call instead of per-term OR-merge.
+        // search_photos_by_description AND-joins tokens; passing the
+        // filtered translated terms joined with spaces requires all of
+        // them in a description — far tighter than the previous per-term
+        // OR-merge which exploded the result set.  See db.rs for the FTS5
+        // / word-boundary LIKE fix that made this safe.
+        if !multi_input.is_empty() {
+            let desc_query = multi_input.join(" ");
+            if let Ok(desc_results) = db::search_photos_by_description(&conn, &desc_query) {
                 merge_photo_results(&mut results, desc_results);
             }
         }
@@ -606,6 +611,14 @@ pub async fn search_photos(
         //      "couple on the boat" → couple-synonyms ∩ boat-synonyms.
         //   4. Single word: keep the full synonym OR for broad recall.
 
+        // v1.5.361 — Added verb fragments + auxiliary forms.  Without
+        // these, "food i ate in france" left "ate" as a content word
+        // and every photo whose description contained the FTS5 token
+        // "ate" merged in (still better than the pre-v1.5.361 LIKE
+        // %ate% bug, but "ate" as a meaningful subject is rare in
+        // practice — when someone types it they mean "meal" / "food").
+        // Mirrors the SEARCH_STOP_WORDS list on the Turkish path
+        // (v1.5.360) so both languages strip the same noise.
         const STOP_WORDS: &[&str] = &[
             "the","a","an","in","on","at","of","by","to","for","with",
             "is","are","was","were","be","been","from","and","or","but",
@@ -613,6 +626,16 @@ pub async fn search_photos(
             "about","between","through","up","out","its","it","as","all",
             "both","than","too","also","some","any","my","your","our",
             "his","her","their","i","we","you","he","she","they",
+            // v1.5.361 — auxiliary + dummy verbs that the user rarely
+            // means as a subject.  English-side mirror of the Turkish
+            // SEARCH_STOP_WORDS list.
+            "do","did","does","done","doing",
+            "have","has","had","having",
+            "ate","eaten","eat","eats","eating",
+            "go","goes","went","gone","going",
+            "get","gets","got","getting",
+            "see","saw","seen","look","looked","looking",
+            "what","which","who","when","where","why","how",
         ];
         let all_words: Vec<String> = trimmed.split_whitespace().map(|w| w.to_string()).collect();
         let content_words: Vec<String> = all_words.iter()
@@ -688,8 +711,17 @@ pub async fn search_photos(
         }
         // Description search — content words only (not full synonym expansion,
         // which caused tangential matches via description text).
-        for word in &content_words {
-            if let Ok(desc_results) = db::search_photos_by_description(&conn, word) {
+        //
+        // v1.5.361 — Switched from per-word OR-merge to a single multi-word
+        // call.  search_photos_by_description now AND-joins tokens in its
+        // FTS5 MATCH (and uses word-boundary LIKE in the fallback), so
+        // passing "food ate france" requires all three to appear — far
+        // tighter than OR-merging hits for "food", then OR-merging hits
+        // for "ate", then OR-merging hits for "france" (which is what
+        // produced the 1200-result explosion on the user's library).
+        if !content_words.is_empty() {
+            let desc_query = content_words.join(" ");
+            if let Ok(desc_results) = db::search_photos_by_description(&conn, &desc_query) {
                 merge_photo_results(&mut results, desc_results);
             }
         }

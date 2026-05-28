@@ -1826,9 +1826,37 @@ pub fn search_photos_by_path(conn: &Connection, query: &str) -> Result<Vec<Photo
 }
 
 /// Search photos by AI-generated description using FTS5.
-/// Falls back to LIKE if FTS query fails (e.g. special characters).
+///
+/// v1.5.361 — Description-search overhaul.  The previous shape had
+/// two design flaws that together produced the "food i ate in
+/// france" returns-1200-photos bug:
+///
+///   1. Multi-word queries were OR-joined into the FTS5 MATCH
+///      expression, so "food ate" became `"food" OR "ate"` — every
+///      photo whose description mentioned either word matched.
+///      Combined with the per-word loop in commands.rs::search_photos
+///      this was effectively "any photo mentioning ANY content word
+///      in its description, anywhere in the library."
+///
+///   2. The fallback when FTS5 itself failed was a raw
+///      `LIKE '%query%'`.  That meant `query = "ate"` matched
+///      "plate", "decorated", "located", "skater" — every
+///      description containing those letters in sequence, ignoring
+///      word boundaries entirely.  This was the dominant source of
+///      the explosion.
+///
+/// New behaviour:
+///   • Multi-word → AND join.  A photo's description must contain
+///     EVERY content word (FTS5 tokenises on word boundaries, so
+///     "ate" only matches the token "ate", not "plate").
+///   • Single word → exact-token FTS5 match (same as before but
+///     without the per-word OR fan-out at the caller).
+///   • LIKE fallback now uses space-padded patterns (`% term %`)
+///     so word-boundary matching is preserved even when FTS5
+///     drops a query.  Description text is normalised by FTS5's
+///     unicode61 tokenizer, so padding is a reasonable approx.
 pub fn search_photos_by_description(conn: &Connection, query: &str) -> Result<Vec<PhotoSummary>> {
-    // Try FTS5 first — split multi-word into OR query for broader matching
+    // Try FTS5 first — split multi-word into AND query for precision.
     let words: Vec<&str> = query.split_whitespace()
         .filter(|w| w.len() >= 2)
         .collect();
@@ -1839,7 +1867,7 @@ pub fn search_photos_by_description(conn: &Connection, query: &str) -> Result<Ve
     let fts_query = words.iter()
         .map(|w| format!("\"{}\"", w.replace('"', "")))
         .collect::<Vec<_>>()
-        .join(" OR ");
+        .join(" AND ");
 
     // v1.5.121 — Raised LIMIT 500 → 5000 (search_photos_by_description).
     let ids: Vec<i64> = conn.prepare(
@@ -1850,16 +1878,35 @@ pub fn search_photos_by_description(conn: &Connection, query: &str) -> Result<Ve
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
     })
     .unwrap_or_else(|_| {
-        // FTS failed — fallback to LIKE
-        let pattern = format!("%{}%", query);
-        conn.prepare(
-            "SELECT id FROM photos WHERE description LIKE ?1 COLLATE NOCASE LIMIT 5000"
-        )
-        .and_then(|mut stmt| {
-            stmt.query_map(params![pattern], |r| r.get(0))
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        })
-        .unwrap_or_default()
+        // v1.5.361 — Word-boundary LIKE fallback.  The original
+        // `'%query%'` matched substrings (ate→plate, ate→decorated).
+        // Build a pattern per content word with leading/trailing
+        // spaces and require ALL of them via AND in SQL.  Imperfect
+        // (won't match a word at the very start/end of a description
+        // unless we also handle that case) but vastly better than the
+        // unbounded substring match.
+        let mut clauses: Vec<String> = Vec::new();
+        let mut binds: Vec<String> = Vec::new();
+        for w in &words {
+            // Match (a) word at start: 'word ...', (b) word at end:
+            // '... word', (c) word in middle: '... word ...'.
+            clauses.push(
+                "(' ' || description || ' ' LIKE ?  COLLATE NOCASE)".to_string()
+            );
+            binds.push(format!("% {} %", w));
+        }
+        let sql = format!(
+            "SELECT id FROM photos WHERE description IS NOT NULL AND {} LIMIT 5000",
+            clauses.join(" AND ")
+        );
+        let bind_refs: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        conn.prepare(&sql)
+            .and_then(|mut stmt| {
+                stmt.query_map(bind_refs.as_slice(), |r| r.get(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default()
     });
 
     if ids.is_empty() {
