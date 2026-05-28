@@ -14860,98 +14860,111 @@ fn _folder_collection_name(folder: &str) -> String {
 pub async fn save_all_folders_as_collections(
     state: tauri::State<'_, AppState>,
 ) -> Result<FolderOrganizeResult, String> {
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let folders = db::get_folders(&conn).map_err(|e| e.to_string())?;
-    if folders.is_empty() {
-        return Ok(FolderOrganizeResult {
-            created: 0,
-            skipped: 0,
-            total_photos_assigned: 0,
-        });
-    }
-
-    // Pre-fetch existing collection names so we can skip duplicates with one
-    // lookup instead of a SELECT per folder.
-    let existing_names: std::collections::HashSet<String> = {
-        let mut stmt = conn
-            .prepare("SELECT name FROM collections")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
-
-    let mut created = 0usize;
-    let mut skipped = 0usize;
-    let mut total_assigned = 0usize;
-
-    for (folder, _count) in folders {
-        if folder.trim().is_empty() {
-            skipped += 1;
-            continue;
+    // v1.5.357 — the entire body held state.db.lock() across a
+    // per-folder loop of `create_collection` + `SELECT id FROM photos
+    // WHERE folder = ?` + `add_photo_to_collection` for every photo.
+    // On a library with 500 distinct folders that's ~1500 queries +
+    // 60 k+ row collection-membership inserts behind a single mutex
+    // held on the tokio runtime — UI froze for the entire migration.
+    // Wrap the whole flow in spawn_blocking so the renderer stays
+    // free while the migration runs.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<FolderOrganizeResult, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let folders = db::get_folders(&conn).map_err(|e| e.to_string())?;
+        if folders.is_empty() {
+            return Ok(FolderOrganizeResult {
+                created: 0,
+                skipped: 0,
+                total_photos_assigned: 0,
+            });
         }
-        let base_name = _folder_collection_name(&folder);
-        // If a collection with this short name already exists, disambiguate
-        // with the last 3 segments; if that collides too, skip.
-        let name = if existing_names.contains(&base_name) {
-            // Try last three segments as a tiebreak.
-            let parts: Vec<&str> = folder
-                .split(|c: char| c == '/' || c == '\\')
-                .filter(|s| !s.is_empty())
-                .collect();
-            if parts.len() >= 3 {
-                let n = parts.len();
-                let longer = format!("{} / {} / {}", parts[n - 3], parts[n - 2], parts[n - 1]);
-                if existing_names.contains(&longer) {
+
+        // Pre-fetch existing collection names so we can skip duplicates with one
+        // lookup instead of a SELECT per folder.
+        let existing_names: std::collections::HashSet<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM collections")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let mut created = 0usize;
+        let mut skipped = 0usize;
+        let mut total_assigned = 0usize;
+
+        for (folder, _count) in folders {
+            if folder.trim().is_empty() {
+                skipped += 1;
+                continue;
+            }
+            let base_name = _folder_collection_name(&folder);
+            // If a collection with this short name already exists, disambiguate
+            // with the last 3 segments; if that collides too, skip.
+            let name = if existing_names.contains(&base_name) {
+                // Try last three segments as a tiebreak.
+                let parts: Vec<&str> = folder
+                    .split(|c: char| c == '/' || c == '\\')
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if parts.len() >= 3 {
+                    let n = parts.len();
+                    let longer = format!("{} / {} / {}", parts[n - 3], parts[n - 2], parts[n - 1]);
+                    if existing_names.contains(&longer) {
+                        skipped += 1;
+                        continue;
+                    }
+                    longer
+                } else {
                     skipped += 1;
                     continue;
                 }
-                longer
             } else {
-                skipped += 1;
-                continue;
-            }
-        } else {
-            base_name
-        };
+                base_name
+            };
 
-        let coll_id = match db::create_collection(&conn, &name, "manual", None) {
-            Ok(id) => id,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        // Fetch photo ids for this folder and add to the new collection.
-        let photo_ids: Vec<i64> = {
-            let mut stmt = match conn
-                .prepare("SELECT id FROM photos WHERE folder = ?1 ORDER BY COALESCE(date_taken, mtime) DESC")
-            {
-                Ok(s) => s,
+            let coll_id = match db::create_collection(&conn, &name, "manual", None) {
+                Ok(id) => id,
                 Err(_) => {
                     skipped += 1;
                     continue;
                 }
             };
-            stmt.query_map(rusqlite::params![&folder], |r| r.get::<_, i64>(0))
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-        };
 
-        for pid in &photo_ids {
-            let _ = db::add_photo_to_collection(&conn, coll_id, *pid);
+            // Fetch photo ids for this folder and add to the new collection.
+            let photo_ids: Vec<i64> = {
+                let mut stmt = match conn
+                    .prepare("SELECT id FROM photos WHERE folder = ?1 ORDER BY COALESCE(date_taken, mtime) DESC")
+                {
+                    Ok(s) => s,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                stmt.query_map(rusqlite::params![&folder], |r| r.get::<_, i64>(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            };
+
+            for pid in &photo_ids {
+                let _ = db::add_photo_to_collection(&conn, coll_id, *pid);
+            }
+            total_assigned += photo_ids.len();
+            created += 1;
         }
-        total_assigned += photo_ids.len();
-        created += 1;
-    }
 
-    Ok(FolderOrganizeResult {
-        created,
-        skipped,
-        total_photos_assigned: total_assigned,
+        Ok(FolderOrganizeResult {
+            created,
+            skipped,
+            total_photos_assigned: total_assigned,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Trending Tags ──────────────────────────────────────────────────────────
