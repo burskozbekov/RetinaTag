@@ -8567,58 +8567,68 @@ pub async fn count_unscanned_faces(
         .filter(|v| !v.is_empty())
         .cloned();
 
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    // year_month / ids take precedence over folder, matching detect.
-    let n: i64 = if let Some(ym) = &ym_filter {
-        let sql = format!(
-            "SELECT COUNT(*) FROM photos
-             WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
-               AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
-               AND strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?1",
-            art_sql
-        );
-        conn.query_row(&sql, rusqlite::params![ym], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())?
-    } else if let Some(ids) = &ids_filter {
-        let id_list: String = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT COUNT(*) FROM photos
-             WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
-               AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
-               AND id IN ({})",
-            art_sql, id_list
-        );
-        conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())?
-    } else if let Some(f) = &folder_filter {
-        // v1.5.45 — STRICT folder match (no substring/prefix). The previous
-        // `OR substr(path, 1, length(?1)) = ?1` clause was scooping up
-        // subfolders AND any folder that happened to share a prefix
-        // (eg. "Pictures" matched "PicturesArchive"). The user reported
-        // the auto-scan was scanning "tüm klasörü" — the entire library
-        // — because their photo lived in a top-level folder whose prefix
-        // matched 60k+ paths. Folder column is each photo's IMMEDIATE
-        // parent, so exact match limits the scan to just the photos in
-        // that exact directory.
-        let sql = format!(
-            "SELECT COUNT(*) FROM photos
-             WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
-               AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
-               AND folder = ?1",
-            art_sql
-        );
-        conn.query_row(&sql, rusqlite::params![f], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())?
-    } else {
-        let sql = format!(
-            "SELECT COUNT(*) FROM photos
-             WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
-               AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})",
-            art_sql
-        );
-        conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())?
-    };
+    // v1.5.350 — off the tokio runtime.  COUNT(*) on photos with the
+    // two NOT IN subqueries can be hundreds of ms cold on a 66 k
+    // library; running it inline froze the UI every time the user
+    // tapped a face-scan button.  Matches the v1.5.305 pattern that
+    // moved tag queries off the worker.
+    let db = state.db.clone();
+    let n: i64 = tauri::async_runtime::spawn_blocking(move || -> Result<i64, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        // year_month / ids take precedence over folder, matching detect.
+        if let Some(ym) = &ym_filter {
+            let sql = format!(
+                "SELECT COUNT(*) FROM photos
+                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                   AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
+                   AND strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?1",
+                art_sql
+            );
+            conn.query_row(&sql, rusqlite::params![ym], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())
+        } else if let Some(ids) = &ids_filter {
+            let id_list: String = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT COUNT(*) FROM photos
+                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                   AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
+                   AND id IN ({})",
+                art_sql, id_list
+            );
+            conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())
+        } else if let Some(f) = &folder_filter {
+            // v1.5.45 — STRICT folder match (no substring/prefix). The previous
+            // `OR substr(path, 1, length(?1)) = ?1` clause was scooping up
+            // subfolders AND any folder that happened to share a prefix
+            // (eg. "Pictures" matched "PicturesArchive"). The user reported
+            // the auto-scan was scanning "tüm klasörü" — the entire library
+            // — because their photo lived in a top-level folder whose prefix
+            // matched 60k+ paths. Folder column is each photo's IMMEDIATE
+            // parent, so exact match limits the scan to just the photos in
+            // that exact directory.
+            let sql = format!(
+                "SELECT COUNT(*) FROM photos
+                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                   AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
+                   AND folder = ?1",
+                art_sql
+            );
+            conn.query_row(&sql, rusqlite::params![f], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())
+        } else {
+            let sql = format!(
+                "SELECT COUNT(*) FROM photos
+                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                   AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})",
+                art_sql
+            );
+            conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     Ok(n.max(0) as usize)
 }
 
