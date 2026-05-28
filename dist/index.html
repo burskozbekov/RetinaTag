@@ -2589,9 +2589,32 @@ select.tb-select:focus{border-color:var(--red-dark)}
               AI that understands photos without tags — finds them even without keywords. Pick a model and index your library. Try queries like <i>"sunset over the sea"</i> or <i>"red dress in winter"</i>.
             </p>
             <div style="display:flex;flex-direction:column;gap:8px" id="clipTierList"></div>
-            <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+            <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <span style="font-size:11px;color:var(--text3)" id="clipIndexStatus">—</span>
-              <span style="font-size:10px;color:var(--text3)">Indexing runs automatically after tagging</span>
+              <!-- v1.5.366 — Manual "Index Now" button.  Pre-v1.5.366
+                   the only way to populate the CLIP index was via the
+                   automatic post-tagging hook (see tag-complete
+                   listener).  Users who downloaded CLIP but never
+                   AI-tagged (or AI-tagged before CLIP was available)
+                   had no way to backfill, so natural-language search
+                   fell back to tag-only results.  This button lets
+                   them index on demand. -->
+              <button id="btnClipIndexNow"
+                class="btn btn-secondary btn-xs"
+                onclick="_clipIndexNow(this)"
+                style="font-size:11px;padding:4px 10px">
+                ⚡ Index Now
+              </button>
+              <span style="font-size:10px;color:var(--text3)">Or wait — also runs automatically after tagging</span>
+            </div>
+            <div id="clipIndexProgress" style="display:none;margin-top:10px;font-size:11px;color:var(--cream2)">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span id="clipIndexProgressLabel">Indexing…</span>
+                <span id="clipIndexProgressCount">0 / 0</span>
+              </div>
+              <div style="height:4px;background:var(--card2);border-radius:2px;overflow:hidden">
+                <div id="clipIndexProgressBar" style="height:100%;width:0%;background:var(--red);transition:width .25s ease"></div>
+              </div>
             </div>
           </div>
         </section>
@@ -16106,8 +16129,53 @@ async function updateClipIndexStatus() {
     const total = totalEl ? parseInt(totalEl.textContent) || '?' : '?';
     const el = $('clipIndexStatus');
     if (el) el.textContent = `${count} / ${total} photos indexed`;
+    // v1.5.366 — hide the "Index Now" button when the index is already
+    // complete (count ≥ total).  Keep it visible otherwise.
+    const btn = $('btnClipIndexNow');
+    if (btn && typeof count === 'number' && typeof total === 'number') {
+      btn.style.display = count >= total ? 'none' : 'inline-block';
+    }
   } catch (e) {}
 }
+
+// v1.5.366 — Manual "Index Now" trigger.  Lives in Settings → Search →
+// CLIP Semantic Index.  Fires index_clip_embeddings with the currently
+// selected tier; live progress lands via the `clip-index-progress`
+// event which the listener below writes into the progress bar.
+async function _clipIndexNow(btn) {
+  if (!_clipTierSelected) {
+    toast('Pick a CLIP tier first (download one if none).', 'warn');
+    return;
+  }
+  // Confirm the button + show the progress strip.
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting…'; }
+  const prog = $('clipIndexProgress');
+  if (prog) prog.style.display = '';
+  try {
+    const indexed = await invoke('index_clip_embeddings', { tier: _clipTierSelected });
+    toast(`${indexed} photos indexed.`, 'success');
+  } catch (e) {
+    toast('Index failed: ' + e, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ Index Now'; }
+    if (prog) prog.style.display = 'none';
+    updateClipIndexStatus();
+  }
+}
+
+// Live progress while index_clip_embeddings runs (event emitted every
+// 20 photos from the backend spawn_blocking loop, see commands.rs).
+listen('clip-index-progress', ({ payload }) => {
+  const done = payload?.done || 0;
+  const total = payload?.total || 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const bar = $('clipIndexProgressBar');
+  const count = $('clipIndexProgressCount');
+  const label = $('clipIndexProgressLabel');
+  if (bar) bar.style.width = pct + '%';
+  if (count) count.textContent = `${done.toLocaleString()} / ${total.toLocaleString()}`;
+  if (label) label.textContent = `Indexing… ${pct}%`;
+});
 
 // Semantic indexing now runs automatically after tagging (see tag-complete listener)
 
