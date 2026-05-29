@@ -970,7 +970,20 @@ mod tests {
                 println!("Found sidecar: keywords={}, desc={:?}, rating={:?}, label={:?}",
                     r.keywords.len(), r.description.as_deref().map(|s| &s[..s.len().min(60)]),
                     r.rating, r.label);
-                assert!(!r.keywords.is_empty(), "Expected keywords in real sidecar");
+                // This particular sidecar (5205.xmp, resolved from 5205.MP4)
+                // has all three keyword bags present but EMPTY, with only
+                // dc:description populated — see the
+                // `parses_sidecar_with_empty_keyword_bags` inline test for
+                // the exact on-disk shape. The old assertion demanded
+                // keywords that simply aren't in the file, so it always
+                // failed even though the parser was correct. What we
+                // actually want to verify against a real file is that the
+                // parser extracts *some* real content rather than silently
+                // returning an empty struct.
+                assert!(
+                    r.description.is_some() || !r.keywords.is_empty(),
+                    "Expected real sidecar to yield a description or keywords"
+                );
             }
             Ok(None) => {
                 println!("No sidecar at {} (skipping)", photo);
@@ -1074,5 +1087,55 @@ mod tests {
         assert_eq!(r.description.as_deref(), Some("A man and a woman play guitar."));
         assert_eq!(r.rating, Some(4));
         assert_eq!(r.label.as_deref(), Some("Red"));
+    }
+
+    /// Regression test for the real on-disk sidecar
+    /// `D:\Fotograflar\2024-10-09\5205.xmp` (resolved from the `5205.MP4`
+    /// video via the Lightroom stem-name convention). RetinaTag wrote it
+    /// with all three keyword bags present but EMPTY, and only
+    /// `dc:description` populated. `parses_real_user_sidecar` used to assert
+    /// keywords were present and failed on this file — but the parser was
+    /// right: there are no keywords to find. This captures the exact shape
+    /// the file exposes, with no file I/O, so it also runs on CI.
+    #[test]
+    fn parses_sidecar_with_empty_keyword_bags() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="RetinaTag 1.0">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="5205.MP4"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+      xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
+      xmlns:Iptc4xmpCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/">
+      <dc:subject>
+        <rdf:Bag>
+        </rdf:Bag>
+      </dc:subject>
+      <lr:hierarchicalSubject>
+        <rdf:Bag>
+        </rdf:Bag>
+      </lr:hierarchicalSubject>
+      <Iptc4xmpCore:Keywords>
+        <rdf:Bag>
+        </rdf:Bag>
+      </Iptc4xmpCore:Keywords>
+      <dc:description>
+        <rdf:Alt>
+          <rdf:li xml:lang="x-default">A man and a woman are playing electric guitars together in a cheerful kitchen setting, smiling and enjoying themselves.</rdf:li>
+        </rdf:Alt>
+      </dc:description>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let r = parse_xmp_xml(xml).unwrap();
+        assert!(
+            r.keywords.is_empty(),
+            "empty keyword bags must yield zero keywords, got {:?}",
+            r.keywords
+        );
+        assert_eq!(
+            r.description.as_deref(),
+            Some("A man and a woman are playing electric guitars together in a cheerful kitchen setting, smiling and enjoying themselves.")
+        );
     }
 }
