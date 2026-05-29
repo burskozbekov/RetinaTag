@@ -14633,84 +14633,100 @@ fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 pub async fn compute_gps_clusters(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    // Load photos with GPS.
-    let photos: Vec<(i64, f64, f64, Option<String>)> = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, gps_lat, gps_lon, date_taken FROM photos
-             WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL AND private = 0"
-        ).map_err(|e| e.to_string())?;
-        let rows: Vec<(i64, f64, f64, Option<String>)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        rows
-    };
-
-    if photos.is_empty() {
-        return Ok(serde_json::json!({ "clusters": 0, "photos": 0 }));
-    }
-
-    // Single-pass clustering with running-mean centers.
-    struct Cluster {
-        lat: f64, lon: f64, n: i64,
-        date_start: Option<String>, date_end: Option<String>,
-        photo_ids: Vec<i64>,
-    }
-    let mut clusters: Vec<Cluster> = vec![];
-
-    for (pid, lat, lon, date) in &photos {
-        let mut best: Option<usize> = None;
-        let mut best_d = f64::MAX;
-        for (i, c) in clusters.iter().enumerate() {
-            let d = haversine_km(*lat, *lon, c.lat, c.lon);
-            if d < best_d { best_d = d; best = Some(i); }
-        }
-        if let (Some(idx), true) = (best, best_d <= CLUSTER_RADIUS_KM) {
-            let c = &mut clusters[idx];
-            let n1 = c.n + 1;
-            c.lat = (c.lat * c.n as f64 + *lat) / n1 as f64;
-            c.lon = (c.lon * c.n as f64 + *lon) / n1 as f64;
-            c.n = n1;
-            c.photo_ids.push(*pid);
-            if let Some(d) = date {
-                if c.date_start.as_deref().map(|s| d.as_str() < s).unwrap_or(true) {
-                    c.date_start = Some(d.clone());
-                }
-                if c.date_end.as_deref().map(|s| d.as_str() > s).unwrap_or(true) {
-                    c.date_end = Some(d.clone());
-                }
-            }
-        } else {
-            clusters.push(Cluster {
-                lat: *lat, lon: *lon, n: 1,
-                date_start: date.clone(), date_end: date.clone(),
-                photo_ids: vec![*pid],
-            });
-        }
-    }
-
-    // Keep only clusters with 3+ photos — singletons / pairs aren't useful.
-    clusters.retain(|c| c.n >= 3);
-
-    // Persist.
-    let count = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
-        db::clear_gps_clusters(&conn).map_err(|e| e.to_string())?;
-        for c in &clusters {
-            let cid = db::insert_gps_cluster(
-                &conn, c.lat, c.lon, CLUSTER_RADIUS_KM, c.n, None,
-                c.date_start.as_deref(), c.date_end.as_deref(),
+    // v1.5.373 — entire body off the tokio runtime.  This command was
+    // an `async fn` whose whole body ran inline:
+    //   1. SELECT every GPS-bearing photo.
+    //   2. O(photos × clusters) haversine clustering — on a library
+    //      with thousands of geotagged photos across many distinct
+    //      places this is seconds of pure CPU.
+    //   3. clear_gps_clusters + per-cluster insert + per-photo
+    //      link INSERTs.
+    // All of it pinned the IPC/runtime thread, freezing the Map view
+    // the moment the user hit "compute clusters".  Wrap in
+    // spawn_blocking like the rest of the v1.5.350-372 sweep.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        // Load photos with GPS.
+        let photos: Vec<(i64, f64, f64, Option<String>)> = {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            let mut stmt = conn.prepare(
+                "SELECT id, gps_lat, gps_lon, date_taken FROM photos
+                 WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL AND private = 0"
             ).map_err(|e| e.to_string())?;
-            for pid in &c.photo_ids {
-                let _ = db::link_photo_to_cluster(&conn, cid, *pid);
+            let rows: Vec<(i64, f64, f64, Option<String>)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+
+        if photos.is_empty() {
+            return Ok(serde_json::json!({ "clusters": 0, "photos": 0 }));
+        }
+
+        // Single-pass clustering with running-mean centers.
+        struct Cluster {
+            lat: f64, lon: f64, n: i64,
+            date_start: Option<String>, date_end: Option<String>,
+            photo_ids: Vec<i64>,
+        }
+        let mut clusters: Vec<Cluster> = vec![];
+
+        for (pid, lat, lon, date) in &photos {
+            let mut best: Option<usize> = None;
+            let mut best_d = f64::MAX;
+            for (i, c) in clusters.iter().enumerate() {
+                let d = haversine_km(*lat, *lon, c.lat, c.lon);
+                if d < best_d { best_d = d; best = Some(i); }
+            }
+            if let (Some(idx), true) = (best, best_d <= CLUSTER_RADIUS_KM) {
+                let c = &mut clusters[idx];
+                let n1 = c.n + 1;
+                c.lat = (c.lat * c.n as f64 + *lat) / n1 as f64;
+                c.lon = (c.lon * c.n as f64 + *lon) / n1 as f64;
+                c.n = n1;
+                c.photo_ids.push(*pid);
+                if let Some(d) = date {
+                    if c.date_start.as_deref().map(|s| d.as_str() < s).unwrap_or(true) {
+                        c.date_start = Some(d.clone());
+                    }
+                    if c.date_end.as_deref().map(|s| d.as_str() > s).unwrap_or(true) {
+                        c.date_end = Some(d.clone());
+                    }
+                }
+            } else {
+                clusters.push(Cluster {
+                    lat: *lat, lon: *lon, n: 1,
+                    date_start: date.clone(), date_end: date.clone(),
+                    photo_ids: vec![*pid],
+                });
             }
         }
-        clusters.len()
-    };
 
-    Ok(serde_json::json!({ "clusters": count, "photos": photos.len() }))
+        // Keep only clusters with 3+ photos — singletons / pairs aren't useful.
+        clusters.retain(|c| c.n >= 3);
+
+        // Persist.
+        let count = {
+            let conn = db.lock().map_err(|_| "db lock".to_string())?;
+            db::clear_gps_clusters(&conn).map_err(|e| e.to_string())?;
+            for c in &clusters {
+                let cid = db::insert_gps_cluster(
+                    &conn, c.lat, c.lon, CLUSTER_RADIUS_KM, c.n, None,
+                    c.date_start.as_deref(), c.date_end.as_deref(),
+                ).map_err(|e| e.to_string())?;
+                for pid in &c.photo_ids {
+                    let _ = db::link_photo_to_cluster(&conn, cid, *pid);
+                }
+            }
+            clusters.len()
+        };
+
+        Ok(serde_json::json!({ "clusters": count, "photos": photos.len() }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
