@@ -7731,12 +7731,24 @@ function _searchFocusOpen(){
   }
   // Move the search box INTO the backdrop (only if not already there —
   // guards against a double-open recording the backdrop as its own home).
+  let justMoved = false;
   if(sb.parentElement !== bk){
     _searchBoxHome = { parent: sb.parentElement, next: sb.nextElementSibling };
     bk.appendChild(sb);
+    justMoved = true;
   }
   bk.classList.add('active');
   sb.classList.add('focused');
+  // v1.5.374 — appendChild() above removes the input from the toolbar
+  // and re-inserts it into the backdrop.  That remove step blurs the
+  // input (activeElement falls back to <body>), so the user's FIRST
+  // click opened the overlay but left the cursor unfocused — they had
+  // to click a SECOND time to type.  Restore focus on the next frame.
+  // The re-focus re-fires this `focus` handler, but the guard above
+  // (sb already inside bk) makes that pass a no-op — no loop.
+  if(justMoved){
+    requestAnimationFrame(() => { try{ $('searchInput').focus({preventScroll:true}); }catch(_){} });
+  }
 }
 function _searchFocusClose(){
   const sb = document.querySelector('.search-box');
@@ -7789,7 +7801,16 @@ $('searchInput').addEventListener('blur',()=>{
 $('searchInput').addEventListener('keydown', e => {
   if(e.key === 'Enter'){
     e.preventDefault();
+    // v1.5.374 — Enter now runs the search AND collapses the overlay so
+    // the results grid is immediately visible.  Previously the overlay
+    // stayed open over the grid, so the user pressed Enter, the search
+    // ran, but the blurred backdrop hid the very photos they searched
+    // for.  _runFullSearch dispatches the (synchronous) input event that
+    // kicks off the async pipeline; _searchFocusClose then restores the
+    // toolbar box + removes the backdrop so renderGrid's results show
+    // through.  The pipeline keeps running in the background.
     _runFullSearch();
+    _searchFocusClose();
     return;
   }
   if(e.key === 'Escape'){
@@ -8153,10 +8174,24 @@ $('searchInput').oninput=e=>{
   // false and we fall through to the heavy pipeline below.  This mirrors
   // Mac v1.5.282 behaviour exactly.
   if (e.isTrusted === true) {
-    // User typing — wait for Enter.  We still do NOT clear curSearch
-    // here: previous results stay on screen until the user actually
-    // commits a new query.  (Pre-v1.5.362 behaviour cleared on empty
-    // input mid-typing, which felt jumpy.)
+    // v1.5.374 — Typing waits for Enter, with ONE exception: when the
+    // box becomes empty, snap straight back to the full library and
+    // collapse the overlay.  The user's words: "search'den silince ilk
+    // baştaki gibi olsun" — clearing the box should restore the original
+    // all-photos view without needing Enter, and the overlay must close
+    // so the grid is actually visible again (not hidden behind the
+    // blurred backdrop).
+    if (!q) {
+      curSearch = '';
+      _searchProgressHide();
+      if (typeof _hideRefineBar === 'function') _hideRefineBar();
+      $('searchHint').textContent = '';
+      loadPhotos();
+      // Collapse the overlay so the freshly-reset grid shows through.
+      if (typeof _searchFocusClose === 'function') _searchFocusClose();
+    }
+    // Non-empty partial query → wait for Enter (previous results stay
+    // on screen until the user commits).
     return;
   }
 
