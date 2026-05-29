@@ -1788,25 +1788,47 @@ pub fn search_photos_by_path(conn: &Connection, query: &str) -> Result<Vec<Photo
     }
 
     // Prefix match on every word so typing "vac" hits "vacation".
-    let fts_query = words
-        .iter()
-        .map(|w| format!("\"{}\"*", w.replace('"', "")))
-        .collect::<Vec<_>>()
-        .join(" OR ");
+    //
+    // v1.5.372 — AND-join, not OR.  The previous `.join(" OR ")` meant a
+    // multi-word query matched any path containing ANY one of the words.
+    // So "food france" (the content-words of "food i had in france")
+    // surfaced EVERY photo in a folder named "France 2024" purely on the
+    // "france" token — the "food" part was ignored.  That path channel
+    // was a major source of the junk results the user saw on
+    // natural-language queries.  AND requires every token in the path,
+    // which is the correct semantics for "typing a folder/file name"
+    // (e.g. "paris 2024" → the "Paris 2024" folder).  We fall back to OR
+    // only when AND yields nothing, mirroring search_photos_multi
+    // (v1.5.44) so a genuinely cross-folder path query still surfaces
+    // partial matches instead of going empty.
+    let esc = |w: &str| format!("\"{}\"*", w.replace('"', ""));
+    let and_query = words.iter().map(|w| esc(w)).collect::<Vec<_>>().join(" AND ");
+    let or_query  = words.iter().map(|w| esc(w)).collect::<Vec<_>>().join(" OR ");
 
-    let ids: Vec<i64> = conn
-        // v1.5.121 — Raised LIMIT 500 → 5000 (search_photos_by_path).
-        // Searching for a folder name like "2024" used to cap at 500
-        // photos even though the folder might contain 2000+.
-        .prepare("SELECT rowid FROM photos_fts WHERE photos_fts MATCH ?1 LIMIT 5000")
-        .and_then(|mut stmt| {
-            stmt.query_map(params![fts_query], |r| r.get(0))
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        })
-        .unwrap_or_else(|_| {
-            // Malformed FTS query — fall back to LIKE over filename + folder.
-            let pattern = format!("%{}%", query);
-            conn.prepare(
+    let run_fts = |q: &str| -> Vec<i64> {
+        conn.prepare("SELECT rowid FROM photos_fts WHERE photos_fts MATCH ?1 LIMIT 5000")
+            .and_then(|mut stmt| {
+                stmt.query_map(params![q], |r| r.get(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default()
+    };
+
+    // v1.5.121 — LIMIT 5000 (a folder like "2024" can hold 2000+ photos).
+    let mut ids: Vec<i64> = run_fts(&and_query);
+    if ids.is_empty() && words.len() > 1 {
+        // No path contains every token — widen to OR so a partial path
+        // match still works (but only after the strict pass found nothing).
+        ids = run_fts(&or_query);
+    }
+    if ids.is_empty() {
+        // Both FTS passes empty (or the query was malformed and the
+        // prepare failed) — fall back to a substring LIKE over the
+        // whole raw query so e.g. a path fragment with punctuation
+        // still has a chance.
+        let pattern = format!("%{}%", query);
+        ids = conn
+            .prepare(
                 "SELECT id FROM photos
                  WHERE filename LIKE ?1 COLLATE NOCASE
                     OR folder   LIKE ?1 COLLATE NOCASE
@@ -1816,8 +1838,8 @@ pub fn search_photos_by_path(conn: &Connection, query: &str) -> Result<Vec<Photo
                 stmt.query_map(params![pattern], |r| r.get(0))
                     .map(|rows| rows.filter_map(|r| r.ok()).collect())
             })
-            .unwrap_or_default()
-        });
+            .unwrap_or_default();
+    }
 
     if ids.is_empty() {
         return Ok(vec![]);
