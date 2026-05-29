@@ -14350,7 +14350,7 @@ pub fn vault_reset_full(
 }
 
 #[tauri::command]
-pub fn list_private_photos(
+pub async fn list_private_photos(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
     // v1.5.160 — CRITICAL BUG FIX.
@@ -14380,49 +14380,62 @@ pub fn list_private_photos(
     // amending PhotoSummary (10 construction sites; out of scope for a
     // bug-fix release). The FE only reads `id`, `filename`, `tags`, and
     // now `vault_folder_id` — all preserved.
-    let conn = state.db.lock().map_err(|_| "db lock")?;
-    let mut stmt = conn.prepare(
-        "SELECT p.id, p.path, p.filename, p.status, p.provider_used,
-                p.media_type, p.date_taken, p.duration_secs,
-                p.rating, p.favorite, p.vault_folder_id,
-                GROUP_CONCAT(t.tag, ',') AS tags,
-                COUNT(t.id) AS tag_count
-           FROM photos p
-           LEFT JOIN tags t ON t.photo_id = p.id
-          WHERE p.private = 1
-          GROUP BY p.id
-          ORDER BY COALESCE(p.date_taken, '0000-00-00') DESC, p.filename ASC
-          LIMIT 5000"
-    ).map_err(|e| e.to_string())?;
-    let rows: Vec<serde_json::Value> = stmt
-        .query_map([], |r| {
-            let tags_str: Option<String> = r.get(11)?;
-            let tags: Vec<String> = tags_str
-                .unwrap_or_default()
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect();
-            Ok(serde_json::json!({
-                "id":              r.get::<_, i64>(0)?,
-                "path":            r.get::<_, String>(1)?,
-                "filename":        r.get::<_, String>(2)?,
-                "status":          r.get::<_, String>(3)?,
-                "provider_used":   r.get::<_, Option<String>>(4)?,
-                "media_type":      r.get::<_, Option<String>>(5)?.unwrap_or_else(|| "image".to_string()),
-                "date_taken":      r.get::<_, Option<String>>(6)?,
-                "duration_secs":   r.get::<_, Option<i32>>(7)?,
-                "rating":          r.get::<_, Option<i32>>(8)?.unwrap_or(0),
-                "favorite":        r.get::<_, Option<i32>>(9)?.unwrap_or(0) != 0,
-                "vault_folder_id": r.get::<_, Option<i64>>(10)?,
-                "tags":            tags,
-                "tag_count":       r.get::<_, i64>(12)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(rows)
+    //
+    // v1.5.371 — off the tokio runtime.  This is the FIRST thing that
+    // runs when the user opens the vault, before any thumbnail loads.
+    // The GROUP BY + LEFT JOIN tags + GROUP_CONCAT over the photos
+    // table is moderately heavy (tens of ms, more on a big vault), and
+    // it ran synchronously on the IPC thread — a visible hitch on every
+    // vault open.  Wrapped in spawn_blocking like the rest of the
+    // v1.5.350-370 sweep.
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.path, p.filename, p.status, p.provider_used,
+                    p.media_type, p.date_taken, p.duration_secs,
+                    p.rating, p.favorite, p.vault_folder_id,
+                    GROUP_CONCAT(t.tag, ',') AS tags,
+                    COUNT(t.id) AS tag_count
+               FROM photos p
+               LEFT JOIN tags t ON t.photo_id = p.id
+              WHERE p.private = 1
+              GROUP BY p.id
+              ORDER BY COALESCE(p.date_taken, '0000-00-00') DESC, p.filename ASC
+              LIMIT 5000"
+        ).map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> = stmt
+            .query_map([], |r| {
+                let tags_str: Option<String> = r.get(11)?;
+                let tags: Vec<String> = tags_str
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                Ok(serde_json::json!({
+                    "id":              r.get::<_, i64>(0)?,
+                    "path":            r.get::<_, String>(1)?,
+                    "filename":        r.get::<_, String>(2)?,
+                    "status":          r.get::<_, String>(3)?,
+                    "provider_used":   r.get::<_, Option<String>>(4)?,
+                    "media_type":      r.get::<_, Option<String>>(5)?.unwrap_or_else(|| "image".to_string()),
+                    "date_taken":      r.get::<_, Option<String>>(6)?,
+                    "duration_secs":   r.get::<_, Option<i32>>(7)?,
+                    "rating":          r.get::<_, Option<i32>>(8)?.unwrap_or(0),
+                    "favorite":        r.get::<_, Option<i32>>(9)?.unwrap_or(0) != 0,
+                    "vault_folder_id": r.get::<_, Option<i64>>(10)?,
+                    "tags":            tags,
+                    "tag_count":       r.get::<_, i64>(12)?,
+                }))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// v1.5.160 — Folder-vault step 4/5. List every row in `vault_folders`
