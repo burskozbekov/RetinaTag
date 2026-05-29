@@ -367,6 +367,26 @@ pub async fn search_photos(
         || !parsed.phrases.is_empty()
         || !parsed.must_not.is_empty();
 
+    // v1.5.375 — Exact person-name shortcut.  If the plain query is
+    // EXACTLY a known person's name (e.g. "Serda"), return ONLY that
+    // person's photos and skip the fuzzy pipeline entirely.  Without
+    // this, searching a person bled into other people + unrelated shots:
+    //   • the person channel used to substring-match the name, so
+    //     "Serda" matched person "Serdar" (now fixed to exact in
+    //     db::search_photos_by_person), and
+    //   • the tag channel prefix-matches the name, so "Serda" matched
+    //     the keyword tag "Serdar" and surfaced every Serdar photo plus
+    //     whatever else those photos were tagged with (couple, sailboat…).
+    // Treating an exact person-name query as a person filter is what the
+    // user expects ("show me Serda").  Skipped when advanced operators
+    // are present — those are explicit and handled below.
+    if !has_advanced_syntax {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        if db::person_name_exists(&conn, &trimmed).unwrap_or(false) {
+            return db::search_photos_by_person(&conn, &trimmed).map_err(|e| e.to_string());
+        }
+    }
+
     // Helpers used by the advanced path.
     // v1.5.50 — apply_post also drops photos that contain any must_not
     // term (so `beach -night` excludes everything tagged with "night"

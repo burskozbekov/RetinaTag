@@ -1707,9 +1707,35 @@ pub fn search_photos_multi(conn: &Connection, terms: &[String]) -> Result<Vec<Ph
     search_photos_fts(conn, &or_query)
 }
 
-/// Search photos by person name (case-insensitive LIKE match via face_regions → persons).
+/// True iff a person with EXACTLY this name (case-insensitive) exists.
+/// v1.5.375 — used by search_photos to decide whether a free-text query
+/// is really a person-name lookup, so it can return that person's photos
+/// instead of fuzzy-matching the name as a tag prefix.
+pub fn person_name_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Ok(false);
+    }
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM persons WHERE name = ?1 COLLATE NOCASE LIMIT 1",
+            params![n],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// Search photos by person name (case-insensitive EXACT match via
+/// face_regions → persons, OR an exact person-name keyword tag).
+///
+/// v1.5.375 — name match changed from `LIKE '%query%'` to exact equality.
+/// The substring match meant searching / filtering person "Serda" also
+/// returned every photo of person "Serdar" (and any other name CONTAINING
+/// "serda"), because "Serda" is a substring of "Serdar".  Distinct people
+/// must never bleed into each other.  The tag-keyword arm was already an
+/// exact compare; the person-name arm now matches it.
 pub fn search_photos_by_person(conn: &Connection, query: &str) -> Result<Vec<PhotoSummary>> {
-    let pattern = format!("%{}%", query);
     // v1.5.63 — Faz 1: vault filter. Private photos must not surface in
     // person search either, otherwise searching the user's own name would
     // include vaulted photos.
@@ -1737,14 +1763,14 @@ pub fn search_photos_by_person(conn: &Connection, query: &str) -> Result<Vec<Pho
          LEFT JOIN face_regions fr ON fr.photo_id = p.id
          LEFT JOIN persons pe ON pe.id = fr.person_id
          LEFT JOIN tags t_person ON t_person.photo_id = p.id AND t_person.tag = ?2 COLLATE NOCASE
-         WHERE (pe.name LIKE ?1 COLLATE NOCASE OR t_person.id IS NOT NULL)
+         WHERE (pe.name = ?1 COLLATE NOCASE OR t_person.id IS NOT NULL)
            AND p.private = 0
          ORDER BY p.tagged_at DESC
          LIMIT 5000",
     )?;
 
     let photos = stmt
-        .query_map(params![pattern, query], |row| {
+        .query_map(params![query, query], |row| {
             let tag_list: String = row.get(6)?;
             let tags: Vec<String> = if tag_list.is_empty() {
                 vec![]

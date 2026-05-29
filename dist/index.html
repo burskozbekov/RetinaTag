@@ -3059,6 +3059,27 @@ function activeFaceScope() {
   // "no scope, scan the whole library" — that path triggers only when
   // the user is literally in unfiltered All Photos.
   //
+  // v1.5.375 — HARD "scan only what I'm looking at" guarantee for the
+  // gallery.  Bug: a folder showing 18 photos kicked off a 90-photo
+  // scan.  Cause: the `folder` branch below scopes by the DB `folder`
+  // column, which scans the WHOLE folder and IGNORES the extra
+  // client-side filters (month chip, rating, media-type) that the
+  // gallery applies on top — so the visible 18 and the scanned 90
+  // diverged.  The on-screen `photos` array already reflects EVERY
+  // active filter, so in gallery view it is the most precise possible
+  // scope.  Prefer it whenever the visible set is a manageable size.
+  // (Timeline/Calendar paginate into their own arrays — the global
+  // `photos` is a stale gallery snapshot there — so this shortcut is
+  // gated to gallery view; those views keep their yearMonth branches
+  // below.  Map keeps its bounds branch.)
+  const _inGallery = (typeof curView !== 'string') || curView === 'gallery' || curView === '';
+  if (_inGallery) {
+    const visibleIds = activePhotoIds();
+    if (visibleIds.length > 0 && visibleIds.length <= 5000) {
+      return { photoIds: visibleIds, folder: null, yearMonth: null };
+    }
+  }
+
   // 1. Folder selected in the sidebar
   const folder = activeFolderScope();
   if (folder) return { folder, yearMonth: null, photoIds: null };
@@ -4261,9 +4282,18 @@ async function loadPhotos(){
 // ── Virtual grid ──────────────────────────────────────────────────────────────
 function getCols(){return Math.max(1,Math.floor(gridWrap.clientWidth/CELL_W))}
 function renderGrid(preserveScroll=false){
-  // Remove all existing cards so stale virtual-scroll cards don't linger
+  // Remove all existing cards so stale virtual-scroll cards don't linger.
+  // v1.5.375 — ALSO remove any lingering .empty-state node.  Bug: when a
+  // search returned 0 results we set gridScroll.innerHTML to the
+  // empty-state ("Try simpler words… Clear search").  If photos then
+  // arrived (async CLIP/AI second pass, or the user cleared back to the
+  // full library) this function only stripped `.photo-card` nodes, NOT
+  // the empty-state div — so its text stayed painted in the background
+  // while the absolutely-positioned photo cards rendered on top of it.
+  // ("arkada şöyle yazı kalıyor.")  Stripping both on every render keeps
+  // the two states mutually exclusive.
   const savedScroll=preserveScroll?gridWrap.scrollTop:0;
-  gridScroll.querySelectorAll('.photo-card').forEach(c=>c.remove());
+  gridScroll.querySelectorAll('.photo-card,.empty-state').forEach(c=>c.remove());
   lastCols=0;
   // Reset scroll (skip reset when called from ResizeObserver or panel open/close)
   gridWrap.scrollTop=savedScroll;
@@ -19292,6 +19322,11 @@ let _lbFaceBoxesOn = (function(){
 })();
 let _lbFacesForCurrent = [];
 let _lbFaceActive = null;
+// v1.5.375 — original decoded-image dimensions the face coords live in
+// (face.rs stores x1..y2 in img.dimensions() space).  Populated by
+// _lbFacesLoad; used by _lbFacesRender to set the SVG viewBox so boxes
+// align even when the lightbox shows a downsized HEIC/RAW preview.
+let _lbFaceImgW = 0, _lbFaceImgH = 0;
 
 // v1.5.33 — Reflect _lbFaceBoxesOn on the F toggle button so it doesn't look
 // "off" when persistence actually restored the on state. Runs once the DOM
@@ -19313,6 +19348,23 @@ async function _lbFacesLoad(photoId){
     const faces = await invoke('get_faces_for_photo', { photoId });
     _lbFacesForCurrent = Array.isArray(faces) ? faces : [];
   }catch(_){ _lbFacesForCurrent = []; }
+  // v1.5.375 — Face coords are in the ORIGINAL decoded-image pixel space
+  // (face.rs uses img.dimensions()).  But HEIC/RAW lightbox previews are
+  // shown DOWNSIZED — get_photo_full caps the long edge at 2560 px — so
+  // <img>.naturalWidth is smaller than the coordinate space.  Using the
+  // displayed natural size for the SVG viewBox made every box scale up
+  // and drift toward the bottom-right (the misaligned boxes the user
+  // reported).  Fetch the photo's true stored dimensions so the renderer
+  // can set the viewBox to the space the boxes actually live in; the
+  // displayed image keeps the same aspect ratio (resize preserves it),
+  // so preserveAspectRatio="xMidYMid meet" then lines them up exactly.
+  _lbFaceImgW = 0; _lbFaceImgH = 0;
+  if(_lbFacesForCurrent.length > 0){
+    try{
+      const d = await invoke('get_photo_detail', { photoId });
+      if(d && d.width > 0 && d.height > 0){ _lbFaceImgW = d.width; _lbFaceImgH = d.height; }
+    }catch(_){}
+  }
 }
 
 function _lbEscXml(s){
@@ -19412,7 +19464,21 @@ function _lbFacesRender(){
     svg.style.display = 'none';
     return;
   }
-  svg.setAttribute('viewBox', `0 0 ${nw} ${nh}`);
+  // v1.5.375 — Choose the coordinate space for the boxes.  Prefer the
+  // photo's stored ORIGINAL dimensions (the space the face coords were
+  // detected in); fall back to the displayed natural size.  Only trust
+  // the stored dims when their aspect ratio matches the displayed image
+  // (within 2%) — otherwise an EXIF-orientation W/H swap could make the
+  // overlay worse, so we keep the safe fallback.
+  let vbW = nw, vbH = nh;
+  if(_lbFaceImgW > 0 && _lbFaceImgH > 0){
+    const arStored = _lbFaceImgW / _lbFaceImgH;
+    const arShown  = nw / nh;
+    if(arShown > 0 && Math.abs(arStored - arShown) / arShown < 0.02){
+      vbW = _lbFaceImgW; vbH = _lbFaceImgH;
+    }
+  }
+  svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
   svg.style.display = 'block';
 
   // v1.5.231 — Strokes and label sizes must look the same regardless of
@@ -19438,7 +19504,7 @@ function _lbFacesRender(){
     actualDw = elH * imgAR;
     actualDh = elH;
   }
-  const scaleNat = nw / actualDw;
+  const scaleNat = vbW / actualDw;     // v1.5.375 — scale off the viewBox space, not displayed nat
   const sw = 3 * scaleNat;             // 3 CSS px stroke at 1× zoom
   const labelFont = 13 * scaleNat;     // 13 CSS px label text
   const labelPad = 5 * scaleNat;
@@ -19454,10 +19520,12 @@ function _lbFacesRender(){
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
   const parts = _lbFacesForCurrent.map(f => {
-    const x1 = clamp(f.x1, 0, nw);
-    const y1 = clamp(f.y1, 0, nh);
-    const x2 = clamp(f.x2, 0, nw);
-    const y2 = clamp(f.y2, 0, nh);
+    // v1.5.375 — clamp to the viewBox space (vbW/vbH), which is the
+    // coordinate space the face boxes live in.
+    const x1 = clamp(f.x1, 0, vbW);
+    const y1 = clamp(f.y1, 0, vbH);
+    const x2 = clamp(f.x2, 0, vbW);
+    const y2 = clamp(f.y2, 0, vbH);
     const w = Math.max(1, x2 - x1);
     const h = Math.max(1, y2 - y1);
     const named = f.person_id && f.person_id > 0;
@@ -19488,7 +19556,7 @@ function _lbFacesRender(){
         ? (y1 - approxH + sw * 0.5)
         : (y1 + sw * 0.5);
       // Clamp label x so it never crosses the image edges.
-      const lx = clamp(x1, 0, Math.max(0, nw - approxW - sw));
+      const lx = clamp(x1, 0, Math.max(0, vbW - approxW - sw));
       labelMarkup = `
         <rect x="${lx}" y="${ly}" width="${approxW}" height="${approxH}" rx="${labelPad*0.7}" ry="${labelPad*0.7}" fill="${labelBg}" stroke="${stroke}" stroke-width="${labelStroke}"/>
         <text x="${lx + labelPad}" y="${ly + approxH - labelPad*0.85}" fill="rgba(255,255,255,.97)" font-size="${labelFont}" font-family="system-ui, -apple-system, sans-serif" font-weight="600">${_lbEscXml(label)}</text>`;
