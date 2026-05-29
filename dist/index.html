@@ -235,17 +235,18 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
 .search-box.focused{position:fixed;top:10vh;left:50%;transform:translateX(-50%);
   width:90vw;max-width:720px;min-width:unset;z-index:1500;flex:none;
   transition:all .22s cubic-bezier(.2,.7,.1,1)}
-/* v1.5.363 — Focused input was barely visible against the blurred
-   backdrop because the default focus background (var(--card2) =
-   #2A1A1A) is darker than the 55%-black backdrop tint.  Bump to
-   a lighter solid color + brighter border + stronger placeholder/
-   caret contrast so the box clearly pops above the blur. */
+/* v1.5.363 / v1.5.369 — Focused input styling.  The real reason it was
+   invisible before v1.5.369 was a paint-order bug (backdrop on top —
+   now fixed by re-parenting the box INTO the backdrop in JS).  With
+   that fixed, this elevated styling actually shows: a clearly lighter
+   panel, bright 2 px red border, strong shadow halo.  20 px font for
+   legibility (the original "search neden okuyamıyorum" complaint). */
 .search-box.focused #searchInput{font-size:20px !important;
   padding:20px 28px 20px 54px !important;
   border-radius:26px !important;border:2px solid var(--red) !important;
-  background:#3A2424 !important;color:#FFF1E6 !important;
+  background:#4A2C2C !important;color:#FFF1E6 !important;
   caret-color:#FFB07A !important;
-  box-shadow:0 18px 60px rgba(0,0,0,.7),0 0 0 6px rgba(184,58,18,.22) !important}
+  box-shadow:0 18px 60px rgba(0,0,0,.7),0 0 0 6px rgba(184,58,18,.25) !important}
 .search-box.focused #searchInput::placeholder{color:rgba(255,210,180,.55) !important}
 .search-box.focused svg{left:20px;width:22px;height:22px;stroke-width:2.4;stroke:#FFB07A}
 .search-box.focused #searchHelpBtn,
@@ -7695,8 +7696,27 @@ $('searchPersonClear').onclick=(e)=>{e.stopPropagation();clearPersonFilter();};
 // v1.5.362 — Spotlight-style focused search overlay (Mac v1.5.282 parity).
 // Open/close helpers + Enter-only pipeline trigger.  See CSS block
 // `.search-box.focused` + `.search-backdrop` for the visual side.
+//
+// v1.5.369 — RE-PARENT FIX.  v1.5.362-363 left the .search-box where it
+// was in the toolbar and just toggled CSS classes.  The backdrop
+// (appended to <body>, z-index 1499) ended up painting OVER the search
+// box even though the box had z-index 1500 — a stacking-context trap:
+// the box's z-index only competes WITHIN its toolbar/#main ancestry, not
+// against a body-level sibling.  Result: the input rendered BEHIND the
+// 55%-black blur, so it looked dim and unusable no matter how bright we
+// styled it (v1.5.363's contrast bump was invisible for this reason).
+//
+// The bulletproof fix is to physically MOVE the .search-box into the
+// backdrop element while focused.  A child always paints on top of its
+// parent's own background (and backdrop-filter only blurs what's BEHIND
+// the backdrop, never the backdrop's own children).  No z-index war is
+// possible.  We remember the box's original slot and restore it exactly
+// on close.  Event listeners are bound to the elements, so they survive
+// the move untouched.
+let _searchBoxHome = null;  // { parent, next } to restore on close
 function _searchFocusOpen(){
   const sb = document.querySelector('.search-box');
+  if(!sb) return;
   let bk = document.getElementById('searchBackdrop');
   if(!bk){
     bk = document.createElement('div');
@@ -7709,14 +7729,30 @@ function _searchFocusOpen(){
     });
     document.body.appendChild(bk);
   }
+  // Move the search box INTO the backdrop (only if not already there —
+  // guards against a double-open recording the backdrop as its own home).
+  if(sb.parentElement !== bk){
+    _searchBoxHome = { parent: sb.parentElement, next: sb.nextElementSibling };
+    bk.appendChild(sb);
+  }
   bk.classList.add('active');
-  if(sb) sb.classList.add('focused');
+  sb.classList.add('focused');
 }
 function _searchFocusClose(){
   const sb = document.querySelector('.search-box');
   const bk = document.getElementById('searchBackdrop');
   if(bk) bk.classList.remove('active');
   if(sb) sb.classList.remove('focused');
+  // Restore the search box to its original toolbar slot.
+  if(sb && _searchBoxHome && _searchBoxHome.parent){
+    try{
+      _searchBoxHome.parent.insertBefore(sb, _searchBoxHome.next || null);
+    }catch(_){
+      // If the original next-sibling is gone, just append to the parent.
+      try{ _searchBoxHome.parent.appendChild(sb); }catch(_){}
+    }
+    _searchBoxHome = null;
+  }
   // Hide the recent-searches dropdown too (it shouldn't appear in
   // focused mode but might be lingering from a prior session).
   const r = document.getElementById('recentSearches');
