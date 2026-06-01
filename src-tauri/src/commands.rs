@@ -150,6 +150,18 @@ pub async fn scan_folder(
                     // Keep the "Last check" column in the Watch Folders UI
                     // honest. No-op if this scan wasn't a watch folder.
                     let _ = db::update_watch_folder_checked_by_path(&conn, &folder_for_log);
+                    // v1.5.376 — Auto-register the scanned folder as a watch
+                    // folder so NEW files dropped into it LATER are detected
+                    // automatically.  Bug the user hit: "I added photos to a
+                    // folder but they never showed up."  The file-watcher only
+                    // watches folders registered in `watch_folders`, but
+                    // "Add Folder" / scan never registered them — so a scanned
+                    // library folder was a one-shot import with no live watch.
+                    // INSERT OR IGNORE keeps it idempotent; auto_tag=false per
+                    // v1.5.280 (scanning must never trigger auto-tagging).
+                    // RecursiveMode::Recursive on the watcher means registering
+                    // a parent also covers any subfolders.
+                    let _ = db::add_watch_folder(&conn, &folder_for_log, false);
                 }
             }
             Err(e) => {
@@ -172,6 +184,11 @@ pub async fn scan_folder(
         match result {
             Ok(stats) => {
                 app_handle.emit("scan-complete", stats).ok();
+                // v1.5.376 — the scan just (idempotently) registered this
+                // folder as a watch folder.  Tell the FE to re-arm the
+                // live watcher so newly-dropped files in it are picked up
+                // THIS session, not only after the next launch.
+                app_handle.emit("watch-folders-changed", ()).ok();
             }
             Err(e) => {
                 app_handle.emit("scan-error", e.to_string()).ok();
@@ -3230,7 +3247,7 @@ pub async fn start_watching(
     let (folders, auto_tag_set) = {
         let conn = state.db.lock().map_err(|_| "db lock")?;
         let all = db::get_watch_folders(&conn).map_err(|e| e.to_string())?;
-        let folders: Vec<String> = all.iter()
+        let mut folders: Vec<String> = all.iter()
             .filter(|w| w.enabled)
             .map(|w| w.path.clone())
             .collect();
@@ -3238,7 +3255,46 @@ pub async fn start_watching(
             .filter(|w| w.enabled && w.auto_tag)
             .map(|w| w.path.clone())
             .collect();
+
+        // v1.5.376 — Also watch the user's EXISTING library tree.  Libraries
+        // scanned before scan-time auto-registration (v1.5.376) have NO
+        // watch_folders rows, so the live watcher saw nothing and files
+        // dropped into a known folder never appeared ("yeni koyduğum
+        // fotoğrafları neden göremiyorum?").  Fold in every distinct photo
+        // folder so those libraries are watched too.
+        if let Ok(photo_folders) = db::distinct_photo_folders(&conn) {
+            folders.extend(photo_folders);
+        }
         (folders, auto_tag_set)
+    };
+
+    // Minimise to a covering ANCESTOR set: the watcher is recursive, so if
+    // we already watch "D:\Photos" there's no point also watching
+    // "D:\Photos\2007" — and overlapping recursive watches just duplicate
+    // events.  Drop any folder that has another folder in the set as a
+    // path-prefix ancestor.  Case-insensitive + separator-normalised so
+    // Windows drift doesn't defeat the prefix test.
+    let folders: Vec<String> = {
+        let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+        let mut uniq: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for f in folders {
+            let n = norm(&f);
+            if n.is_empty() || !seen.insert(n) { continue; }
+            uniq.push(f);
+        }
+        // Sort by normalised length asc so ancestors are considered first.
+        uniq.sort_by_key(|f| norm(f).len());
+        let mut kept: Vec<String> = Vec::new();
+        for f in uniq {
+            let nf = norm(&f);
+            let covered = kept.iter().any(|k| {
+                let nk = norm(k);
+                nf == nk || nf.starts_with(&(nk.clone() + "\\"))
+            });
+            if !covered { kept.push(f); }
+        }
+        kept
     };
 
     if folders.is_empty() {

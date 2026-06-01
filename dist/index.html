@@ -6109,6 +6109,11 @@ listen('scan-file-error',({payload:p})=>{
 // the toast stays instant but the heavy refresh runs once after the
 // burst settles.
 listen('watch-new-files',({payload:p})=>{toast(`Watch: ${p.count} new files detected`,'info');loadPhotosBg(3000);refreshStatsBg(3000)});
+// v1.5.376 — A scan just registered (or refreshed) a watch folder. Re-arm
+// the live file-watcher so files dropped into a freshly-scanned folder are
+// auto-detected THIS session, not only after the next launch. start_watching
+// rebuilds the watcher from the current watch_folders set; cheap + idempotent.
+listen('watch-folders-changed',()=>{ invoke('start_watching').catch(()=>{}); });
 // ── Device import flow ────────────────────────────────────────────────
 // The backend only *detects* the drive and emits `device-detected` with
 // {drive, media_root, has_media, file_count}. We show a modal so the user

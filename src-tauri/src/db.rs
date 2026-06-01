@@ -2340,6 +2340,24 @@ pub fn update_watch_folder_checked(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// v1.5.376 — Distinct immediate-parent folders of every non-vault photo.
+/// Used by start_watching to also watch the user's EXISTING library tree
+/// (libraries scanned before auto-registration existed have no
+/// watch_folders rows), so files dropped into any already-known folder
+/// are detected without a manual re-scan.  Caller minimises this to a
+/// covering ancestor set before handing it to the recursive watcher.
+pub fn distinct_photo_folders(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT folder FROM photos
+         WHERE folder IS NOT NULL AND folder <> '' AND private = 0",
+    )?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 /// Touch `last_checked` on every watch_folder whose path is either equal to
 /// `folder` or an ancestor of it. Covers:
 ///   • Manual rescan (↻ button in watch-folders UI → scan_folder with exact
