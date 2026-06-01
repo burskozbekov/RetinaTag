@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.384"
+version = "1.5.385"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -136,6 +136,11 @@ windows = { version = "0.58", features = [
     # Win32_Foundation but the IO feature is the documented home).
     "Win32_System_Ioctl",
     "Win32_System_IO",
+    # v1.5.385 — SetThreadPriority(THREAD_MODE_BACKGROUND_BEGIN) so the
+    # on-launch library rescan's heavy volume/MFT read runs at background I/O
+    # priority and never starves a foreground HEIC decode (which is a disk
+    # read too). Fixes "HEIC opens slow again after a big import".
+    "Win32_System_Threading",
     # v1.5.347 — native HEIC decode via WIC (Windows Imaging
     # Component), replacing the powershell.exe + WPF BitmapDecoder
     # spawn that dominated first-open latency on HEIC.

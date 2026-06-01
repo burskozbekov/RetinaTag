@@ -460,6 +460,39 @@ struct PendingInsert {
     thumb_path: Option<String>,
 }
 
+/// v1.5.385 — RAII guard that drops the current OS thread to BACKGROUND I/O
+/// priority for its lifetime, restoring normal priority on Drop (covers early
+/// returns and panics). Wraps the rescan's heavy volume/MFT enumeration so its
+/// disk reads yield to foreground work: a HEIC lightbox open is a disk read
+/// too, and after the big import the on-launch full-library MFT sweep ran ~70s
+/// (vs ~1.5s idle) under gallery-load contention and starved HEIC decodes
+/// ("HEIC opens slow again"). Background I/O priority lets the sweep take as
+/// long as it needs without ever blocking a foreground read. No-op off Windows.
+struct BgIoGuard;
+impl BgIoGuard {
+    fn begin() -> Self {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+            };
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+        }
+        BgIoGuard
+    }
+}
+impl Drop for BgIoGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
+            };
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+        }
+    }
+}
+
 pub async fn scan_folder_impl(
     folder: String,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
@@ -485,6 +518,10 @@ pub async fn scan_folder_impl(
     // Falls back to WalkDir silently for non-NTFS, network drives,
     // or any open / IOCTL error.
     let all_paths: Vec<std::path::PathBuf> = tokio::task::spawn_blocking(move || {
+        // v1.5.385 — run the (potentially 70s under disk contention) volume
+        // enumeration at background I/O priority so it never starves a
+        // foreground HEIC decode. Restored on scope exit (incl. early return).
+        let _bg_io = BgIoGuard::begin();
         // Shared media-and-not-thumbnail filter for both paths.
         let is_wanted = |p: &std::path::Path| -> bool {
             // Reject anything walking through a `thumbnails` segment.

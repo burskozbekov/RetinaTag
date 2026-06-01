@@ -14605,7 +14605,13 @@ $('btnWelcomeSkip').onclick=()=>{$('welcomeModal').classList.remove('open');invo
   // already knows).  Delayed a touch so the first paint isn't competing
   // with the scan's initial enumeration.  scan-complete events refresh
   // the grid as each folder finishes.
-  setTimeout(()=>{ invoke('rescan_library').catch(()=>{}); }, 4000);
+  // v1.5.385 — was 4000. Fire the offline-rescan ~30s after launch, not 4s,
+  // so the initial gallery thumbnail-load burst finishes first. At 4s it
+  // collided with the gallery load on a now-73k-photo library, and the
+  // whole-volume MFT read ballooned to ~70s of disk contention that slowed
+  // HEIC opens. The rescan itself now also runs at background I/O priority
+  // (scanner.rs BgIoGuard), so even when it runs it won't starve foreground.
+  setTimeout(()=>{ invoke('rescan_library').catch(()=>{}); }, 30000);
   // Load persisted tag confidence filter so the threshold applies to the
   // first photo the user opens, not just after they visit Settings.
   _loadMinTagConf();
