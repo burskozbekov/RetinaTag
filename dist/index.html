@@ -2214,6 +2214,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <div class="ctx-item" data-action="openfile">🖼 Open Image</div>
   <div class="ctx-item" data-action="gallery">🔍 Show in Gallery</div>
   <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="copyphoto">🖼 Copy Photo</div>
   <div class="ctx-item" data-action="copypath">📋 Copy Path</div>
   <div class="ctx-item" data-action="copyname">📋 Copy Filename</div>
   <!-- v1.4.74 — surface the existing Ctrl+Alt+C/V tag-clipboard via the
@@ -5542,6 +5543,18 @@ document.querySelectorAll('.ctx-item').forEach(item=>{
       const fn=(ctxPhotoPath||'').split(/[\\/]/).pop()||ctxPhotoPath;
       try{await navigator.clipboard.writeText(fn);toast('Filename copied','success');}
       catch(err){toast('Copy failed: '+err,'error');}
+    }
+    // v1.5.381 — Copy Photo: copy the actual IMAGE to the clipboard (not the
+    // path) so it pastes straight into another app — message, document, Paint.
+    // Backend decodes any format incl. HEIC and sets CF_DIB. A large HEIC takes
+    // a moment, so we show a "Copying…" toast first.
+    if(a==='copyphoto'){
+      if(!ctxPhotoPath){ toast('No photo path','error'); }
+      else{
+        toast('Copying photo…','info');
+        try{ await invoke('copy_image_to_clipboard',{path:ctxPhotoPath}); toast('Photo copied — paste anywhere','success'); }
+        catch(err){ toast('Copy failed: '+err,'error'); }
+      }
     }
     // v1.4.74 — Copy Tags: snapshot the right-clicked photo's tags into the
     // same _tagClipboard the Ctrl+Alt+C binding uses, so pasting from either

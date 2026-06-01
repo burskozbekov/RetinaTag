@@ -1231,6 +1231,7 @@ pub fn run() {
             commands::start_watching,
             commands::stop_watching,
             commands::rescan_library,
+            commands::copy_image_to_clipboard,
             // 5. Tag management
             commands::merge_tags,
             commands::rename_tag_global,

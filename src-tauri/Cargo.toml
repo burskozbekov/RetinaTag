@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.380"
+version = "1.5.381"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -57,6 +57,11 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 dirs = "5"
 tauri-plugin-drag = "2.1"
 tauri-plugin-notification = "2"
+# v1.5.381 — Copy a photo's image to the system clipboard ("Copy Photo" in
+# the right-click menu) so it pastes straight into other apps. arboard sets
+# CF_DIB on Windows (and the platform-native image format elsewhere), which
+# every clipboard-aware app accepts as a pasteable picture.
+arboard = "3"
 
 # v1.5.264 — Foundation for iPhone Companion (LAN sync). Mac landed
 # this earlier (v1.5.242) and the spec lives in pc-status.txt /

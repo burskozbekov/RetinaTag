@@ -3478,6 +3478,37 @@ pub async fn rescan_library(
     Ok(n)
 }
 
+/// v1.5.381 — Copy a photo's image to the system clipboard so the user can
+/// paste it straight into another app (a message, a document, Paint…).
+/// Decodes via thumbnail::open_image, which handles every format the library
+/// holds (JPEG/PNG/HEIC/RAW) and applies EXIF orientation, then hands the
+/// RGBA bitmap to arboard — on Windows that sets CF_DIB, which every
+/// clipboard-aware app accepts as a pasteable picture.  The decode + clipboard
+/// write run in spawn_blocking so a large HEIC never blocks the UI thread
+/// (no freeze regression).
+#[tauri::command]
+pub async fn copy_image_to_clipboard(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let img = crate::thumbnail::open_image(&path)
+            .map_err(|e| format!("decode failed: {}", e))?;
+        let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        let bytes = rgba.into_raw();
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|e| format!("clipboard open failed: {}", e))?;
+        clipboard
+            .set_image(arboard::ImageData {
+                width: w,
+                height: h,
+                bytes: std::borrow::Cow::Owned(bytes),
+            })
+            .map_err(|e| format!("clipboard set failed: {}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("join error: {}", e))?
+}
+
 // ── 4b. Device Auto-Import ──────────────────────────────────────────────────
 
 #[tauri::command]
