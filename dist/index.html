@@ -5645,7 +5645,11 @@ function showInGallery(id){
   try{ $('lightbox').style.display='none'; }catch(_){}
   switchToView('gallery');
   const jump = () => {
-    const card = document.querySelector(`#gridScroll [data-id="${id}"]`);
+    // v1.5.384 — was `#gridScroll` (no such element id); the grid's scroll
+    // content container is #gridScroller. The wrong selector silently matched
+    // nothing, so "Show in Gallery" switched view but never scrolled to /
+    // selected the photo.
+    const card = document.querySelector(`#gridScroller [data-id="${id}"]`);
     if(card){
       card.scrollIntoView({block:'center', behavior:'smooth'});
       const p = (photos||[]).find(x=>x.id===id);
