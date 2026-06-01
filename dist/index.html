@@ -6042,12 +6042,35 @@ function refreshStatsBg(ms = 2500) {
   }, ms);
 }
 
+// v1.5.382 — Render live progress ON the action's own button (Tag with AI /
+// Face scan), so the user sees what's running and how far along right where
+// they clicked — not only in the sidebar bar. The percent is a GRADIENT
+// BACKGROUND (bright up to pct, dim after); the text is normal button content
+// so it always paints ON TOP of the fill — the two can never overlap. The
+// button is shown in the slot the action button vacated, so widening it to fit
+// "■ 45% · 123/270" doesn't crowd its neighbours.
+function setBtnProgress(btn, pct, label){
+  if(!btn) return;
+  pct = Math.max(0, Math.min(100, Math.round(pct||0)));
+  btn.style.backgroundImage =
+    `linear-gradient(90deg, rgba(255,255,255,.34) ${pct}%, rgba(0,0,0,.24) ${pct}%)`;
+  btn.style.backgroundRepeat = 'no-repeat';
+  btn.style.whiteSpace = 'nowrap';
+  if(label != null) btn.textContent = label;
+}
+function clearBtnProgress(btn){
+  if(!btn) return;
+  btn.style.backgroundImage = '';
+}
+
 listen('tag-progress',({payload:p})=>{
   $('progressArea').classList.add('active');
   const pct=p.total?Math.round(p.completed/p.total*100):0;
   $('progressLabel').textContent='Tagging…';$('progressPct').textContent=pct+'%';
   $('progressFill').style.width=pct+'%';
   $('progressSub').textContent=`${p.completed}/${p.total} · ${p.current_provider} · ${p.current_file}`;
+  // v1.5.382 — mirror progress onto the visible Stop button (Tag with AI's slot)
+  setBtnProgress($('btnStopTag'), pct, `■ ${pct}% · ${p.completed}/${p.total}`);
   invoke('set_tray_progress',{label:`RetinaTag — Tagging ${pct}% (${p.completed}/${p.total})`}).catch(()=>{});
   // v1.5.199 — threshold 5 → 30 + 2.5s debounce. 10× fewer refreshes
   // during a long tagging run; the user still sees fresh tags within
@@ -6061,7 +6084,7 @@ listen('tag-progress',({payload:p})=>{
 listen('tag-complete',async({payload:p})=>{
   $('progressArea').classList.remove('active');
   $('btnTagAll').style.display='inline-flex';
-  $('btnStopTag').style.display='none';$('btnStopTag').disabled=false;$('btnStopTag').textContent='■ Stop';
+  $('btnStopTag').style.display='none';$('btnStopTag').disabled=false;$('btnStopTag').textContent='■ Stop';clearBtnProgress($('btnStopTag'));
   _lastProviderErrors=[];
   _lastGridRefresh=0;
   const parts=p.provider_breakdown.map(b=>`${b.provider}: ${b.count}`).join(' · ');
@@ -6113,7 +6136,7 @@ listen('tag-complete',async({payload:p})=>{
 listen('tag-error',({payload:m})=>{
   $('progressArea').classList.remove('active');
   $('btnTagAll').style.display='inline-flex';
-  $('btnStopTag').style.display='none';$('btnStopTag').disabled=false;$('btnStopTag').textContent='■ Stop';
+  $('btnStopTag').style.display='none';$('btnStopTag').disabled=false;$('btnStopTag').textContent='■ Stop';clearBtnProgress($('btnStopTag'));
   const tr=translateError(m);
   toast(tr,'error');
   _notify('Tagging error',String(tr).slice(0,160),'error');
@@ -7131,7 +7154,7 @@ $('btnStopTag').onclick=async()=>{
   try{
     await invoke('stop_tagging');
     toast('Stopping tagging…','info');
-    $('btnStopTag').disabled=true;$('btnStopTag').textContent='■ Stopping…';
+    $('btnStopTag').disabled=true;clearBtnProgress($('btnStopTag'));$('btnStopTag').textContent='■ Stopping…';
   }catch(e){toast('Error: '+e,'error');}
 };
 
@@ -7582,6 +7605,7 @@ $('btnScanFacesAll').onclick=async()=>{
           : (d.total > 0 ? Math.round((d.done / d.total) * 100) : 0);
         $('progressFill').style.width = pct + '%';
         $('progressPct').textContent = pct + '%';
+        setBtnProgress($('btnStopFaceScan'), pct, `■ ${pct}%`);
       });
 
       let result;
@@ -7612,6 +7636,7 @@ $('btnScanFacesAll').onclick=async()=>{
         : (totalScanned > 0 ? Math.min(99, Math.round((totalScanned / 49000) * 100)) : 0);
       $('progressFill').style.width = pct + '%';
       $('progressPct').textContent = totalScanned.toLocaleString() + ' scanned';
+      setBtnProgress($('btnStopFaceScan'), pct, `■ ${pct}%`);
       $('progressSub').textContent = (totalUnscanned > 0)
         ? `${totalScanned.toLocaleString()} / ${totalUnscanned.toLocaleString()} unscanned · ${totalNewFaces} faces found`
         : `${totalScanned.toLocaleString()} photos · ${totalNewFaces} faces found`;
@@ -7686,7 +7711,7 @@ $('btnScanFacesAll').onclick=async()=>{
 
     // Hide progress bar + stop button
     $('progressArea').classList.remove('active');
-    $('btnStopFaceScan').style.display = 'none';
+    $('btnStopFaceScan').style.display = 'none';clearBtnProgress($('btnStopFaceScan'));
 
     if (window._faceScanStopped) {
       toast(`Face scan stopped — scanned ${totalScanned.toLocaleString()} photos, found ${totalNewFaces} face(s).`, 'warn');
@@ -7710,7 +7735,7 @@ $('btnScanFacesAll').onclick=async()=>{
     toast('Error: '+e,'error');
   }finally{
     btn.disabled=false;_updateFaceBtnLabel();
-    $('btnStopFaceScan').style.display = 'none';
+    $('btnStopFaceScan').style.display = 'none';clearBtnProgress($('btnStopFaceScan'));
     window._faceScanStopped = false;
   }
 };
@@ -7720,6 +7745,7 @@ $('btnScanFacesAll').onclick=async()=>{
 $('btnStopFaceScan').onclick = async () => {
   const sb = $('btnStopFaceScan');
   sb.disabled = true;
+  clearBtnProgress(sb);
   sb.textContent = '■ Stopping…';
   window._faceScanStopped = true;
   try { await invoke('stop_face_scan'); } catch(e) { console.error('stop_face_scan:', e); }
