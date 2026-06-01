@@ -4649,31 +4649,53 @@ pub async fn import_from_device(
     }))
 }
 
-/// Return (year, month) for a media file: EXIF DateTimeOriginal first,
-/// then file mtime, then (1970, 1) as a last-resort fallback so we never
-/// crash on a file with no metadata at all.
+/// Return (year, month) for a media file using the OLDEST valid date across
+/// EXIF DateTimeOriginal, file-modified, and file-created times.
+///
+/// v1.5.387 — was "EXIF, else mtime, else 1970". Now takes the OLDEST of all
+/// signals (matching the library-organize rule the user asked for: "en eski
+/// tarih"). Taking the oldest defeats bogus-recent stamps — a copy that reset
+/// the file date, or a phone that writes import-time instead of capture-time —
+/// so a 2014 photo with a clobbered 2016 EXIF still files under 2014 when its
+/// preserved file-time is older. Never returns a placeholder/Unknown year:
+/// always a real timestamp the file actually carries.
 fn date_bucket_for_file(path: &str) -> (i32, u32) {
-    // EXIF path: "YYYY:MM:DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS"
+    use chrono::Datelike;
+    let floor = chrono::NaiveDate::from_ymd_opt(1995, 1, 1).unwrap();
+    let today = chrono::Local::now().date_naive();
+    let mut cands: Vec<chrono::NaiveDate> = Vec::new();
+
     if let Ok(exif) = crate::exif_reader::read_exif(path) {
         if let Some(dt) = exif.date_taken {
             if let Some((y, m)) = parse_year_month(&dt) {
-                return (y, m);
+                if let Some(d) = chrono::NaiveDate::from_ymd_opt(y, m, 1) {
+                    cands.push(d);
+                }
             }
         }
     }
+    if let Ok(meta) = std::fs::metadata(path) {
+        for t in [meta.modified().ok(), meta.created().ok()].into_iter().flatten() {
+            let dt: chrono::DateTime<chrono::Local> = t.into();
+            if let Some(d) = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1) {
+                cands.push(d);
+            }
+        }
+    }
+    cands.retain(|d| *d >= floor && *d <= today);
+    if let Some(d) = cands.iter().min() {
+        return (d.year(), d.month());
+    }
 
-    // File mtime fallback
+    // Last resort: raw mtime even if outside the sane range, else "now".
     if let Ok(meta) = std::fs::metadata(path) {
         if let Ok(t) = meta.modified() {
             let dt: chrono::DateTime<chrono::Local> = t.into();
-            return (
-                chrono::Datelike::year(&dt),
-                chrono::Datelike::month(&dt),
-            );
+            return (dt.year(), dt.month());
         }
     }
-
-    (1970, 1)
+    let now = chrono::Local::now();
+    (now.year(), now.month())
 }
 
 fn parse_year_month(s: &str) -> Option<(i32, u32)> {
