@@ -5959,16 +5959,20 @@ listen('scan-progress',({payload:p})=>{
   // library rescan can run for many minutes — the user would otherwise stare
   // at an unchanged grid the whole time). Manual THROTTLE (not loadPhotosBg's
   // debounce, which would starve under a continuous event stream): at most
-  // once / 6 s, only when new files actually arrived, and only while the grid
-  // is scrolled near the top so we never yank a browsing user's position.
+  // once / 6 s, only when new files actually arrived.
+  // v1.5.380 — HARD GATE on the real scroll container (#gridWrap). v1.5.379
+  // checked a non-existent #gridScroll, so the gate always passed and yanked
+  // the view to the top every 6 s while the user was scrolled down browsing
+  // ("scroll down yaparken yukarı atıyor"). Now: refresh ONLY when the user
+  // is at the very top — if they've scrolled down at all, never touch it.
   try{
-    if(p.new_files>(window._lastScanNew||0)){
+    const gw=$('gridWrap');
+    if(gw && gw.scrollTop<80 && p.new_files>(window._lastScanNew||0)){
       const now=Date.now();
       if(now-(window._lastScanRefresh||0)>6000){
         window._lastScanRefresh=now;
         window._lastScanNew=p.new_files;
-        const gs=$('gridScroll');
-        if(!gs||gs.scrollTop<200) loadPhotosBg(400);
+        loadPhotosBg(400);
       }
     }
   }catch(e){}
