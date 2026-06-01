@@ -2215,6 +2215,8 @@ select.tb-select:focus{border-color:var(--red-dark)}
   <div class="ctx-item" data-action="gallery">🔍 Show in Gallery</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="copyphoto">🖼 Copy Photo</div>
+  <div class="ctx-item" data-action="copyfile">📄 Copy File</div>
+  <div class="ctx-item" data-action="cutfile">✂️ Cut (move)</div>
   <div class="ctx-item" data-action="copypath">📋 Copy Path</div>
   <div class="ctx-item" data-action="copyname">📋 Copy Filename</div>
   <!-- v1.4.74 — surface the existing Ctrl+Alt+C/V tag-clipboard via the
@@ -5555,6 +5557,19 @@ document.querySelectorAll('.ctx-item').forEach(item=>{
         try{ await invoke('copy_image_to_clipboard',{path:ctxPhotoPath}); toast('Photo copied — paste anywhere','success'); }
         catch(err){ toast('Copy failed: '+err,'error'); }
       }
+    }
+    // v1.5.383 — Copy File: put the file (not the pixels) on the clipboard so it
+    // pastes into a folder in Explorer. Cut: same but marks MOVE, so pasting
+    // relocates the file. Source is untouched until the user pastes.
+    if(a==='copyfile'){
+      if(!ctxPhotoPath){ toast('No photo path','error'); }
+      else{ try{ await invoke('set_file_clipboard',{path:ctxPhotoPath,cut:false}); toast('File copied — paste into any folder','success'); }
+            catch(err){ toast('Copy failed: '+err,'error'); } }
+    }
+    if(a==='cutfile'){
+      if(!ctxPhotoPath){ toast('No photo path','error'); }
+      else{ try{ await invoke('set_file_clipboard',{path:ctxPhotoPath,cut:true}); toast('Cut — paste into a folder to MOVE the file there','success'); }
+            catch(err){ toast('Cut failed: '+err,'error'); } }
     }
     // v1.4.74 — Copy Tags: snapshot the right-clicked photo's tags into the
     // same _tagClipboard the Ctrl+Alt+C binding uses, so pasting from either

@@ -3509,6 +3509,44 @@ pub async fn copy_image_to_clipboard(path: String) -> Result<(), String> {
     .map_err(|e| format!("join error: {}", e))?
 }
 
+/// v1.5.383 — Put a photo FILE on the clipboard (the file itself, not the
+/// pixels) so it can be pasted into a folder in Explorer.  `cut=false` marks it
+/// COPY (paste duplicates the file); `cut=true` marks it MOVE (paste relocates
+/// it — the source leaves its current folder).  We only set the clipboard;
+/// Windows performs the actual copy/move when the user pastes, and the source
+/// file is never touched until then.  Windows-only (CF_HDROP + the "Preferred
+/// DropEffect" format); other targets return a clear error.
+#[tauri::command]
+pub async fn set_file_clipboard(path: String, cut: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_file_clipboard_impl(&path, cut))
+        .await
+        .map_err(|e| format!("join error: {}", e))?
+}
+
+#[cfg(windows)]
+fn set_file_clipboard_impl(path: &str, cut: bool) -> Result<(), String> {
+    use clipboard_win::{raw, register_format, Clipboard};
+    // RAII: opens the clipboard, closes it on drop. Retry a few times because
+    // another app may briefly hold it.
+    let _clip = Clipboard::new_attempts(10)
+        .map_err(|e| format!("open clipboard failed: {:?}", e))?;
+    raw::empty().map_err(|e| format!("empty clipboard failed: {:?}", e))?;
+    raw::set_file_list(&[path]).map_err(|e| format!("set file list failed: {:?}", e))?;
+    // "Preferred DropEffect" tells the paste target copy vs move:
+    // DROPEFFECT_COPY = 1, DROPEFFECT_MOVE = 2.
+    let fmt = register_format("Preferred DropEffect")
+        .ok_or_else(|| "register Preferred DropEffect failed".to_string())?;
+    let effect: u32 = if cut { 2 } else { 1 };
+    raw::set_without_clear(fmt.get(), &effect.to_le_bytes())
+        .map_err(|e| format!("set drop effect failed: {:?}", e))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_file_clipboard_impl(_path: &str, _cut: bool) -> Result<(), String> {
+    Err("File clipboard is only supported on Windows".into())
+}
+
 // ── 4b. Device Auto-Import ──────────────────────────────────────────────────
 
 #[tauri::command]

@@ -4727,7 +4727,7 @@ dependencies = [
 
 [[package]]
 name = "retina-tag"
-version = "1.5.382"
+version = "1.5.383"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4737,6 +4737,7 @@ dependencies = [
  "base64 0.22.1",
  "bip39",
  "chrono",
+ "clipboard-win",
  "csv",
  "dirs 5.0.1",
  "futures",

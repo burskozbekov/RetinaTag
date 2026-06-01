@@ -1,6 +1,6 @@
 [package]
 name = "retina-tag"
-version = "1.5.382"
+version = "1.5.383"
 description = "AI-powered photo library tagger with smart multi-provider routing"
 authors = ["RetinaTag"]
 edition = "2021"
@@ -142,6 +142,10 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Imaging",
 ] }
 windows-core = "0.58"
+# v1.5.383 — File clipboard (Copy File / Cut) via CF_HDROP + "Preferred
+# DropEffect". Already in the tree transitively (arboard → clipboard-win);
+# naming it directly lets us set the file list + move/copy effect ourselves.
+clipboard-win = "5"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
