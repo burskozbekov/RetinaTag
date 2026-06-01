@@ -57,6 +57,18 @@ mod windows_impl {
     use windows::Win32::System::Ioctl::*;
     use windows::Win32::System::IO::DeviceIoControl;
 
+    // v1.5.378 — An NTFS file reference is 64-bit: the LOW 48 bits are the
+    // MFT record index, the HIGH 16 bits are the record's sequence number.
+    // USN_RECORD_V2 reports both FileReferenceNumber and
+    // ParentFileReferenceNumber in this packed form.  We index entries and
+    // walk parent links by record index only, so the high sequence bits MUST
+    // be masked off — otherwise a top-level item's parent (the root dir,
+    // record 5) reads as `(seq<<48)|5`, never equals the `== 5` root sentinel,
+    // its lookup misses (the root record isn't enumerated), and EVERY path
+    // resolution fails → 0 files found on a full library.  This was the
+    // "rescan imports nothing / fotolarım nerede" bug.
+    const REF_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
     /// One MFT entry indexed by file reference number.
     struct Entry {
         name:           String,
@@ -126,6 +138,18 @@ mod windows_impl {
             "[mft] {} media files under {} in {:.2}s",
             out.len(), root.display(), start.elapsed().as_secs_f32()
         );
+        // v1.5.378 — Defense-in-depth: if the volume clearly holds files but we
+        // resolved ZERO under the requested root, path reconstruction failed
+        // (not a genuinely empty folder).  Return None so the caller falls back
+        // to the reliable WalkDir walk instead of silently importing nothing —
+        // the exact failure mode that hid the user's photos.
+        if out.is_empty() && entries.len() > 1000 {
+            eprintln!(
+                "[mft] 0 paths resolved from {} entries — falling back to WalkDir",
+                entries.len()
+            );
+            return None;
+        }
         Some(out)
     }
 
@@ -243,10 +267,10 @@ mod windows_impl {
                     let name = String::from_utf16_lossy(name_slice);
                     let is_dir = (rec.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
                     entries.insert(
-                        rec.FileReferenceNumber,
+                        rec.FileReferenceNumber & REF_MASK,
                         Entry {
                             name,
-                            parent_ref: rec.ParentFileReferenceNumber,
+                            parent_ref: rec.ParentFileReferenceNumber & REF_MASK,
                             is_directory: is_dir,
                         },
                     );

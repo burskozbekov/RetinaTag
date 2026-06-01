@@ -517,6 +517,12 @@ pub async fn scan_folder_impl(
     })
     .await?;
 
+    // v1.5.378 — diagnostic: how many media paths the enumerator actually
+    // returned for this root.  If this is ~0 for a populated library the MFT
+    // fast-scan is failing to reconstruct paths (the "rescan imports nothing"
+    // bug); if it's the full count the bottleneck is downstream.
+    eprintln!("[scan] '{}': enumerated {} media path(s)", folder, all_paths.len());
+
     // Drop into a blocking task so rayon's thread pool + the writer thread
     // don't run inside a tokio worker — they'd starve the runtime otherwise.
     let folder_out = folder.clone();

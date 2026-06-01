@@ -3271,31 +3271,11 @@ pub async fn start_watching(
     // Minimise to a covering ANCESTOR set: the watcher is recursive, so if
     // we already watch "D:\Photos" there's no point also watching
     // "D:\Photos\2007" — and overlapping recursive watches just duplicate
-    // events.  Drop any folder that has another folder in the set as a
-    // path-prefix ancestor.  Case-insensitive + separator-normalised so
-    // Windows drift doesn't defeat the prefix test.
-    let folders: Vec<String> = {
-        let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
-        let mut uniq: Vec<String> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for f in folders {
-            let n = norm(&f);
-            if n.is_empty() || !seen.insert(n) { continue; }
-            uniq.push(f);
-        }
-        // Sort by normalised length asc so ancestors are considered first.
-        uniq.sort_by_key(|f| norm(f).len());
-        let mut kept: Vec<String> = Vec::new();
-        for f in uniq {
-            let nf = norm(&f);
-            let covered = kept.iter().any(|k| {
-                let nk = norm(k);
-                nf == nk || nf.starts_with(&(nk.clone() + "\\"))
-            });
-            if !covered { kept.push(f); }
-        }
-        kept
-    };
+    // events.  v1.5.378 — covering_roots also folds each drive's folders
+    // into their deepest common ancestor, so a single recursive watch on
+    // "D:\Fotograflar" covers sibling folders that were never imported and
+    // catches files dropped into them live.
+    let folders: Vec<String> = covering_roots(folders);
 
     if folders.is_empty() {
         return Err("No watch folders configured".into());
@@ -3331,19 +3311,79 @@ pub async fn stop_watching(
     Ok(())
 }
 
-/// v1.5.377 — Minimal covering set of library roots: enabled watch folders
-/// ∪ every distinct photo folder, reduced to ancestors (a recursive scan
-/// of a parent covers its children).  Case-insensitive, separator-
-/// normalised prefix test.  Shared shape with start_watching's watch set.
-fn minimal_library_roots(conn: &rusqlite::Connection) -> Vec<String> {
-    let mut all: Vec<String> = Vec::new();
-    if let Ok(wf) = db::get_watch_folders(conn) {
-        all.extend(wf.into_iter().filter(|w| w.enabled).map(|w| w.path));
+/// v1.5.378 — Collapse a folder set to its deepest common ancestor *per
+/// drive*.  The scan/watch sets are built from `distinct photo folders`,
+/// which only ever lists folders that ALREADY contain an imported photo.
+/// A sibling folder the user dropped on disk but never scanned (e.g.
+/// `D:\Fotograflar\2015-08`) has zero DB rows, so it never entered that set
+/// and the on-launch rescan skipped it forever — leaving thousands of
+/// on-disk photos permanently invisible ("fotolarım nerede?": 9 189 files
+/// found on disk, absent from the DB).
+///
+/// Grouping every folder by its drive letter and taking the deepest common
+/// ancestor turns "3995 scattered subfolders of D:\Fotograflar" into the
+/// single root "D:\Fotograflar"; one recursive scan of that root then
+/// sweeps in every never-imported sibling too.  Guard: a group whose
+/// folders share nothing past the drive letter would collapse to a bare
+/// drive root (`D:\`) — far too broad to scan — so such a group is left
+/// untouched (its original folders are returned as-is).
+fn drive_common_ancestors(folders: &[String]) -> Vec<String> {
+    use std::collections::BTreeMap;
+    let split = |s: &str| -> Vec<String> {
+        s.replace('/', "\\")
+            .trim_end_matches('\\')
+            .split('\\')
+            .filter(|c| !c.is_empty())
+            .map(|c| c.to_string())
+            .collect()
+    };
+    let mut groups: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
+    for f in folders {
+        let comps = split(f);
+        if comps.is_empty() { continue; }
+        let drive = comps[0].to_lowercase();
+        groups.entry(drive).or_default().push(comps);
     }
-    if let Ok(pf) = db::distinct_photo_folders(conn) {
-        all.extend(pf);
+    let mut roots: Vec<String> = Vec::new();
+    for (_drive, members) in groups {
+        // Longest common component-prefix across the group (case-insensitive
+        // on the ASCII range; non-ASCII folder names compare byte-exact,
+        // which is correct for paths that all came from one filesystem).
+        let first = &members[0];
+        let mut common = first.len();
+        for m in &members[1..] {
+            let mut i = 0;
+            while i < common && i < m.len() && m[i].eq_ignore_ascii_case(&first[i]) {
+                i += 1;
+            }
+            common = i;
+            if common <= 1 { break; }
+        }
+        if common >= 2 {
+            // ≥2 components = drive + at least one folder: a real, safe root.
+            roots.push(first[..common].join("\\"));
+        } else {
+            // Bare drive root — too broad; keep the group's folders untouched.
+            for m in &members {
+                roots.push(m.join("\\"));
+            }
+        }
     }
+    roots
+}
+
+/// Reduce a raw folder list to a minimal covering set of recursive roots:
+/// fold each drive's folders into their deepest common ancestor (v1.5.378),
+/// dedupe, then drop any folder already covered by an ancestor in the set
+/// (a recursive scan/watch of a parent covers its children).  Case-
+/// insensitive, separator-normalised prefix test.  Shared by start_watching
+/// (the live-watch set) and minimal_library_roots (the rescan set) so both
+/// broaden identically.
+fn covering_roots(folders: Vec<String>) -> Vec<String> {
     let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let mut all = folders;
+    let ancestors = drive_common_ancestors(&all);
+    all.extend(ancestors);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut uniq: Vec<String> = Vec::new();
     for f in all {
@@ -3362,6 +3402,20 @@ fn minimal_library_roots(conn: &rusqlite::Connection) -> Vec<String> {
         if !covered { kept.push(f); }
     }
     kept
+}
+
+/// v1.5.377 — Minimal covering set of library roots: enabled watch folders
+/// ∪ every distinct photo folder, broadened to per-drive common ancestors
+/// (v1.5.378) and reduced to ancestors.  Shared shape with start_watching.
+fn minimal_library_roots(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut all: Vec<String> = Vec::new();
+    if let Ok(wf) = db::get_watch_folders(conn) {
+        all.extend(wf.into_iter().filter(|w| w.enabled).map(|w| w.path));
+    }
+    if let Ok(pf) = db::distinct_photo_folders(conn) {
+        all.extend(pf);
+    }
+    covering_roots(all)
 }
 
 /// v1.5.377 — Incremental rescan of the whole known library.  A file
@@ -3399,11 +3453,21 @@ pub async fn rescan_library(
 
     tokio::spawn(async move {
         stop.store(false, std::sync::atomic::Ordering::SeqCst);
+        eprintln!("[rescan] starting sweep of {} root(s): {:?}", n, folders);
         for folder in folders {
             if stop.load(std::sync::atomic::Ordering::SeqCst) { break; }
-            let _ = crate::scanner::scan_folder_impl(
-                folder, db_arc.clone(), thumbs.clone(), stop.clone(), ah.clone(),
-            ).await;
+            // v1.5.378 — surface scan results/errors instead of swallowing
+            // them with `let _ =`.  A silently-failing rescan was exactly why
+            // offline-added photos never appeared.
+            match crate::scanner::scan_folder_impl(
+                folder.clone(), db_arc.clone(), thumbs.clone(), stop.clone(), ah.clone(),
+            ).await {
+                Ok(c) => eprintln!(
+                    "[rescan] '{}' done: new={} skipped={} total={}",
+                    folder, c.new_files, c.skipped, c.total
+                ),
+                Err(e) => eprintln!("[rescan] '{}' ERROR: {}", folder, e),
+            }
         }
         scan_running.store(false, std::sync::atomic::Ordering::SeqCst);
         // Each folder already emitted scan-complete (→ FE loadPhotos); this
