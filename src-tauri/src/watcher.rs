@@ -146,6 +146,62 @@ impl FolderWatcher {
 }
 
 /// Process new files — returns count of successfully imported photos
+/// v1.5.388 — English month folder name (matches the library + MTP layout).
+fn month_name_en(m: u32) -> &'static str {
+    match m {
+        1 => "January", 2 => "February", 3 => "March", 4 => "April",
+        5 => "May", 6 => "June", 7 => "July", 8 => "August",
+        9 => "September", 10 => "October", 11 => "November", 12 => "December",
+        _ => "Unknown",
+    }
+}
+
+/// v1.5.388 — Oldest valid (year, month) across EXIF DateTimeOriginal, file
+/// modified, and file created (sane range 1995..=today). Mirrors commands.rs
+/// date_bucket_for_file so a file dropped into the library lands in the same
+/// YEAR\MM bucket the library/import would choose. None if nothing usable.
+fn oldest_ym(path: &str) -> Option<(i32, u32)> {
+    use chrono::Datelike;
+    let floor = chrono::NaiveDate::from_ymd_opt(1995, 1, 1)?;
+    let today = chrono::Local::now().date_naive();
+    let mut cands: Vec<chrono::NaiveDate> = Vec::new();
+    if let Ok(exif) = crate::exif_reader::read_exif(path) {
+        if let Some(dt) = exif.date_taken {
+            let s = dt.trim();
+            if let (Some(ys), Some(ms)) = (s.get(0..4), s.get(5..7)) {
+                if let (Ok(y), Ok(m)) = (ys.parse::<i32>(), ms.parse::<u32>()) {
+                    if (1..=12).contains(&m) {
+                        if let Some(d) = chrono::NaiveDate::from_ymd_opt(y, m, 1) { cands.push(d); }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        for t in [meta.modified().ok(), meta.created().ok()].into_iter().flatten() {
+            let dt: chrono::DateTime<chrono::Local> = t.into();
+            if let Some(d) = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1) { cands.push(d); }
+        }
+    }
+    cands.retain(|d| *d >= floor && *d <= today);
+    cands.iter().min().map(|d| (d.year(), d.month()))
+}
+
+/// v1.5.388 — Library root = parent-of-parent of any canonical
+/// `<root>\YYYY\MM-Month` photo folder in the DB. None if the library isn't
+/// organized that way yet (then the watcher imports in place — old behaviour).
+fn derive_library_root(conn: &rusqlite::Connection) -> Option<String> {
+    let folder: String = conn
+        .query_row(
+            "SELECT folder FROM photos WHERE folder GLOB '*\\[12][0-9][0-9][0-9]\\[0-9][0-9]-*' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let p = std::path::Path::new(&folder);
+    Some(p.parent()?.parent()?.to_string_lossy().to_string())
+}
+
 fn process_new_files(
     files: &[String],
     db_conn: &Arc<Mutex<rusqlite::Connection>>,
@@ -160,6 +216,12 @@ fn process_new_files(
     // Now we only hold the lock around the actual DB queries, and run all
     // the slow I/O outside the critical section.
     let mut new_count = 0;
+
+    // v1.5.388 — derive the library root once (cheap, one query) so new
+    // arrivals can be auto-filed into <root>\YYYY\MM-Month — the same buckets
+    // the library + phone import use. None = library not organized that way
+    // yet → we skip the move and import in place (old behaviour).
+    let lib_root: Option<String> = db_conn.lock().ok().and_then(|c| derive_library_root(&c));
 
     for file_path in files {
         let path = std::path::Path::new(file_path);
@@ -192,6 +254,47 @@ fn process_new_files(
             continue;
         }
 
+        // v1.5.388 — Auto-file this fresh arrival into <root>\YYYY\MM-Month by
+        // its OLDEST date, so a photo downloaded / dropped straight into the
+        // library lands in the right year-month folder. Only genuinely-new
+        // files reach here (MTP imports are already in the DB → skipped above),
+        // so this never fights the import placement. No lock is held across the
+        // rename (no freeze); the moved file's own watch event dedups against
+        // the row we insert below, so there's no re-processing loop. Falls back
+        // to in-place if the root is unknown, the file is already in its bucket,
+        // or the rename fails.
+        let mut work_path: String = file_path.clone();
+        if let (Some(root), Some((y, m))) = (lib_root.as_deref(), oldest_ym(file_path)) {
+            let tgt_dir = format!("{}\\{}\\{:02}-{}", root.trim_end_matches('\\'), y, m, month_name_en(m));
+            let cur_parent = std::path::Path::new(&work_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if cur_parent != tgt_dir.to_lowercase() && std::fs::create_dir_all(&tgt_dir).is_ok() {
+                let base = std::path::Path::new(&work_path)
+                    .file_name().unwrap_or_default().to_string_lossy().to_string();
+                let mut dest = format!("{}\\{}", tgt_dir, base);
+                if std::path::Path::new(&dest).exists() {
+                    let stem = std::path::Path::new(&base)
+                        .file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let ext = std::path::Path::new(&base)
+                        .extension()
+                        .map(|e| format!(".{}", e.to_string_lossy()))
+                        .unwrap_or_default();
+                    let mut i = 2;
+                    loop {
+                        let cand = format!("{}\\{}_{}{}", tgt_dir, stem, i, ext);
+                        if !std::path::Path::new(&cand).exists() { dest = cand; break; }
+                        i += 1;
+                    }
+                }
+                if std::fs::rename(&work_path, &dest).is_ok() {
+                    work_path = dest;
+                }
+            }
+        }
+        let path = std::path::Path::new(&work_path);
+
         let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let folder = path.parent().unwrap_or(path).to_string_lossy().to_string();
 
@@ -199,7 +302,7 @@ fn process_new_files(
         // header (~30 ms typical, 500 ms+ for HEIC); EXIF reads a few KB
         // off disk; video duration may spawn ffprobe.
         let (width, height) = {
-            let fp = file_path.clone();
+            let fp = work_path.clone();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let result = image::image_dimensions(&fp)
@@ -211,13 +314,13 @@ fn process_new_files(
                 .unwrap_or((None, None))
         };
 
-        let size = std::fs::metadata(file_path).map(|m| m.len() as i64).unwrap_or(0);
+        let size = std::fs::metadata(&work_path).map(|m| m.len() as i64).unwrap_or(0);
 
-        let mtype = crate::scanner::media_type_for_path(std::path::Path::new(file_path));
-        let date_taken = crate::exif_reader::read_exif(file_path)
+        let mtype = crate::scanner::media_type_for_path(path);
+        let date_taken = crate::exif_reader::read_exif(&work_path)
             .ok().and_then(|e| e.date_taken)
             .or_else(|| {
-                std::fs::metadata(file_path).ok().and_then(|m| {
+                std::fs::metadata(&work_path).ok().and_then(|m| {
                     m.created().or_else(|_| m.modified()).ok().map(|t| {
                         let dt: chrono::DateTime<chrono::Local> = t.into();
                         dt.format("%Y-%m-%d %H:%M:%S").to_string()
@@ -225,14 +328,14 @@ fn process_new_files(
                 })
             });
         let duration_secs = if mtype == "video" {
-            crate::scanner::extract_video_duration_pub(file_path)
+            crate::scanner::extract_video_duration_pub(&work_path)
         } else {
             None
         };
 
         // Thumbnail also slow — generate before re-locking.
         let thumb_path = crate::thumbnail::get_or_create_thumbnail(
-            file_path, &hash, thumbnails_dir, 256,
+            &work_path, &hash, thumbnails_dir, 256,
         )
         .ok()
         .map(|_| {
@@ -241,7 +344,7 @@ fn process_new_files(
         });
 
         let new_photo = db::NewPhoto {
-            path: file_path,
+            path: &work_path,
             filename: &filename,
             folder: &folder,
             hash: &hash,
