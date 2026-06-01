@@ -3432,6 +3432,27 @@ pub async fn rescan_library(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<usize, String> {
+    // v1.5.386 — Do NOT re-sweep the whole library on every launch. The
+    // one-time import is done; re-scanning each open just shows a pointless
+    // "Scanning…" and thrashes disk ("neyi tarıyor amk?"). Gate: only auto-
+    // rescan if it's been >24h since the last COMPLETED sweep (or never).
+    // Live additions while the app is open are caught by the file watcher;
+    // a manual scan (Add Folder / Scan) covers anything else immediately.
+    // Note: the user-initiated scan_folder command is NOT gated.
+    {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        if let Ok(Some(last)) = db::get_setting(&conn, "last_rescan_at") {
+            if let Ok(last_secs) = last.trim().parse::<i64>() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                if now > 0 && now.saturating_sub(last_secs) < 24 * 3600 {
+                    return Ok(0); // scanned within the last day — skip
+                }
+            }
+        }
+    }
     if state.scan_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
         // A user-initiated scan is already in flight — don't pile on.
         return Ok(0);
@@ -3470,6 +3491,17 @@ pub async fn rescan_library(
             }
         }
         scan_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        // v1.5.386 — record completion time so the next launch within 24h
+        // skips the whole-library sweep entirely (no more per-open "Scanning…").
+        if let Ok(conn) = db_arc.lock() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if now > 0 {
+                let _ = db::set_setting(&conn, "last_rescan_at", &now.to_string());
+            }
+        }
         // Each folder already emitted scan-complete (→ FE loadPhotos); this
         // is a final "the whole sweep finished" signal for any listener.
         ah.emit("library-rescan-complete", ()).ok();
