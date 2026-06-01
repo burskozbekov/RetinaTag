@@ -5954,6 +5954,24 @@ listen('scan-progress',({payload:p})=>{
   }else{
     _setIdleTrayTooltip();
   }
+  // v1.5.379 — Refresh the gallery progressively during a long sweep so
+  // imported photos appear as they land, not only at scan-complete (a full
+  // library rescan can run for many minutes — the user would otherwise stare
+  // at an unchanged grid the whole time). Manual THROTTLE (not loadPhotosBg's
+  // debounce, which would starve under a continuous event stream): at most
+  // once / 6 s, only when new files actually arrived, and only while the grid
+  // is scrolled near the top so we never yank a browsing user's position.
+  try{
+    if(p.new_files>(window._lastScanNew||0)){
+      const now=Date.now();
+      if(now-(window._lastScanRefresh||0)>6000){
+        window._lastScanRefresh=now;
+        window._lastScanNew=p.new_files;
+        const gs=$('gridScroll');
+        if(!gs||gs.scrollTop<200) loadPhotosBg(400);
+      }
+    }
+  }catch(e){}
 });
 // Emitted when scanner detects a prior checkpoint for this folder (a previous
 // scan was stopped or crashed). Show a non-blocking toast so the user knows
