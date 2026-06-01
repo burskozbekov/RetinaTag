@@ -1230,6 +1230,7 @@ pub fn run() {
             commands::get_watch_folders,
             commands::start_watching,
             commands::stop_watching,
+            commands::rescan_library,
             // 5. Tag management
             commands::merge_tags,
             commands::rename_tag_global,

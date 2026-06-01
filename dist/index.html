@@ -14514,8 +14514,18 @@ $('btnWelcomeSkip').onclick=()=>{$('welcomeModal').classList.remove('open');invo
       if(sSel) sSel.value = savedS;
     }
   }catch(_){}
-  // Start file watcher
+  // Start file watcher (catches files added WHILE the app runs).
   invoke('start_watching').catch(()=>{});
+  // v1.5.377 — Also rescan the known library in the background to import
+  // files that were added while the app was CLOSED (or before the folder
+  // was watched).  A watcher only sees live changes; this is the
+  // belt-and-suspenders sweep so "I dropped photos in a folder and the
+  // latest ones aren't showing" just works on next launch.  Cheap on an
+  // unchanged library (the scanner's path+mtime hash cache skips files it
+  // already knows).  Delayed a touch so the first paint isn't competing
+  // with the scan's initial enumeration.  scan-complete events refresh
+  // the grid as each folder finishes.
+  setTimeout(()=>{ invoke('rescan_library').catch(()=>{}); }, 4000);
   // Load persisted tag confidence filter so the threshold applies to the
   // first photo the user opens, not just after they visit Settings.
   _loadMinTagConf();

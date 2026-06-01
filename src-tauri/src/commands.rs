@@ -3331,6 +3331,89 @@ pub async fn stop_watching(
     Ok(())
 }
 
+/// v1.5.377 — Minimal covering set of library roots: enabled watch folders
+/// ∪ every distinct photo folder, reduced to ancestors (a recursive scan
+/// of a parent covers its children).  Case-insensitive, separator-
+/// normalised prefix test.  Shared shape with start_watching's watch set.
+fn minimal_library_roots(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut all: Vec<String> = Vec::new();
+    if let Ok(wf) = db::get_watch_folders(conn) {
+        all.extend(wf.into_iter().filter(|w| w.enabled).map(|w| w.path));
+    }
+    if let Ok(pf) = db::distinct_photo_folders(conn) {
+        all.extend(pf);
+    }
+    let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut uniq: Vec<String> = Vec::new();
+    for f in all {
+        let n = norm(&f);
+        if n.is_empty() || !seen.insert(n) { continue; }
+        uniq.push(f);
+    }
+    uniq.sort_by_key(|f| norm(f).len());
+    let mut kept: Vec<String> = Vec::new();
+    for f in uniq {
+        let nf = norm(&f);
+        let covered = kept.iter().any(|k| {
+            let nk = norm(k);
+            nf == nk || nf.starts_with(&(nk.clone() + "\\"))
+        });
+        if !covered { kept.push(f); }
+    }
+    kept
+}
+
+/// v1.5.377 — Incremental rescan of the whole known library.  A file
+/// watcher only catches changes that happen WHILE it's running, so files
+/// added before launch (or before the folder was watched) never appeared
+/// until a manual re-scan — the user's "I added photos but the latest
+/// ones aren't there" report.  This runs on launch (background) so
+/// offline additions are imported automatically.  Cheap on an unchanged
+/// library: the scanner's (path,size,mtime)→hash cache skips the SHA pass
+/// for every file it has already seen, so only genuinely new files cost
+/// anything.  No-op if a scan is already running.
+#[tauri::command]
+pub async fn rescan_library(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<usize, String> {
+    if state.scan_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // A user-initiated scan is already in flight — don't pile on.
+        return Ok(0);
+    }
+    let folders = {
+        let conn = state.db.lock().map_err(|_| "db lock")?;
+        minimal_library_roots(&conn)
+    };
+    if folders.is_empty() {
+        state.scan_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        return Ok(0);
+    }
+    let n = folders.len();
+    let db_arc = state.db.clone();
+    let thumbs = state.thumbnails_dir.clone();
+    let stop = state.scan_stop.clone();
+    let scan_running = state.scan_running.clone();
+    let ah = app_handle.clone();
+
+    tokio::spawn(async move {
+        stop.store(false, std::sync::atomic::Ordering::SeqCst);
+        for folder in folders {
+            if stop.load(std::sync::atomic::Ordering::SeqCst) { break; }
+            let _ = crate::scanner::scan_folder_impl(
+                folder, db_arc.clone(), thumbs.clone(), stop.clone(), ah.clone(),
+            ).await;
+        }
+        scan_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Each folder already emitted scan-complete (→ FE loadPhotos); this
+        // is a final "the whole sweep finished" signal for any listener.
+        ah.emit("library-rescan-complete", ()).ok();
+    });
+
+    Ok(n)
+}
+
 // ── 4b. Device Auto-Import ──────────────────────────────────────────────────
 
 #[tauri::command]
