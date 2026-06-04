@@ -3840,7 +3840,7 @@ pub async fn mtp_import(
                 // For the slow path the file name in the inbox is
                 // prefixed with the index so two phone-side objects with
                 // the same filename don't collide during the temp stage.
-                let dest_path = if use_fast_path {
+                let mut dest_path = if use_fast_path {
                     target_dir.join(&filename)
                 } else {
                     target_dir.join(format!("{}_{}", i, filename))
@@ -3858,6 +3858,12 @@ pub async fn mtp_import(
                             continue;
                         }
                     }
+                    // v1.5.389 — size differs (or unreadable): the existing
+                    // file is a DIFFERENT photo. Never overwrite it — copy
+                    // into a fresh _N name so both survive. (Was: fell
+                    // through to copy_object_with_device, which truncates
+                    // the existing file → permanent data loss.)
+                    dest_path = next_free_path(&dest_path);
                 }
 
                 // v1.5.151 — Patient retry around copy_object. iPhone
@@ -4002,7 +4008,7 @@ pub async fn mtp_import(
                         skip_fail += 1;
                         continue;
                     }
-                    let real_path = real_dir.join(&filename);
+                    let mut real_path = real_dir.join(&filename);
                     // Late dest-exists check: file might already be in
                     // the real bucket from a prior import. Honour the
                     // same size-match shortcut as the fast path.
@@ -4014,6 +4020,11 @@ pub async fn mtp_import(
                                 continue;
                             }
                         }
+                        // v1.5.389 — different-content collision: never
+                        // overwrite the existing photo. Move into a fresh
+                        // _N name. (Was: std::fs::rename below replaced the
+                        // existing file → permanent data loss.)
+                        real_path = next_free_path(&real_path);
                     }
                     if let Err(e) = std::fs::rename(&dest_path, &real_path) {
                         eprintln!("rename inbox→bucket failed: {}", e);
@@ -4409,6 +4420,44 @@ fn parse_mtp_date_bucket(s: Option<&str>) -> (String, String) {
         );
     }
     ("Unknown".to_string(), "Unknown".to_string())
+}
+
+/// v1.5.389 — Given a desired destination path that may already be
+/// occupied by a DIFFERENT file, return the first non-existent sibling
+/// by appending _1, _2, … to the stem (e.g. `IMG_0001.HEIC` →
+/// `IMG_0001_1.HEIC`). This is the single source of truth for the
+/// collision-safe naming already used by `import_from_device` /
+/// `rebucket_unknown_folder`, so import paths never overwrite or
+/// destroy a same-named-but-different photo. If `desired` is free it is
+/// returned unchanged.
+fn next_free_path(desired: &std::path::Path) -> std::path::PathBuf {
+    if !desired.exists() {
+        return desired.to_path_buf();
+    }
+    let dir = desired
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let stem = desired
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = desired
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut n = 1;
+    loop {
+        let cand = dir.join(format!("{}_{}{}", stem, n, ext));
+        if !cand.exists() {
+            return cand;
+        }
+        n += 1;
+        if n > 9999 {
+            return cand; // give up after 9999 — never happens in practice
+        }
+    }
 }
 
 fn english_month_name(m: u32) -> &'static str {
@@ -5008,9 +5057,20 @@ pub async fn rebucket_unknown_folder(
             // are identical (same size) in which case drop the
             // stranded copy and just update the DB row.
             if dest.exists() {
-                let same_size = std::fs::metadata(src).ok().map(|a| a.len())
-                    == std::fs::metadata(&dest).ok().map(|a| a.len());
-                if same_size {
+                // v1.5.389 — was a SIZE-only comparison, which would
+                // permanently delete a DIFFERENT photo that merely shared
+                // a byte length. Compare content hashes so we only drop a
+                // genuine duplicate; otherwise fall through to the _N
+                // rename below and keep both files.
+                let dest_str = dest.to_string_lossy().to_string();
+                let same_content = match (
+                    crate::scanner::compute_hash(&src_str),
+                    crate::scanner::compute_hash(&dest_str),
+                ) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => false,
+                };
+                if same_content {
                     let _ = std::fs::remove_file(src);
                     // Still update the DB row so timeline/calendar
                     // stop pointing at Unknown.
