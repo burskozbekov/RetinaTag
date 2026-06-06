@@ -4184,7 +4184,13 @@ $('btnNewCollection').onclick=async()=>{
 };
 
 // ── Load photos ───────────────────────────────────────────────────────────────
-async function loadPhotos(){
+async function loadPhotos(preserveScroll=false){
+  // v1.5.391 — optional preserveScroll. Background refreshes (loadPhotosBg,
+  // fired by tag-progress every 30 photos and by watch-new-files) pass true
+  // so the grid does NOT jump to the top while the user is scrolled down
+  // browsing during an AI-tagging run or a watcher import ("scroll down
+  // yaparken yukarı atıyor"). User-initiated loads (folder / search / filter
+  // clicks) omit the arg → default false → reset to top, exactly as before.
   // v1.4.65 — persist the rating/favorite filter across sessions so relaunching
   // the app doesn't silently reset users back to "all photos" when they spent
   // time narrowing to ★★★★+ or favourites. Matches the rt_view_v1 pattern.
@@ -4279,7 +4285,7 @@ async function loadPhotos(){
     }
     thumbQueue=[];
     _photoIdToIdx = null; // v1.5.200 invalidate id→idx Map
-    renderGrid();
+    renderGrid(preserveScroll); // v1.5.391 — keep scroll position on background refresh
     renderDashFilterPill();
     if(typeof _updateClearFiltersPill==='function')_updateClearFiltersPill();
     // v1.4.27: keep the "· N selected" suffix in sync after loadPhotos blows
@@ -6060,7 +6066,7 @@ function loadPhotosBg(ms = 2500) {
   if (_bgLoadPhotosTimer) clearTimeout(_bgLoadPhotosTimer);
   _bgLoadPhotosTimer = setTimeout(() => {
     _bgLoadPhotosTimer = 0;
-    try { loadPhotos(); } catch(_) {}
+    try { loadPhotos(true); } catch(_) {} // v1.5.391 — preserve scroll on background refresh
   }, ms);
 }
 function refreshStatsBg(ms = 2500) {
