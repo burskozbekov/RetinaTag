@@ -4727,7 +4727,7 @@ dependencies = [
 
 [[package]]
 name = "retina-tag"
-version = "1.5.391"
+version = "1.5.392"
 dependencies = [
  "aes-gcm",
  "anyhow",

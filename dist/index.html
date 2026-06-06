@@ -8408,7 +8408,17 @@ $('searchInput').oninput=e=>{
     // ~30 actually-meaningful CLIP-driven matches.
     if(semanticUnique.length>0){
       for(const ph of semanticUnique){ try{ ph._visualMatch = true; }catch(_){} }
-      photos=[...semanticUnique,...tagResults];totalPhotos=photos.length;
+      // v1.5.392 — Only natural-language (2+ word) queries lead with CLIP
+      // visual matches. A short 1-word query is almost always an exact-tag
+      // intent ("kedi"), so TAG matches lead and CLIP fills in below —
+      // otherwise weak ~0.20-similarity visual matches bury the exact tag
+      // hits ("alakasız sonuçlar üstte"). Multi-word concept queries keep
+      // the v1.5.364 CLIP-first ordering (where tag search is the noisy one).
+      const _wc = String(q||'').trim().split(/\s+/).filter(Boolean).length;
+      photos = (_wc >= 2)
+        ? [...semanticUnique, ...tagResults]
+        : [...tagResults, ...semanticUnique];
+      totalPhotos=photos.length;
     }
     tagCount=tagResults.length;
     const total=tagCount+semanticUnique.length;
