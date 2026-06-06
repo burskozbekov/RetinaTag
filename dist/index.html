@@ -958,6 +958,16 @@ select.tb-select:focus{border-color:var(--red-dark)}
 /* v1.5.55 — visual-match variant. Different colour (cyan-ish) so the
    user can tell tag hits apart from CLIP semantic hits. */
 .match-chip.match-chip-visual{background:rgba(60,140,210,.85);border-color:rgba(60,140,210,.55)}
+/* v1.5.390 — Card badge de-overlap. Two badges could share a corner only
+   when BOTH are present on one card; the general-sibling combinator (~)
+   repositions the second one ONLY in that exact case, with zero effect
+   otherwise. Render order is fixed (media → fav → rating → stack → sim →
+   match), so the earlier badge always precedes the later as a sibling.
+   Fixes the user's "üst üste binen yazı": gold rating over the RAW/VIDEO
+   badge (both top-left), and the search match-chip over the burst-stack
+   badge (both bottom-right). */
+.media-badge ~ .rating-indicator{top:26px}   /* rating drops just below the RAW/VIDEO badge */
+.stack-badge ~ .match-chip{bottom:30px}       /* match-chip lifts just above the burst-stack badge */
 /* v1.5.53 — refine-bar chip: clickable tag suggestion that narrows
    the current search. Subtle so it doesn't dominate the toolbar
    region; hover gets the same red highlight as other interactive
@@ -1230,7 +1240,7 @@ select.tb-select:focus{border-color:var(--red-dark)}
            (right:10). As soon as the user types, ? hides and X (clear,
            right:34) + ☆ (save, right:10) appear. Same horizontal real
            estate, never overlap. -->
-      <span id="searchClearX" title="Clear search (Esc)" style="display:none;position:absolute;right:10px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;background:var(--border2);color:var(--cream);text-align:center;line-height:20px;font-size:13px;cursor:pointer;user-select:none;z-index:3">&times;</span>
+      <span id="searchClearX" title="Clear search (Esc)" style="display:none;position:absolute;right:34px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;background:var(--border2);color:var(--cream);text-align:center;line-height:20px;font-size:13px;cursor:pointer;user-select:none;z-index:3">&times;</span>
       <span id="searchStar" title="Save / unsave this search" onclick="_toggleSavedFromInput()" style="display:none;position:absolute;right:10px;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:50%;color:rgba(255,210,120,.85);text-align:center;line-height:20px;font-size:14px;cursor:pointer;user-select:none;z-index:3">☆</span>
       <span id="searchHelpBtn" title="Search syntax help" onclick="openSearchHelp()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);width:18px;height:18px;border-radius:50%;background:rgba(184,58,18,.18);color:var(--amber);text-align:center;line-height:18px;font-size:11px;font-weight:700;cursor:pointer;user-select:none;z-index:3">?</span>
       <span class="search-person-pill" id="searchPersonPill">
