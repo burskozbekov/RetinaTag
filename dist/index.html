@@ -8406,14 +8406,18 @@ $('searchInput').oninput=e=>{
     // the complaint that natural-language queries like "food i had in
     // france" surfaced 1200 noisy LIKE-matched photos before the
     // ~30 actually-meaningful CLIP-driven matches.
+    // v1.5.393 — CLIP DISCIPLINE. Visual matches are a FALLBACK for when tag
+    // search is thin. If we already have plenty of tag matches, weak
+    // ~0.2-similarity visual guesses only inject noise — e.g. a sepia
+    // t-shirt surfaced for "kahve" purely via CLIP even after its junk tags
+    // were cleaned. So once tag results are sufficient, drop CLIP entirely.
+    if(semanticUnique.length>0 && tagResults.length >= 12){
+      semanticUnique = [];
+    }
     if(semanticUnique.length>0){
       for(const ph of semanticUnique){ try{ ph._visualMatch = true; }catch(_){} }
-      // v1.5.392 — Only natural-language (2+ word) queries lead with CLIP
-      // visual matches. A short 1-word query is almost always an exact-tag
-      // intent ("kedi"), so TAG matches lead and CLIP fills in below —
-      // otherwise weak ~0.20-similarity visual matches bury the exact tag
-      // hits ("alakasız sonuçlar üstte"). Multi-word concept queries keep
-      // the v1.5.364 CLIP-first ordering (where tag search is the noisy one).
+      // v1.5.392 — short 1-word query = exact-tag intent → TAG matches lead,
+      // CLIP fills below; 2+ word concept query → CLIP-first (v1.5.364).
       const _wc = String(q||'').trim().split(/\s+/).filter(Boolean).length;
       photos = (_wc >= 2)
         ? [...semanticUnique, ...tagResults]
