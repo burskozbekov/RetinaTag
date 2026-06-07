@@ -8358,7 +8358,15 @@ $('searchInput').oninput=e=>{
     // was getting machine-translated into a concept, and the grid filled with
     // landscapes/adventure shots ("Buğra yazınca bunlar niye çıkıyor"). So
     // only augment when the primary result set is thin.
-    const _augment = tagResults.length < 12;
+    // v1.5.399 — augment ALSO requires ≥2 words. A single token is fully
+    // served by the precise gate (1:1 dictionary + exact tag token); if that
+    // found nothing, the token is a name / unknown word (e.g. "ayşe" — no such
+    // person, no tag) and CLIP/translation would only invent random
+    // "woman/person" look-alikes (that was the bogus 402). Precise: a single
+    // no-match token → honest "No results". Multi-word concept phrases
+    // ("sahilde gün batımı") still augment for recall.
+    const _qWordCount = String(q||'').trim().split(/\s+/).filter(Boolean).length;
+    const _augment = tagResults.length < 12 && _qWordCount >= 2;
 
     // 2. Translation — only when the tag/person search came back thin.
     let translated=null;
