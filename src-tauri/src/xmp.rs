@@ -566,7 +566,22 @@ pub fn read_xmp_sidecar(photo_path: &str) -> Result<Option<XmpRead>> {
     };
     let xml = std::fs::read_to_string(&path)
         .with_context(|| format!("read XMP sidecar {}", path.display()))?;
-    parse_xmp_xml(&xml).map(Some)
+    let mut out = parse_xmp_xml(&xml)?;
+    // v1.5.394 — Drop catalog/stock keyword DUMPS. A sidecar carrying a huge
+    // keyword list is not this photo's own keywords — we observed 192-584
+    // identical keywords shared across unrelated photos (coffee, soldier,
+    // airplane…), and importing them polluted every search (a sepia t-shirt
+    // matched "coffee"). Real per-photo sidecars carry a handful, so a set
+    // larger than the cap is treated as a dump: its keywords are discarded
+    // (description / rating / face regions are still kept). This is the single
+    // chokepoint for every sidecar caller and stops a rescan re-adding the
+    // 152977 junk tags that were cleaned out of the DB.
+    const MAX_SIDECAR_KEYWORDS: usize = 25;
+    if out.keywords.len() > MAX_SIDECAR_KEYWORDS {
+        eprintln!("[xmp] dropping {}-keyword dump sidecar: {}", out.keywords.len(), path.display());
+        out.keywords.clear();
+    }
+    Ok(Some(out))
 }
 
 /// Parse an XMP XML string (sidecar or embedded). Public so callers

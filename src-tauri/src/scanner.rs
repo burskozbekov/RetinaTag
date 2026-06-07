@@ -672,6 +672,10 @@ fn scan_folder_parallel(
                         // fails. Failures are still soft; a malformed
                         // sidecar shouldn't abort the scan tx.
                         if let Ok(Some(xmp)) = crate::xmp::read_xmp_sidecar(&p.path) {
+                            // v1.5.394 — keyword DUMPS are capped centrally in
+                            // read_xmp_sidecar (a >25-keyword sidecar is a
+                            // catalog dump, not this photo's keywords), so by
+                            // here xmp.keywords is already empty for dumps.
                             if !xmp.keywords.is_empty() {
                                 // v1.5.111 — case-insensitive dup guard
                                 // (see lib.rs comment for rationale).
