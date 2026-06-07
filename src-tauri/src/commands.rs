@@ -426,6 +426,41 @@ pub async fn search_photos(
         out
     };
 
+    // ── PRECISE GATE (v1.5.397) ──────────────────────────────────────────
+    // Precise-by-default. For a single-concept plain query, match the query
+    // (and its 1:1 dictionary translation — kedi→cat, kahve→coffee, NOT the
+    // broad synonym fan-out) as TAG TOKENS via FTS. Token match is
+    // word-level: "cat" hits the tag "cat" or "cat toy" but never "category";
+    // "coffee" hits "coffee" / "coffee shop". If ANY precise match exists,
+    // return ONLY those (apply_post ranks exact-first). The broad recall
+    // channels further below (synonym fan-out, path/description flood, CLIP,
+    // fuzzy) run ONLY when this precise set is empty — so a real concept query
+    // with no matching tag still works, but a tag query is never diluted.
+    let _single_concept = trimmed.split_whitespace().count() == 1
+        || quick_translate_contextual(&trimmed).is_some();
+    if !has_advanced_syntax && _single_concept {
+        let mut precise_terms: Vec<String> = vec![trimmed.clone()];
+        if let Some((en, _ctx)) = quick_translate_contextual(&trimmed) {
+            if !precise_terms.iter().any(|t| t.eq_ignore_ascii_case(en)) {
+                precise_terms.push(en.to_string());
+            }
+        }
+        // OR the alternatives (original + translation are the SAME concept in
+        // two languages); each is a quoted FTS token so dots/punctuation in a
+        // tag can't trigger operator parsing.
+        let or_query = precise_terms.iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let precise = {
+            let conn = state.db.lock().map_err(|_| "db lock")?;
+            db::search_photos_fts(&conn, &or_query).unwrap_or_default()
+        };
+        if !precise.is_empty() {
+            return Ok(apply_post(precise, &parsed));
+        }
+    }
+
     // Fast path for queries that ONLY use operators/fields without any
     // free-text terms (eg. `year:2020 fav:true`). FTS isn't needed —
     // pull a wide pool and filter server-side.
@@ -1322,7 +1357,15 @@ fn normalize_date_for_compare(s: &str) -> String {
 fn relevance_score(p: &PhotoSummary, q: &ParsedQuery) -> i32 {
     let lower_path = p.path.to_lowercase();
     let lower_tags: Vec<String> = p.tags.iter().map(|t| t.to_lowercase()).collect();
-    let mut score = 0i32;
+    // v1.5.392 — MATCH QUALITY must DOMINATE. Previously the additive
+    // tag_count (+0..4) / favorite (+1) / rating (+0..5) bonuses (up to +10)
+    // could outweigh the match signal itself (an exact tag match is only
+    // 6-8), so a loosely-matching photo (substring=4) that happened to be a
+    // many-tagged 5★ favorite ranked ABOVE an exact-tag match — surfacing as
+    // "alakasız sonuçlar üstte". Fix: match_score is the PRIMARY key (×100);
+    // the describe/favorite/rating bonus is a small tiebreaker (0-10) that
+    // only orders photos WITHIN the same match tier, never across tiers.
+    let mut match_score = 0i32;
     // Each must_terms group: best score among its variants wins. Multiple
     // groups stack additively (a photo matching both "cat" and "beach"
     // outranks one with just "cat").
@@ -1339,20 +1382,20 @@ fn relevance_score(p: &PhotoSummary, q: &ParsedQuery) -> i32 {
                 else { 0 };
             if s > best { best = s; }
         }
-        score += best;
+        match_score += best;
     }
     for ph in &q.phrases {
         let lt = ph.to_lowercase();
-        if lower_tags.iter().any(|t| t == &lt) { score += 8; }
-        else if lower_tags.iter().any(|t| t.contains(&lt)) { score += 5; }
-        else if lower_path.contains(&lt) { score += 1; }
+        if lower_tags.iter().any(|t| t == &lt) { match_score += 8; }
+        else if lower_tags.iter().any(|t| t.contains(&lt)) { match_score += 5; }
+        else if lower_path.contains(&lt) { match_score += 1; }
     }
-    // Lots of tags = better-described photo, slight tiebreaker boost.
-    score += (p.tag_count.min(20) / 5) as i32;
-    // Recency tiebreaker via favorite/rating.
-    if p.favorite { score += 1; }
-    score += p.rating.max(0).min(5);
-    score
+    // Tiebreaker (0-10): better-described / favorite / rating. Capped well
+    // under 100 so it only reorders photos within one match tier.
+    let mut tiebreak = (p.tag_count.min(20) / 5) as i32; // 0-4
+    if p.favorite { tiebreak += 1; }
+    tiebreak += p.rating.max(0).min(5); // 0-5
+    match_score * 100 + tiebreak
 }
 
 /// Re-rank and filter search results using context tags.
@@ -10188,8 +10231,12 @@ pub async fn semantic_search(
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit.max(1).min(200));
 
-        // Filter: only show results above a reasonable threshold
-        let threshold = 0.20f32;
+        // Filter: only show results above a reasonable threshold.
+        // v1.5.393 — raised 0.20 → 0.24. At 0.20 weak look-alikes leaked in
+        // (a sepia t-shirt scored ~0.2 for "coffee"); 0.24 keeps genuine
+        // visual matches while cutting the noise. CLIP is now also a
+        // tag-sparse fallback (frontend), so a tighter bar is safe.
+        let threshold = 0.24f32;
         let top_ids: Vec<i64> = scored
             .into_iter()
             .filter(|(_, s)| *s >= threshold)
