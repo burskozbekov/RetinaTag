@@ -346,6 +346,49 @@ pub fn init_db(path: &str) -> Result<Connection> {
         let _ = set_setting(&conn, "photos_fts_built_v1", "1");
     }
 
+    // ── One-time FTS tokenizer upgrade: diacritic-insensitive tags + descs ──
+    // tags_fts and desc_fts were created with the DEFAULT unicode61 tokenizer,
+    // which preserves diacritics — so "kopek" could not match a tag "köpek"
+    // ("cocuk" ≠ "çocuk", "agac" ≠ "ağaç", and Turkish descriptions likewise).
+    // photos_fts already uses 'remove_diacritics 2'; this brings tags + descs
+    // to parity so accent-insensitive search works everywhere. FTS5 can't ALTER
+    // a tokenizer, so DROP + recreate + rebuild. Guarded by a flag and wrapped
+    // so a failure can NEVER block app startup (old FTS keeps working; retried
+    // next launch).
+    let fts_diacritics_done = get_setting(&conn, "fts_diacritics_v1")
+        .ok().flatten().is_some();
+    if !fts_diacritics_done {
+        let migrated: rusqlite::Result<()> = conn.execute_batch(
+            "DROP TABLE IF EXISTS tags_fts;
+             CREATE VIRTUAL TABLE tags_fts USING fts5(
+                 tag,
+                 photo_id UNINDEXED,
+                 content = 'tags',
+                 content_rowid = 'id',
+                 tokenize = 'unicode61 remove_diacritics 2'
+             );
+             INSERT INTO tags_fts(tags_fts) VALUES('rebuild');
+             DROP TABLE IF EXISTS desc_fts;
+             CREATE VIRTUAL TABLE desc_fts USING fts5(
+                 description,
+                 content = '',
+                 tokenize = 'unicode61 remove_diacritics 2'
+             );
+             INSERT INTO desc_fts(rowid, description)
+             SELECT id, description FROM photos
+             WHERE description IS NOT NULL AND description != '';"
+        );
+        match migrated {
+            Ok(_) => {
+                eprintln!("[db] FTS diacritics upgrade: tags_fts + desc_fts rebuilt with remove_diacritics");
+                let _ = set_setting(&conn, "fts_diacritics_v1", "1");
+            }
+            Err(e) => {
+                eprintln!("[db] FTS diacritics upgrade FAILED (retry next launch): {}", e);
+            }
+        }
+    }
+
     // ── CLIP text-embedding cache ──────────────────────────────────────────
     // Encoding a query string through the CLIP text tower is expensive on CPU
     // (~50-200 ms on tiny, 300-800 ms on base). Same user types "beach
