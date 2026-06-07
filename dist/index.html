@@ -13480,14 +13480,21 @@ document.addEventListener('keydown',e=>{
   const lb=$('lightbox');
   const _lbOpen = lb && lb.style.display === 'flex';
   if (!_lbOpen) {
-    const _ae = document.activeElement;
-    const _typing = _ae && (
-      _ae.tagName === 'INPUT' ||
-      _ae.tagName === 'TEXTAREA' ||
-      _ae.isContentEditable
+    // v1.5.398 — guard on BOTH document.activeElement AND e.target, plus the
+    // open search overlay. The Spotlight search re-parents its <input> into a
+    // backdrop on open, which briefly drops activeElement back to <body>; a
+    // Backspace typed in that window slipped past an activeElement-only check
+    // and reached the global Delete/Backspace handler → deleteCurrentPhoto
+    // fired and the search overlay vanished while the user was just editing
+    // their query. e.target is the element that actually received the key, so
+    // it stays correct even mid-DOM-move.
+    const _isEditable = el => !!el && (
+      el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
     );
+    const _typing = _isEditable(document.activeElement) || _isEditable(e.target);
+    const _searchOpen = !!document.querySelector('.search-box.focused');
     const _hasMod = e.ctrlKey || e.metaKey || e.altKey;
-    if (_typing && !_hasMod) return;
+    if ((_typing || _searchOpen) && !_hasMod) return;
   }
   // Lightbox navigation takes priority
   if(lb&&lb.style.display==='flex'){
