@@ -8351,11 +8351,20 @@ $('searchInput').oninput=e=>{
     let tagResults=[...photos];
     let tagCount=tagResults.length;
 
-    // 2. Always try translation (for any language, not just non-ASCII)
+    // v1.5.396 — AUGMENTATION DISCIPLINE. Translation + CLIP + AI-expand are
+    // FALLBACKS for when the tag/person search came back THIN. When the
+    // primary search already returned plenty (exact person name "Buğra" →
+    // 1275, or "kahve" → 85 coffee), augmenting only injects noise — a name
+    // was getting machine-translated into a concept, and the grid filled with
+    // landscapes/adventure shots ("Buğra yazınca bunlar niye çıkıyor"). So
+    // only augment when the primary result set is thin.
+    const _augment = tagResults.length < 12;
+
+    // 2. Translation — only when the tag/person search came back thin.
     let translated=null;
     try{
       $('searchHint').textContent=tagCount>0?`${tagCount} results`:'🔄 Translating...';
-      translated=await invoke('translate_for_clip',{query:q});
+      if(_augment) translated=await invoke('translate_for_clip',{query:q});
       if (mySeq !== _searchSeq) return;
       if(translated&&translated.toLowerCase()===q.toLowerCase()) translated=null; // same word
     }catch(_){}
@@ -8382,15 +8391,17 @@ $('searchInput').oninput=e=>{
       }
     }
 
-    // 3. Semantic search (CLIP) — always use English query
+    // 3. Semantic search (CLIP) — only when the tag/person search was thin.
     let semanticUnique=[];
-    try{
-      const clipQuery=translated||q;
-      const semResults=await invoke('semantic_search',{query:clipQuery,tier:_clipTierSelected,limit:50});
-      if (mySeq !== _searchSeq) return;
-      const tagIds=new Set(tagResults.map(p=>p.id));
-      semanticUnique=semResults.filter(p=>!tagIds.has(p.id));
-    }catch(_){}
+    if(_augment){
+      try{
+        const clipQuery=translated||q;
+        const semResults=await invoke('semantic_search',{query:clipQuery,tier:_clipTierSelected,limit:50});
+        if (mySeq !== _searchSeq) return;
+        const tagIds=new Set(tagResults.map(p=>p.id));
+        semanticUnique=semResults.filter(p=>!tagIds.has(p.id));
+      }catch(_){}
+    }
 
     // 4. Merge all results & show immediately. v1.5.55 — flag the
     // CLIP-only photos with `_visualMatch=true` so the card render can
@@ -8452,7 +8463,9 @@ $('searchInput').oninput=e=>{
     }
 
     // 5. AI search expansion (background, 2nd pass — smarter results)
-    if(total<20){
+    // v1.5.396 — only when thin (augmentation discipline; don't dilute a
+    // query that already has plenty of tag/person matches).
+    if(_augment && total<20){
       try{
         $('searchHint').textContent+=' · 🤖...';
         const aiTags=await invoke('ai_search_expand',{query:q});
