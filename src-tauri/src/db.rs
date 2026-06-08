@@ -216,6 +216,23 @@ pub fn init_db(path: &str) -> Result<Connection> {
     // Migrate: rating & favorites system
     conn.execute_batch("ALTER TABLE photos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;").ok();
     conn.execute_batch("ALTER TABLE photos ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;").ok();
+    // v1.5.401 — faces_scanned marker. count_unscanned_faces / face detection
+    // used to treat "no face_region" as "unscanned", so the ~71k photos that
+    // genuinely have NO face (landscapes/food/docs) were re-detected on every
+    // run and the scan never terminated (the 149k/70k runaway, 0 detected).
+    // This column is the real progress marker: detect_faces_background /
+    // scan_and_cluster_faces set it for every photo they process (face or not).
+    // New photos default 0 → scanned once on the next run.
+    conn.execute_batch("ALTER TABLE photos ADD COLUMN faces_scanned INTEGER NOT NULL DEFAULT 0;").ok();
+    // One-time backfill: the existing library has already been scanned
+    // extensively (the runaway processed ~150k photo-passes), so mark all
+    // current photos scanned to stop the loop immediately. Flag-guarded → runs
+    // once; afterwards only newly-imported photos (default 0) get scanned.
+    if get_setting(&conn, "faces_scanned_backfill_v1").ok().flatten().is_none() {
+        let n = conn.execute("UPDATE photos SET faces_scanned = 1", []).unwrap_or(0);
+        eprintln!("[db] faces_scanned backfill: marked {} existing photos scanned", n);
+        let _ = set_setting(&conn, "faces_scanned_backfill_v1", "1");
+    }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);").ok();
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_photos_favorite ON photos(favorite);").ok();
 

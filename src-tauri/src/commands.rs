@@ -8987,7 +8987,15 @@ pub async fn scan_and_cluster_faces(
             // Check if already has faces
             let already_done = {
                 let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+                // v1.5.401 — a photo already face-scanned is "done" even if it
+                // has NO face; otherwise the 71k faceless photos got re-detected
+                // on every cluster-open (same runaway class as the main scan).
                 db::photo_has_faces(&conn, *photo_id)
+                    || conn.query_row(
+                        "SELECT faces_scanned FROM photos WHERE id = ?1",
+                        rusqlite::params![*photo_id],
+                        |r| r.get::<_, i64>(0),
+                    ).unwrap_or(0) == 1
             };
 
             if already_done {
@@ -9068,6 +9076,15 @@ pub async fn scan_and_cluster_faces(
                 if !embedding.is_empty() {
                     all_embeddings.push((face_id, *photo_id, embedding));
                 }
+            }
+            // v1.5.401 — mark scanned after detection so a future cluster-open
+            // (or face scan) doesn't re-detect this photo, face or not.
+            {
+                let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = conn.execute(
+                    "UPDATE photos SET faces_scanned = 1 WHERE id = ?1",
+                    rusqlite::params![*photo_id],
+                );
             }
         }
 
@@ -9196,7 +9213,7 @@ pub async fn count_unscanned_faces(
         if let Some(ym) = &ym_filter {
             let sql = format!(
                 "SELECT COUNT(*) FROM photos
-                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                 WHERE faces_scanned = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?1",
                 art_sql
@@ -9207,7 +9224,7 @@ pub async fn count_unscanned_faces(
             let id_list: String = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT COUNT(*) FROM photos
-                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                 WHERE faces_scanned = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND id IN ({})",
                 art_sql, id_list
@@ -9226,7 +9243,7 @@ pub async fn count_unscanned_faces(
             // that exact directory.
             let sql = format!(
                 "SELECT COUNT(*) FROM photos
-                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                 WHERE faces_scanned = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND folder = ?1",
                 art_sql
@@ -9236,7 +9253,7 @@ pub async fn count_unscanned_faces(
         } else {
             let sql = format!(
                 "SELECT COUNT(*) FROM photos
-                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                 WHERE faces_scanned = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})",
                 art_sql
             );
@@ -9338,7 +9355,7 @@ pub async fn detect_faces_background(
             // 'YYYY-MM-DDTHH:MM:SSZ' shapes correctly.
             let sql = format!(
                 "SELECT id, path FROM photos
-                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                 WHERE faces_scanned = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?1
                  ORDER BY CASE WHEN LOWER(filename) LIKE '%.jpg' OR LOWER(filename) LIKE '%.jpeg' OR LOWER(filename) LIKE '%.png' THEN 0 ELSE 1 END, id ASC
@@ -9360,7 +9377,7 @@ pub async fn detect_faces_background(
             let id_list: String = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT id, path FROM photos
-                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                 WHERE faces_scanned = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND id IN ({})
                  ORDER BY CASE WHEN LOWER(filename) LIKE '%.jpg' OR LOWER(filename) LIKE '%.jpeg' OR LOWER(filename) LIKE '%.png' THEN 0 ELSE 1 END, id ASC
@@ -9377,7 +9394,7 @@ pub async fn detect_faces_background(
             // v1.5.45 — STRICT folder match (see count_unscanned_faces note).
             let sql = format!(
                 "SELECT id, path FROM photos
-                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                 WHERE faces_scanned = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND folder = ?1
                  ORDER BY CASE WHEN LOWER(filename) LIKE '%.jpg' OR LOWER(filename) LIKE '%.jpeg' OR LOWER(filename) LIKE '%.png' THEN 0 ELSE 1 END, id ASC
@@ -9393,7 +9410,7 @@ pub async fn detect_faces_background(
         } else {
             let sql = format!(
                 "SELECT id, path FROM photos
-                 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)
+                 WHERE faces_scanned = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                  ORDER BY CASE WHEN LOWER(filename) LIKE '%.jpg' OR LOWER(filename) LIKE '%.jpeg' OR LOWER(filename) LIKE '%.png' THEN 0 ELSE 1 END, id ASC
                  LIMIT 500",
@@ -9410,6 +9427,22 @@ pub async fn detect_faces_background(
 
     if photos.is_empty() {
         return Ok((0, 0));
+    }
+
+    // v1.5.401 — mark this batch as face-scanned UP FRONT. faces_scanned is
+    // the real progress marker; face_regions only records photos that
+    // actually HAVE a face. Without this, the ~71k photos with NO face stayed
+    // "unscanned" forever and the loop re-processed them every run (the
+    // 149k/70k runaway, 0 detected). Marking before detection guarantees the
+    // scan advances and terminates; detection below still inserts face_regions
+    // for any faces it finds.
+    {
+        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let ids: String = photos.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>().join(",");
+        let _ = conn.execute(
+            &format!("UPDATE photos SET faces_scanned = 1 WHERE id IN ({})", ids),
+            [],
+        );
     }
 
     let total_photos = photos.len();
