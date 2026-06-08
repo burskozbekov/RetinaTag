@@ -8121,6 +8121,11 @@ function _hideRefineBar(){
 function _refreshRefineBar(q){
   const bar = document.getElementById('refineBar');
   if(!bar) return;
+  // v1.5.400 — Mac-parity: the suggestion chips under the search bar are
+  // disabled per user request ("öneriler çıkmasın"). Always hide and stop
+  // here; the chip-building code below is left intact but unreachable.
+  _hideRefineBar();
+  return;
   if(!Array.isArray(photos) || photos.length < 5){ _hideRefineBar(); return; }
   // Tokenise the query so we don't suggest words already in it.
   const queryTokens = new Set(

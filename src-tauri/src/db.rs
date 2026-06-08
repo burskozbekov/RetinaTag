@@ -32,6 +32,11 @@ pub fn init_db(path: &str) -> Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_photos_folder   ON photos(folder);
         CREATE INDEX IF NOT EXISTS idx_photos_status   ON photos(status);
+        -- v1.5.400 (Mac-parity) covering index for get_folders_with_status:
+        -- WHERE private=0 GROUP BY folder + SUM tagged. Column order
+        -- (private, folder, status) lets the planner serve the whole query
+        -- from the index with no temp b-tree (Mac measured 520ms to 36ms).
+        CREATE INDEX IF NOT EXISTS idx_photos_folder_status ON photos(private, folder, status);
         CREATE INDEX IF NOT EXISTS idx_photos_hash     ON photos(hash);
         CREATE INDEX IF NOT EXISTS idx_photos_provider ON photos(provider_used);
 
