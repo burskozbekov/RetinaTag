@@ -5364,6 +5364,27 @@ pub async fn get_smart_collection_photos(
     .map_err(|e| e.to_string())?
 }
 
+// v1.5.407 — View a MANUAL (non-smart) collection's photos. Manual collections
+// store explicit membership in the collection_photos junction; previously no
+// command exposed it, so clicking a manual collection in the sidebar did
+// nothing (loadCollectionPhotos only handled the smart branch). Reuses
+// get_collection_photo_ids + get_photos_by_ids (the latter already filters
+// private = 0, so vaulted photos never leak into a collection view).
+#[tauri::command]
+pub async fn get_collection_photos(
+    collection_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PhotoSummary>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|_| "db lock".to_string())?;
+        let ids = db::get_collection_photo_ids(&conn, collection_id).map_err(|e| e.to_string())?;
+        db::get_photos_by_ids(&conn, &ids).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ── 7. EXIF / GPS ───────────────────────────────────────────────────────────
 
 #[tauri::command]

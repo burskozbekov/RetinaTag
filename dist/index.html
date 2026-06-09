@@ -4193,6 +4193,18 @@ async function loadCollectionPhotos(col){
       if(curView!=='gallery') switchToView('gallery');
       renderGrid();
     }catch(e){toast('Error: '+e,'error')}
+  } else {
+    // v1.5.407 — Manual (non-smart) collection: fetch the explicitly-added
+    // photos via the collection_photos junction. Before this branch existed,
+    // clicking a manual collection did nothing (you could add photos to it but
+    // never view them).
+    try{
+      const results=await invoke('get_collection_photos',{collectionId:col.id});
+      photos=results;totalPhotos=results.length;
+      $('photoCount').textContent=totalPhotos+' photos in "'+col.name+'"';
+      if(curView!=='gallery') switchToView('gallery');
+      renderGrid();
+    }catch(e){toast('Error: '+e,'error')}
   }
 }
 

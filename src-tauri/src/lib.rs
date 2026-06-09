@@ -1245,6 +1245,7 @@ pub fn run() {
             commands::add_to_collection,
             commands::remove_from_collection,
             commands::get_smart_collection_photos,
+            commands::get_collection_photos,
             // 7. EXIF / GPS
             commands::get_photo_exif,
             commands::get_gps_photos,
