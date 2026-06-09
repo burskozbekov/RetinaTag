@@ -7597,6 +7597,11 @@ $('btnScanFacesAll').onclick=async()=>{
       $('progressSub').textContent = `0 / ${totalUnscanned.toLocaleString()} unscanned · starting…`;
     }
 
+    // v1.5.404 — Resilient long scan: a single batch error no longer aborts
+    // the whole multi-hour recovery scan. Skip the failed batch and continue;
+    // only stop after several CONSECUTIVE failures (a real, persistent problem
+    // like a DB lock), not one transient hiccup at batch N of ~140.
+    let consecBatchErrors = 0;
     while(true) {
       if (window._faceScanStopped) break;
       batchNum++;
@@ -7703,8 +7708,14 @@ $('btnScanFacesAll').onclick=async()=>{
       });
 
       let result;
-      try { result = await invoke('detect_faces_background', _scope); }
-      catch(e) { toast('Face detection: ' + e, 'warn'); unlisten(); break; }
+      try { result = await invoke('detect_faces_background', _scope); consecBatchErrors = 0; }
+      catch(e) {
+        unlisten();
+        consecBatchErrors++;
+        if (consecBatchErrors >= 3) { toast('Face detection stopped after repeated errors: ' + e, 'error'); break; }
+        toast('Batch ' + batchNum + ' hiccup — skipping, scan continues… (' + e + ')', 'warn');
+        continue;
+      }
       unlisten();
 
       const [photosProcessed, facesFound] = result;
