@@ -4187,6 +4187,10 @@ async function loadCollectionPhotos(col){
       const results=await invoke('get_smart_collection_photos',{rulesJson:col.rules_json});
       photos=results;totalPhotos=results.length;
       $('photoCount').textContent=totalPhotos+' photos in "'+col.name+'"';
+      // v1.5.406 — renderGrid() paints into #gridWrap, which is display:none
+      // under the Timeline/Map/Calendar views. Switch to Gallery first or the
+      // collection's photos render invisibly behind the active view.
+      if(curView!=='gallery') switchToView('gallery');
       renderGrid();
     }catch(e){toast('Error: '+e,'error')}
   }
@@ -21343,7 +21347,12 @@ function filterFavorites(){
   $('ratingFilter').value='fav';curRating='fav';
   document.querySelectorAll('.folder-item').forEach(f=>f.classList.remove('active'));
   $('favFilterItem').classList.add('active');
-  curFolder='';loadPhotos();
+  curFolder='';
+  // v1.5.406 — show favorites as a Gallery grid, not the Timeline dial. When
+  // clicked from a non-Gallery view loadPhotos() would route the result through
+  // that view's renderer (timeline/calendar), so the favorites never appeared.
+  if(curView!=='gallery') switchToView('gallery');
+  loadPhotos();
 }
 
 // ── "On This Day" memories ───────────────────────────────────────────────────
@@ -21380,6 +21389,9 @@ async function filterOnThisDay(){
     totalPhotos=photos.length;
     // Group header hint: years represented.
     const years=[...new Set(rows.map(r=>r.date.slice(0,4)))].sort().reverse();
+    // v1.5.406 — same as Favorites/Collections: jump to Gallery so the
+    // On-This-Day grid is visible when triggered from Timeline/Map/Calendar.
+    if(curView!=='gallery') switchToView('gallery');
     renderGrid();
     const suffix=years.length? ` (${years.join(', ')})` : '';
     $('photoCount').textContent=`On this day · ${photos.length} photo${photos.length===1?'':'s'}${suffix}`;
