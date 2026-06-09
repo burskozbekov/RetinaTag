@@ -7884,6 +7884,17 @@ function setPersonFilter(p){
   const xBtn=$('searchClearX'); if(xBtn) xBtn.style.display='none';
   const helpBtn=$('searchHelpBtn'); if(helpBtn) helpBtn.style.display='block';
   $('searchHint').textContent='';
+  // v1.5.405 — A person can be picked from the sidebar while a non-Gallery
+  // view is active (Timeline dial, Map, Calendar, Dashboard…). loadPhotos()
+  // routes its render by curView, so without switching first the person's
+  // photos got funnelled into the timeline/calendar instead of a plain grid.
+  // Jump to the Gallery tab (through the normal view-tab click path, exactly
+  // like _selectMapRegion does) so the result is a clean grid of ONLY that
+  // person's photos. No-op when already in Gallery.
+  if (curView !== 'gallery') {
+    const gtab = document.querySelector('.view-tab[data-view="gallery"]');
+    if (gtab && typeof gtab.click === 'function') gtab.click();
+  }
   loadPhotos();
 }
 function clearPersonFilter(){
