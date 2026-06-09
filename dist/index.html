@@ -132,6 +132,10 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
 .folder-progress{flex-basis:100%;height:2px;background:var(--card2);border-radius:1px;margin-top:4px;overflow:hidden;order:10}
 .folder-progress-fill{height:100%;background:var(--red-dark);transition:width .3s}
 .folder-progress-fill.done{background:#2ea043}
+/* v1.5.403 — year-group header rows in the folder tree */
+.folder-year{color:var(--text2)}
+.folder-year:hover{background:var(--card)}
+.folder-year .folder-count{background:var(--card)}
 
 /* Collections in sidebar */
 .collection-item{padding:6px 10px;border-radius:var(--radius-sm);cursor:pointer;display:flex;
@@ -4000,47 +4004,92 @@ async function refreshStats(){
 }
 
 // ── Folders ───────────────────────────────────────────────────────────────────
+// v1.5.403 — Folder sidebar is now a YEAR-grouped collapsible tree. The
+// library is organized D:\…\YYYY\MM-Month, so the old flat list rendered the
+// leaf only ("08-August") — which repeats once per year, producing dozens of
+// indistinguishable rows. Clicking one silently scoped the whole
+// Gallery/Timeline to a single month-of-one-year (e.g. 2016\08-August), which
+// read to the user as "Timeline broke". Grouping by year restores a real
+// hierarchy, keeps the panel compact (one row per year; expand to drill in),
+// shows which year every month belongs to, and keeps "All Photos" pinned at
+// the very top instead of buried 100 rows down a 300px scroll box.
+let _openFolderYears=new Set(), _lastFolders=null, _foldersInit=false;
 async function refreshFolders(){
   try{
     // Prefer the status-aware endpoint; fall back to plain for older binaries.
     let folders;
     try{ folders=await invoke('get_folders_with_status'); }
     catch(_){ const plain=await invoke('get_folders'); folders=plain.map(([p,c])=>[p,c,0]); }
-    const list=$('foldersList');
-    const allItem=list.querySelector('[data-folder=""]');
-    list.innerHTML='';list.appendChild(allItem);
-    allItem.classList.toggle('active',curFolder===''&&curRating!=='fav');
-    allItem.onclick=()=>{curRating='';$('ratingFilter').value='';selectFolder('');};
-    // Re-add favorites item
-    const favItem=document.createElement('div');
-    favItem.className='folder-item'+(curRating==='fav'?' active':'');
-    favItem.id='favFilterItem';
-    favItem.innerHTML='<span style="font-size:14px;flex-shrink:0">&#9733;</span><span class="folder-name">Favorites</span>';
-    favItem.onclick=()=>filterFavorites();
-    list.appendChild(favItem);
-    for(const[path,count,tagged]of folders){
-      const name=path.split(/[\\/]/).pop()||path;
-      const item=document.createElement('div');
-      item.className='folder-item'+(curFolder===path?' active':'');
-      item.dataset.folder=path;
-      const pct=count>0?Math.round((tagged/count)*100):0;
-      const remaining=count-tagged;
-      const tooltip=remaining>0?`${tagged}/${count} tagged (${remaining} pending)`:`All ${count} tagged`;
-      // v1.4.63 — tooltip hints at right-click. Sidebar folder items had no
-      // context menu, so "how do I open this folder in Explorer?" required
-      // opening a photo first and using its context menu. Adding a direct
-      // right-click saves that detour.
-      item.innerHTML=`<svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-        <span class="folder-name" title="${path}\n${tooltip}\n\nRight-click: reveal in Explorer">${name}</span><span class="folder-count">${count}</span>
-        <div class="folder-progress" title="${tooltip}"><div class="folder-progress-fill${pct===100?' done':''}" style="width:${pct}%"></div></div>`;
-      item.onclick=()=>selectFolder(path);
-      item.oncontextmenu=(ev)=>{
-        ev.preventDefault(); ev.stopPropagation();
-        invoke('open_in_explorer',{path}).catch(err=>toast(String(err),'error'));
-      };
-      list.appendChild(item);
-    }
+    _lastFolders=folders;
+    renderFolders(folders);
   }catch(e){}
+}
+function _mkFolderRow(path,count,tagged,leaf,indent){
+  const item=document.createElement('div');
+  item.className='folder-item'+(curFolder===path?' active':'');
+  item.dataset.folder=path;
+  const pct=count>0?Math.round((tagged/count)*100):0;
+  const remaining=count-tagged;
+  const tooltip=remaining>0?`${tagged}/${count} tagged (${remaining} pending)`:`All ${count} tagged`;
+  // Inside a year group the year is already the header, so drop the leading
+  // "MM-" and show just the month name ("08-August" → "August").
+  const disp=indent?String(leaf).replace(/^\d{2}-/,''):leaf;
+  // v1.4.63 — tooltip hints at the right-click "reveal in Explorer".
+  item.innerHTML=`<svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+    <span class="folder-name" title="${path}\n${tooltip}\n\nRight-click: reveal in Explorer">${disp}</span><span class="folder-count">${count}</span>
+    <div class="folder-progress" title="${tooltip}"><div class="folder-progress-fill${pct===100?' done':''}" style="width:${pct}%"></div></div>`;
+  if(indent)item.style.paddingLeft='24px';
+  item.onclick=()=>selectFolder(path);
+  item.oncontextmenu=(ev)=>{ ev.preventDefault(); ev.stopPropagation(); invoke('open_in_explorer',{path}).catch(err=>toast(String(err),'error')); };
+  return item;
+}
+function renderFolders(folders){
+  const list=$('foldersList'); if(!list)return;
+  folders=folders||[];
+  // Preserve the three pinned items (All Photos / Favorites / On This Day)
+  // across the rebuild rather than recreating them.
+  const allItem=list.querySelector('[data-folder=""]');
+  const favItem=document.getElementById('favFilterItem');
+  const otdItem=document.getElementById('onThisDayItem');
+  list.innerHTML='';
+  if(allItem){
+    allItem.classList.toggle('active',curFolder===''&&curRating!=='fav');
+    allItem.onclick=()=>{curRating='';const rf=$('ratingFilter');if(rf)rf.value='';selectFolder('');};
+    list.appendChild(allItem);
+  }
+  if(favItem){ favItem.classList.toggle('active',curRating==='fav'); list.appendChild(favItem); }
+  if(otdItem){ list.appendChild(otdItem); }
+  // Group folders by their 4-digit year component (the one nearest the leaf).
+  const years=new Map(); const others=[];
+  for(const[path,count,tagged]of folders){
+    const parts=String(path).split(/[\\/]/).filter(Boolean);
+    const leaf=parts[parts.length-1]||path;
+    let yr=null;
+    for(let i=parts.length-1;i>=0;i--){ if(/^(19|20)\d{2}$/.test(parts[i])){ yr=parts[i]; break; } }
+    if(yr){
+      if(!years.has(yr))years.set(yr,{total:0,months:[]});
+      const g=years.get(yr); g.total+=count; g.months.push([path,count,tagged,leaf]);
+    } else { others.push([path,count,tagged,leaf]); }
+  }
+  const yrKeys=[...years.keys()].sort((a,b)=>b.localeCompare(a)); // newest first
+  // First paint: open the newest year so the panel isn't just bare numbers.
+  if(!_foldersInit){ _foldersInit=true; if(yrKeys.length)_openFolderYears.add(yrKeys[0]); }
+  // Always reveal the year that holds the currently-selected folder.
+  if(curFolder){ const m=String(curFolder).match(/(19|20)\d{2}/); if(m)_openFolderYears.add(m[0]); }
+  for(const yr of yrKeys){
+    const g=years.get(yr); const open=_openFolderYears.has(yr);
+    const hdr=document.createElement('div');
+    hdr.className='folder-item folder-year';
+    hdr.innerHTML=`<span style="font-size:9px;width:10px;flex-shrink:0;display:inline-block;transform:rotate(${open?90:0}deg);transition:transform .15s">▶</span>
+      <span class="folder-name" style="font-weight:600">${yr}</span><span class="folder-count">${g.total}</span>`;
+    hdr.onclick=()=>{ if(_openFolderYears.has(yr))_openFolderYears.delete(yr); else _openFolderYears.add(yr); renderFolders(_lastFolders); };
+    list.appendChild(hdr);
+    if(!open)continue;
+    g.months.sort((a,b)=>String(b[3]).localeCompare(String(a[3]))); // Dec→Jan within the year
+    for(const[path,count,tagged,leaf]of g.months) list.appendChild(_mkFolderRow(path,count,tagged,leaf,true));
+  }
+  // Named, non-year folders (event folders) listed flat at the bottom.
+  for(const[path,count,tagged,leaf]of others) list.appendChild(_mkFolderRow(path,count,tagged,leaf,false));
 }
 function selectFolder(f){
   curFolder=f;
@@ -7197,17 +7246,27 @@ $('btnStopTag').onclick=async()=>{
 // Re-tag All button removed — handler disabled to prevent accidental tag deletion
 
 // ── Identify Faces button ────────────────────────────────────────────────────
+// v1.5.403 — Short, year-aware label for a folder path. For the date-organized
+// library (…\YYYY\MM-Month) this returns "2016 / August" instead of the bare
+// "08-August", which is ambiguous across years.
+function _folderShortLabel(path){
+  const parts=String(path).split(/[\\/]/).filter(Boolean);
+  const leaf=parts[parts.length-1]||path;
+  const parent=parts[parts.length-2]||'';
+  if(/^(19|20)\d{2}$/.test(parent)) return parent+' / '+String(leaf).replace(/^\d{2}-/,'');
+  return leaf;
+}
 // Update "Identify Faces" button label to reflect current folder scope
 function _updateFaceBtnLabel() {
   const btn = $('btnScanFacesAll');
   if (!btn || btn.disabled) return;
   const scope = activeFolderScope();
-  const folderName = scope ? scope.split(/[\\\/]/).pop() || scope : null;
+  const folderName = scope ? _folderShortLabel(scope) : null;
   btn.title = folderName
     ? `Scan faces in "${folderName}" only`
     : 'Scan faces in whole library';
   btn.innerHTML = folderName
-    ? `👤 Faces <span style="font-size:9px;opacity:.75;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">${folderName}</span>`
+    ? `👤 Faces <span style="font-size:9px;opacity:.75;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">${folderName}</span>`
     : '👤 Identify Faces';
   // Append a subtle warning dot if CLIP isn't installed (filter will be weaker).
   // Async call — we append once the status is known, doesn't block rendering.
