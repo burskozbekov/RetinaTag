@@ -228,10 +228,25 @@ pub fn init_db(path: &str) -> Result<Connection> {
     // extensively (the runaway processed ~150k photo-passes), so mark all
     // current photos scanned to stop the loop immediately. Flag-guarded → runs
     // once; afterwards only newly-imported photos (default 0) get scanned.
-    if get_setting(&conn, "faces_scanned_backfill_v1").ok().flatten().is_none() {
-        let n = conn.execute("UPDATE photos SET faces_scanned = 1", []).unwrap_or(0);
-        eprintln!("[db] faces_scanned backfill: marked {} existing photos scanned", n);
-        let _ = set_setting(&conn, "faces_scanned_backfill_v1", "1");
+    // v1.5.402 — CORRECTED backfill. v1.5.401's `UPDATE ... SET faces_scanned=1`
+    // (no WHERE) marked the ENTIRE library scanned, which FROZE detection — but
+    // the library had mostly NEVER been scanned (the pre-marker loop was stuck
+    // re-scanning the oldest faceless 500 and never advanced). So mark scanned
+    // ONLY photos that genuinely have a detected face_region, and re-queue
+    // everything else (faces_scanned=0) for a one-time scan. The loop now
+    // advances (each batch is marked as it's processed), so it finishes in a
+    // single pass instead of looping. New flag → re-runs over the bad v1 state.
+    if get_setting(&conn, "faces_scanned_backfill_v2").ok().flatten().is_none() {
+        conn.execute(
+            "UPDATE photos SET faces_scanned = 1 WHERE id IN (SELECT DISTINCT photo_id FROM face_regions)",
+            [],
+        ).ok();
+        let n = conn.execute(
+            "UPDATE photos SET faces_scanned = 0 WHERE id NOT IN (SELECT DISTINCT photo_id FROM face_regions)",
+            [],
+        ).unwrap_or(0);
+        eprintln!("[db] faces_scanned backfill v2: re-queued {} never-scanned photos", n);
+        let _ = set_setting(&conn, "faces_scanned_backfill_v2", "1");
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);").ok();
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_photos_favorite ON photos(favorite);").ok();
