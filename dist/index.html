@@ -7357,8 +7357,19 @@ $('btnScanFacesAll').onclick=async()=>{
 
     // Always confirm scope before scanning (especially for first-time scans
     // where the options dialog would otherwise be skipped entirely).
-    const _scopeNow = activeFolderScope();
-    const _scopeNameNow = _scopeNow ? (_scopeNow.split(/[\\\/]/).pop() || _scopeNow) : null;
+    // v1.5.410 — describe the FULL active scope (folder / Timeline month /
+    // map selection), not just the folder. The old folder-only label said
+    // "whole library" while a Timeline month was selected — misleading.
+    const _fsScopeDesc = (() => {
+      try {
+        const s = (typeof activeFaceScope === 'function') ? (activeFaceScope() || {}) : {};
+        if (s.folder) return '📁 ' + (String(s.folder).split(/[\\/]/).pop() || s.folder);
+        if (s.yearMonth) return '🗓 ' + s.yearMonth;
+        if (s.photoIds && s.photoIds.length) return '🎯 ' + s.photoIds.length.toLocaleString() + ' photos in view';
+      } catch(_) {}
+      return null;
+    })();
+    const _scopeNameNow = _fsScopeDesc;
     if (existingFaces === 0 && _scopeNameNow) {
       // First-time scan in a specific folder — confirm intent
       const go = await new Promise(resolve => {
@@ -7367,7 +7378,7 @@ $('btnScanFacesAll').onclick=async()=>{
         m.innerHTML = `<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:24px;max-width:400px;width:90%;color:var(--text)">
           <div style="font-size:15px;font-weight:800;color:var(--cream);margin-bottom:10px">👤 Start Face Scan?</div>
           <div style="font-size:13px;color:var(--text2);margin-bottom:16px">
-            Scope: <b style="color:var(--amber)">📁 ${_scopeNameNow}</b> — only photos in this folder will be scanned.
+            Scope: <b style="color:var(--amber)">${_scopeNameNow}</b> — only photos in this scope will be scanned.
           </div>
           <div style="display:flex;gap:8px;justify-content:flex-end">
             <button class="btn btn-secondary btn-sm" id="_fsCancelFirst">Cancel</button>
@@ -7389,10 +7400,12 @@ $('btnScanFacesAll').onclick=async()=>{
       const choice = await new Promise(resolve => {
         const m = document.createElement('div');
         m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center';
-        const _scope = activeFolderScope();
-        const _scopeLabel = _scope
-          ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px">📁 Scope: <b>${_scope.split(/[\\\/]/).pop() || _scope}</b> (only this folder)</div>`
-          : `<div style="font-size:12px;color:var(--text3);margin-bottom:8px">📁 Scope: whole library (no folder selected)</div>`;
+        // v1.5.410 — use the full-scope description (folder / Timeline month /
+        // map selection). The old folder-only check claimed "whole library"
+        // while a Timeline month was actively scoping the scan.
+        const _scopeLabel = _fsScopeDesc
+          ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px">Scope: <b>${_fsScopeDesc}</b> (only this scope will be scanned)</div>`
+          : `<div style="font-size:12px;color:var(--text3);margin-bottom:8px">📁 Scope: whole library (no folder / month selected)</div>`;
         m.innerHTML = `<div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;max-width:480px;width:90%;color:var(--text)">
           <div style="font-size:16px;font-weight:800;color:var(--cream);margin-bottom:8px">Face Scan Options</div>
           ${_scopeLabel}
@@ -7790,7 +7803,11 @@ $('btnScanFacesAll').onclick=async()=>{
         refreshPersonsSidebar();
 
         let unknownFaces = [];
-        try { unknownFaces = await invoke('get_unknown_faces', { folder: activeFolderScope() }); } catch(_) {}
+        // v1.5.410 — pass the scan's LOCKED scope (folder / yearMonth /
+        // photoIds), not just the folder. Pre-1.5.410 a Timeline-scoped scan's
+        // between-batch popup surfaced WHOLE-LIBRARY unknown faces (and the
+        // post-popup batch skip then skipped them all) — scope bleed.
+        try { unknownFaces = await invoke('get_unknown_faces', _scope); } catch(_) {}
         // get_unknown_faces also auto-assigns via centroid matching —
         // refresh again to reflect those bumps.
         refreshPersonsSidebar();

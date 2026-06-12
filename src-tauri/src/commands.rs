@@ -7532,6 +7532,14 @@ fn persist_shown_face_ids(conn: &rusqlite::Connection, ids: &[i64]) {
 #[tauri::command]
 pub async fn get_unknown_faces(
     folder: Option<String>,
+    // v1.5.410 — Honor the SAME scope keys the frontend's activeFaceScope()
+    // already sends (yearMonth / photoIds, verbatim names per the v1.5.192
+    // precedent on count_unscanned_faces). Pre-1.5.410 only `folder` was
+    // accepted, so a Timeline/Calendar-scoped scan's between-batch popup
+    // surfaced WHOLE-LIBRARY unknown faces (and the post-popup batch skip
+    // then skipped them all) — major scope bleed.
+    #[allow(non_snake_case)] yearMonth: Option<String>,
+    #[allow(non_snake_case)] photoIds: Option<Vec<i64>>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<FaceRegion>, String> {
     let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
@@ -7540,8 +7548,23 @@ pub async fn get_unknown_faces(
     let folder_filter: Option<String> = folder
         .as_ref()
         .and_then(|s| if s.trim().is_empty() { None } else { Some(s.clone()) });
+    let ym_filter: Option<String> = yearMonth.as_ref().and_then(|s| {
+        let s = s.trim();
+        if s.len() == 7
+            && s.chars().nth(4) == Some('-')
+            && s[..4].chars().all(|c| c.is_ascii_digit())
+            && s[5..].chars().all(|c| c.is_ascii_digit())
+        { Some(s.to_string()) } else { None }
+    });
+    let ids_filter: Option<std::collections::HashSet<i64>> = photoIds
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.iter().copied().collect());
     if let Some(f) = &folder_filter {
         eprintln!("[face] get_unknown_faces: scoped to folder = {}", f);
+    }
+    if let Some(ym) = &ym_filter {
+        eprintln!("[face] get_unknown_faces: scoped to month = {}", ym);
     }
 
     // ── Step 1: Auto-skip faces from PREVIOUS call that weren't named ────
@@ -7624,7 +7647,14 @@ pub async fn get_unknown_faces(
     // Same principle: matching against a single old photo is fragile;
     // matching against the centroid of all named photos is much more
     // stable. immich/PhotoPrism both use centroid-based recognition.
-    let known_centroids: Vec<(i64, String, Vec<f32>, usize)> = {
+    // v1.5.410 — Keep each named person's INDIVIDUAL embeddings too (capped
+    // per person so cost stays bounded), for flat per-embedding matching —
+    // the same approach the skip-side uses (see Step 2a rationale). Centroids
+    // alone miss same-person-different-angle at 0.40-0.65, which made the
+    // popup re-ask about people the user had already named ("aynı yüzleri
+    // tekrar tekrar soruyor" report).
+    const NAMED_FLAT_CAP: usize = 25;
+    let named_flat: Vec<(i64, String, Vec<Vec<f32>>)> = {
         let mut stmt = conn.prepare(
             "SELECT p.id, p.name, f.embedding
              FROM face_regions f
@@ -7642,17 +7672,20 @@ pub async fn get_unknown_faces(
         for (pid, name, bytes) in raw {
             let emb = crate::face::bytes_to_embedding(&bytes);
             if emb.len() != 512 { continue; }
-            map.entry(pid).or_insert_with(|| (name, Vec::new())).1.push(emb);
+            let entry = map.entry(pid).or_insert_with(|| (name, Vec::new()));
+            if entry.1.len() < NAMED_FLAT_CAP { entry.1.push(emb); }
         }
         map.into_iter()
-            .map(|(pid, (name, embs))| {
-                let n = embs.len();
-                let c = crate::face::compute_centroid(&embs);
-                (pid, name, c, n)
-            })
-            .filter(|(_, _, c, _)| c.len() == 512)
+            .map(|(pid, (name, embs))| (pid, name, embs))
             .collect()
     };
+    let known_centroids: Vec<(i64, String, Vec<f32>, usize)> = named_flat
+        .iter()
+        .map(|(pid, name, embs)| {
+            (*pid, name.clone(), crate::face::compute_centroid(embs), embs.len())
+        })
+        .filter(|(_, _, c, _)| c.len() == 512)
+        .collect();
 
     eprintln!(
         "[face] get_unknown_faces: {} skipped embeddings, {} known persons",
@@ -7660,12 +7693,25 @@ pub async fn get_unknown_faces(
         known_centroids.len(),
     );
 
-    // ── Step 3: Get all remaining unassigned faces (optionally folder-scoped)
-    let rows: Vec<(i64, i64, Vec<u8>)> = match &folder_filter {
-        Some(f) => db::get_unassigned_faces_with_embeddings_in_folder(&conn, f)
-            .map_err(|e| e.to_string())?,
-        None => db::get_unassigned_faces_with_embeddings(&conn)
-            .map_err(|e| e.to_string())?,
+    // ── Step 3: Get all remaining unassigned faces (scope-aware) ────────
+    // v1.5.410 — priority matches count_unscanned_faces: month → explicit
+    // photo ids → folder → whole library.
+    let rows: Vec<(i64, i64, Vec<u8>)> = if let Some(ym) = &ym_filter {
+        db::get_unassigned_faces_with_embeddings_in_month(&conn, ym)
+            .map_err(|e| e.to_string())?
+    } else if let Some(ids) = &ids_filter {
+        db::get_unassigned_faces_with_embeddings(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|(_, photo_id, _)| ids.contains(photo_id))
+            .collect()
+    } else {
+        match &folder_filter {
+            Some(f) => db::get_unassigned_faces_with_embeddings_in_folder(&conn, f)
+                .map_err(|e| e.to_string())?,
+            None => db::get_unassigned_faces_with_embeddings(&conn)
+                .map_err(|e| e.to_string())?,
+        }
     };
 
     if rows.is_empty() {
@@ -7729,6 +7775,31 @@ pub async fn get_unknown_faces(
             if sim > best_skip_sim { best_skip_sim = sim; }
         }
 
+        // v1.5.410 — Flat match against each named person's INDIVIDUAL
+        // embeddings (max per person, top-2 across persons). This is the
+        // named-side mirror of the skip-side flat matching: a new face of an
+        // already-named person typically lands at 0.40-0.65 vs at least one
+        // of their existing shots even when the centroid match is weak.
+        let mut named1_sim = 0.0f32;
+        let mut named1_pid: i64 = 0;
+        let mut named1_name: &str = "";
+        let mut named2_sim = 0.0f32;
+        for (pid, name, embs) in &named_flat {
+            let mut best = 0.0f32;
+            for e2 in embs {
+                let s = crate::face::cosine_similarity(&emb, e2);
+                if s > best { best = s; }
+            }
+            if best > named1_sim {
+                named2_sim = named1_sim;
+                named1_sim = best;
+                named1_pid = *pid;
+                named1_name = name.as_str();
+            } else if best > named2_sim {
+                named2_sim = best;
+            }
+        }
+
         // Silent auto-assign requires: strong match, clear margin over
         // second-best person, no competing skip signal, AND at least 2
         // faces in the person centroid (single-photo centroids are too
@@ -7737,30 +7808,46 @@ pub async fn get_unknown_faces(
             && (best_known_sim - second_known) >= ASSIGN_MARGIN
             && best_known_sim > best_skip_sim
             && best_known_n >= 2;
+        // v1.5.410 — Flat-assign mirrors name_face_and_propagate's 0.40
+        // threshold ("the user explicitly does not want to be re-asked about
+        // people they've already named") + a small margin so a face that's
+        // ambiguous between two named persons still goes to the popup.
+        const NAMED_FLAT_ASSIGN: f32 = 0.40;
+        const NAMED_FLAT_MARGIN: f32 = 0.05;
+        let flat_assign_ok = named1_pid > 0
+            && named1_sim >= NAMED_FLAT_ASSIGN
+            && (named1_sim - named2_sim) >= NAMED_FLAT_MARGIN
+            && named1_sim > best_skip_sim;
         let skip_ok = best_skip_sim >= SKIP_THRESH
             && best_skip_sim >= best_known_sim;
 
-        match (assign_ok, skip_ok) {
-            (true, _) => {
-                if let Some(&(pid, name, _, _)) = known_scored.first() {
-                    db::assign_face_to_person(&conn, *fid, Some(pid)).ok();
-                    db::insert_tags(
-                        &conn, *photo_id,
-                        &[(name.to_string(), best_known_sim as f64, "face".to_string())],
-                    ).ok();
-                    auto_assigned += 1;
-                    continue;
-                }
-            }
-            (false, true) => {
-                conn.execute(
-                    "UPDATE face_regions SET person_id = -1 WHERE id = ?1 AND person_id IS NULL",
-                    rusqlite::params![fid],
+        if assign_ok {
+            if let Some(&(pid, name, _, _)) = known_scored.first() {
+                db::assign_face_to_person(&conn, *fid, Some(pid)).ok();
+                db::insert_tags(
+                    &conn, *photo_id,
+                    &[(name.to_string(), best_known_sim as f64, "face".to_string())],
                 ).ok();
-                auto_skipped += 1;
+                auto_assigned += 1;
                 continue;
             }
-            (false, false) => {}
+        }
+        if flat_assign_ok {
+            db::assign_face_to_person(&conn, *fid, Some(named1_pid)).ok();
+            db::insert_tags(
+                &conn, *photo_id,
+                &[(named1_name.to_string(), named1_sim as f64, "face".to_string())],
+            ).ok();
+            auto_assigned += 1;
+            continue;
+        }
+        if skip_ok {
+            conn.execute(
+                "UPDATE face_regions SET person_id = -1 WHERE id = ?1 AND person_id IS NULL",
+                rusqlite::params![fid],
+            ).ok();
+            auto_skipped += 1;
+            continue;
         }
         remaining.push((*fid, emb));
     }

@@ -3333,6 +3333,36 @@ pub fn get_unassigned_faces_with_embeddings_in_folder(
     Ok(rows)
 }
 
+/// v1.5.410 — Month-scoped variant: unassigned faces whose photo falls in the
+/// given YYYY-MM (matching count_unscanned_faces' strftime semantics). Lets
+/// the "Who is this?" popup honour a Timeline/Calendar month scope instead of
+/// surfacing whole-library unknowns mid-scan.
+pub fn get_unassigned_faces_with_embeddings_in_month(
+    conn: &Connection,
+    year_month: &str,
+) -> Result<Vec<(i64, i64, Vec<u8>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.photo_id, f.embedding
+         FROM face_regions f
+         JOIN photos p ON p.id = f.photo_id
+         WHERE f.embedding IS NOT NULL
+           AND f.person_id IS NULL
+           AND p.private = 0
+           AND strftime('%Y-%m', COALESCE(p.date_taken, p.created_at)) = ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![year_month], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 /// v1.5.43 — Like `get_unassigned_faces_with_embeddings_in_folder` but ALSO
 /// returns faces previously marked as skipped (person_id = -1). Used by
 /// `name_face_and_propagate` so that when the user explicitly names someone
