@@ -7870,9 +7870,14 @@ pub async fn name_face_and_propagate(
         }
 
         // Assign every seed face to the person + tag its photo
+        // v1.5.409 — track every face id THIS call assigns (seeds +
+        // propagated) and return them, so the popup's Back button can undo
+        // exactly this action instead of wiping the whole person.
+        let mut assigned_face_ids: Vec<i64> = Vec::new();
         let mut named_count = 0usize;
         for fid in &seed_ids {
             db::assign_face_to_person(&conn, *fid, Some(person_id)).ok();
+            assigned_face_ids.push(*fid);
             if let Ok(Some(face)) = db::get_face_region(&conn, *fid) {
                 db::insert_tags(
                     &conn, face.photo_id,
@@ -7893,6 +7898,7 @@ pub async fn name_face_and_propagate(
                     "total": named_count,
                     "person_id": person_id,
                     "was_new_person": was_new_person,
+                    "assigned_face_ids": assigned_face_ids,
                 })),
             };
             for fid in &seed_ids {
@@ -7911,6 +7917,7 @@ pub async fn name_face_and_propagate(
                 "total": named_count,
                 "person_id": person_id,
                 "was_new_person": was_new_person,
+                "assigned_face_ids": assigned_face_ids,
             }));
         }
 
@@ -7947,6 +7954,7 @@ pub async fn name_face_and_propagate(
                 .fold(0.0f32, f32::max);
             if best_sim >= NAME_PROPAGATE_THRESH {
                 db::assign_face_to_person(&conn, *fid, Some(person_id)).ok();
+                assigned_face_ids.push(*fid);
                 db::insert_tags(
                     &conn, *photo_id,
                     &[(name.clone(), best_sim as f64, "face".to_string())],
@@ -7963,6 +7971,7 @@ pub async fn name_face_and_propagate(
             "total": named_count + matched,
             "person_id": person_id,
             "was_new_person": was_new_person,
+            "assigned_face_ids": assigned_face_ids,
         }))
     }).await.map_err(|e| e.to_string()).and_then(|r| r)
 }
@@ -11459,22 +11468,30 @@ pub async fn count_skipped_faces(
     Ok(n)
 }
 
-/// Undo a Save (name) action: unassign every face from the given person, and
-/// if `delete_person` is true, delete the person row itself (used when the
-/// person was newly created by the Save and the user immediately went Back).
+/// Undo a Save (name) action.
 ///
-/// Also removes the auto-inserted face-source tag from every photo whose
-/// faces got unassigned — otherwise the person's name would linger as a
-/// regular tag even after the assignment is gone.
+/// v1.5.409 — CRITICAL data-loss fix. Previously this unconditionally
+/// unassigned EVERY face of the person (`WHERE person_id = ?1`) and deleted
+/// the person's face tags from all affected photos. When the named person
+/// already EXISTED (was_new_person = false), pressing Back after a single
+/// Save therefore wiped the person's ENTIRE accumulated tagging — potentially
+/// hundreds of faces from prior sessions. Now the frontend passes the exact
+/// face ids the Save assigned (name_face_and_propagate returns them as
+/// assigned_face_ids) and only those are reverted; the face tag is removed
+/// only from photos left with no remaining face of the person, and the person
+/// row is deleted only when no faces remain. `face_ids = None` keeps the old
+/// whole-person behaviour (correct for the brand-new-person case and for any
+/// stale caller).
 #[tauri::command]
 pub async fn undo_face_name(
     person_id: i64,
     delete_person: bool,
+    face_ids: Option<Vec<i64>>,
     state: tauri::State<'_, AppState>,
 ) -> Result<usize, String> {
     let conn = state.db.lock().map_err(|_| "db lock")?;
 
-    // 1. Grab the name (for tag cleanup) and the photos that will be affected
+    // Grab the name first (for tag cleanup).
     let name: Option<String> = conn
         .query_row(
             "SELECT name FROM persons WHERE id = ?1",
@@ -11483,48 +11500,118 @@ pub async fn undo_face_name(
         )
         .ok();
 
-    let affected_photos: Vec<i64> = conn
-        .prepare("SELECT DISTINCT photo_id FROM face_regions WHERE person_id = ?1")
-        .ok()
-        .and_then(|mut s| {
-            s.query_map(rusqlite::params![person_id], |r| r.get::<_, i64>(0))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-        })
-        .unwrap_or_default();
+    let reverted: usize;
+    if let Some(ids) = face_ids.as_ref().filter(|v| !v.is_empty()) {
+        // ── Scoped undo: only the faces THIS Save assigned ──
+        // ids are typed i64 from the IPC layer, safe to inline.
+        let id_list = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
 
-    // 2. Unassign every face pointing at this person
-    let reverted = conn
-        .execute(
-            "UPDATE face_regions SET person_id = NULL WHERE person_id = ?1",
-            rusqlite::params![person_id],
-        )
-        .map_err(|e| e.to_string())?;
+        // Photos affected by THESE faces (must be read before the UPDATE).
+        let affected_photos: Vec<i64> = conn
+            .prepare(&format!(
+                "SELECT DISTINCT photo_id FROM face_regions WHERE person_id = ?1 AND id IN ({})",
+                id_list
+            ))
+            .ok()
+            .and_then(|mut s| {
+                s.query_map(rusqlite::params![person_id], |r| r.get::<_, i64>(0))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+            })
+            .unwrap_or_default();
 
-    // 3. Remove the face-source tag for this person from those photos
-    if let Some(nm) = name.as_deref() {
-        let mut del = conn
-            .prepare(
-                "DELETE FROM tags WHERE photo_id = ?1 AND tag = ?2 AND source = 'face'",
+        reverted = conn
+            .execute(
+                &format!(
+                    "UPDATE face_regions SET person_id = NULL WHERE person_id = ?1 AND id IN ({})",
+                    id_list
+                ),
+                rusqlite::params![person_id],
             )
             .map_err(|e| e.to_string())?;
-        for pid in &affected_photos {
-            del.execute(rusqlite::params![pid, nm]).ok();
+
+        // Remove the face tag ONLY from photos that no longer have any
+        // remaining face of this person (another face of the same person on
+        // the same photo keeps the tag legitimate).
+        if let Some(nm) = name.as_deref() {
+            let mut del = conn
+                .prepare(
+                    "DELETE FROM tags WHERE photo_id = ?1 AND tag = ?2 AND source = 'face'
+                     AND NOT EXISTS (SELECT 1 FROM face_regions fr
+                                     WHERE fr.photo_id = ?1 AND fr.person_id = ?3)",
+                )
+                .map_err(|e| e.to_string())?;
+            for pid in &affected_photos {
+                del.execute(rusqlite::params![pid, nm, person_id]).ok();
+            }
+        }
+
+        // Delete the person row only when requested AND truly empty now.
+        if delete_person {
+            let remaining: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM face_regions WHERE person_id = ?1",
+                    rusqlite::params![person_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(1);
+            if remaining == 0 {
+                conn.execute(
+                    "DELETE FROM persons WHERE id = ?1",
+                    rusqlite::params![person_id],
+                )
+                .ok();
+            }
+        }
+    } else {
+        // ── Legacy whole-person undo (no face list supplied) ──
+        let affected_photos: Vec<i64> = conn
+            .prepare("SELECT DISTINCT photo_id FROM face_regions WHERE person_id = ?1")
+            .ok()
+            .and_then(|mut s| {
+                s.query_map(rusqlite::params![person_id], |r| r.get::<_, i64>(0))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+            })
+            .unwrap_or_default();
+
+        reverted = conn
+            .execute(
+                "UPDATE face_regions SET person_id = NULL WHERE person_id = ?1",
+                rusqlite::params![person_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if let Some(nm) = name.as_deref() {
+            let mut del = conn
+                .prepare(
+                    "DELETE FROM tags WHERE photo_id = ?1 AND tag = ?2 AND source = 'face'",
+                )
+                .map_err(|e| e.to_string())?;
+            for pid in &affected_photos {
+                del.execute(rusqlite::params![pid, nm]).ok();
+            }
+        }
+
+        if delete_person {
+            conn.execute(
+                "DELETE FROM persons WHERE id = ?1",
+                rusqlite::params![person_id],
+            )
+            .ok();
         }
     }
 
-    // 4. Optionally delete the person row
-    if delete_person {
-        conn.execute(
-            "DELETE FROM persons WHERE id = ?1",
-            rusqlite::params![person_id],
-        )
-        .ok();
-    }
-
     eprintln!(
-        "[face] undo_face_name: unassigned {} face(s) from person {} (delete={})",
-        reverted, person_id, delete_person
+        "[face] undo_face_name: unassigned {} face(s) from person {} (delete={}, scoped={})",
+        reverted,
+        person_id,
+        delete_person,
+        face_ids.as_ref().map(|v| v.len()).unwrap_or(0)
     );
     Ok(reverted)
 }
@@ -12063,19 +12150,45 @@ pub async fn apply_rename(renames: Vec<RenamePreview>, state: tauri::State<'_, A
         // immediate FS rollback for that row — see the inner `if let Err`.)
         let mut applied: Vec<(String, String)> = Vec::new(); // (new_path, old_path)
         for r in &renames {
-            if std::fs::rename(&r.old_path, &r.new_path).is_err() {
+            // v1.5.409 — CRITICAL collision guard (mirrors the v1.5.389 import
+            // guards). On Windows fs::rename maps to MoveFileEx(MOVEFILE_
+            // REPLACE_EXISTING), which silently DESTROYS whatever file already
+            // sits at new_path. Smart names collide easily: the per-call index
+            // resets every invocation and empty metadata collapses to
+            // "Unknown_photo__NNN", so a second Smart Rename in the same
+            // folder regenerates names already on disk and would overwrite a
+            // DIFFERENT photo's bytes. Route collisions through
+            // next_free_path; a pure case-change of the same file is allowed
+            // through (Windows handles it as an in-place rename).
+            if r.new_path == r.old_path {
+                continue; // no-op rename
+            }
+            let same_file_case_change = r.new_path.eq_ignore_ascii_case(&r.old_path);
+            let (final_path, final_name) = if !same_file_case_change
+                && std::path::Path::new(&r.new_path).exists()
+            {
+                let fp = next_free_path(std::path::Path::new(&r.new_path));
+                let fname = fp
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| r.new_name.clone());
+                (fp.to_string_lossy().to_string(), fname)
+            } else {
+                (r.new_path.clone(), r.new_name.clone())
+            };
+            if std::fs::rename(&r.old_path, &final_path).is_err() {
                 continue;
             }
             // rusqlite::Transaction Deref's to Connection so &*tx works
             // wherever &Connection is required.
-            match db::update_photo_path(&*tx, r.photo_id, &r.new_path, &r.new_name) {
+            match db::update_photo_path(&*tx, r.photo_id, &final_path, &final_name) {
                 Ok(_) => {
-                    applied.push((r.new_path.clone(), r.old_path.clone()));
+                    applied.push((final_path.clone(), r.old_path.clone()));
                     count += 1;
                 }
                 Err(_) => {
                     // Undo the FS rename so disk + DB stay in sync.
-                    let _ = std::fs::rename(&r.new_path, &r.old_path);
+                    let _ = std::fs::rename(&final_path, &r.old_path);
                 }
             }
         }

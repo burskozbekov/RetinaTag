@@ -1,0 +1,427 @@
+[
+ {
+  "title": "Back button in \"Who is this?\" popup wipes ALL faces of an existing person (mass data loss)",
+  "category": "data-loss",
+  "severity": "critical",
+  "file": "dist/index.html",
+  "line": 16184,
+  "evidence": "In showFacePopup's Back handler:\n  } else if (last.type === 'name') {\n    await invoke('undo_face_name', {\n      personId: last.personId,\n      deletePerson: last.wasNewPerson,\n    });\n  }\nThe history entry is pushed in the Save handler from name_face_and_propagate's result: _facePopupHistory.push({ idx, type:'name', personId: result.person_id, wasNewPerson: !!result.was_new_person }). When the named person ALREADY EXISTS, name_face_and_propagate returns the existing person's id with was_new_person=false (commands.rs:7858-7861). The backend undo_face_name then runs, unconditionally:\n  \"UPDATE face_regions SET person_id = NULL WHERE person_id = ?1\"  (commands.rs:11497-11502)\nand deletes that person's face-source tags from every affected photo (commands.rs:11505-11514). It unassigns EVERY face of the person, not just the single face the user just named.",
+  "repro": "1. Have an existing person, e.g. \"Ali\", already tagged across 50+ photos from prior sessions. 2. Run a face scan (or open the unknown-face queue); a \"Who is this?\" face of Ali appears. 3. Type \"Ali\" (or click the suggestion chip that says \"Ali 88%\") and Save. 4. Realize it was the wrong face and click \"← Back\" (or press Backspace on empty input). Result: undo_face_name(Ali_id, deletePerson:false) unassigns ALL of Ali's 50+ faces and deletes all of Ali's face tags. The user loses the entire person's accumulated tagging, with only a small \"Undoing…\" status and no warning.",
+  "fix": "undo_face_name must only revert the faces that THIS Save action assigned, not every face of the person. Record the actual assigned/propagated face IDs at Save time (name_face_and_propagate already knows seed_ids + matched faces — return them) and push them into _facePopupHistory; then change the Back handler / undo_face_name to unassign only those specific face IDs (UPDATE ... WHERE id IN (...)). Only delete the person row if it was newly created AND now has zero remaining faces. As a minimal interim guard, never delete/clear an existing (was_new_person=false) person's faces on Back — at most unassign the single face_id that was just shown.",
+  "confidence": "high",
+  "area": "fe-faces",
+  "verdict": {
+   "isReal": true,
+   "severity": "critical",
+   "justification": "Confirmed: undo_face_name (commands.rs:11496-11514) runs `UPDATE face_regions SET person_id=NULL WHERE person_id=?1` plus deletes all face-source tags for the whole person; since name_face_and_propagate returns the existing person's id with was_new_person=false (commands.rs:7858-7861) and the Back handler (index.html:16184-16188) passes only personId, pressing Back after naming a match to a pre-existing person wipes ALL of that person's accumulated face assignments/tags, not just the one just named."
+  }
+ },
+ {
+  "title": "Smart Rename overwrites a different photo's file on name collision (data loss)",
+  "category": "data-loss",
+  "severity": "critical",
+  "file": "src-tauri/src/commands.rs",
+  "line": 12066,
+  "evidence": "In apply_rename (line ~12042) each rename does `std::fs::rename(&r.old_path, &r.new_path)` with NO check that new_path is already occupied by a DIFFERENT file:\n\n```\nfor r in &renames {\n    if std::fs::rename(&r.old_path, &r.new_path).is_err() {\n        continue;\n    }\n    match db::update_photo_path(&*tx, r.photo_id, &r.new_path, &r.new_name) { ... }\n}\n```\n\nOn Windows std::fs::rename maps to MoveFileExW with MOVEFILE_REPLACE_EXISTING, so it silently overwrites/destroys whatever file already sits at new_path. The destination name is generated in generate_smart_names (line ~12012) as `format!(\"{}_{}_{}_{:03}.{}\", loc, desc, date, idx+1, ext)` where idx is a PER-CALL 0-based index that RESETS every invocation. Empty location/desc/date collapse to defaults (\"Unknown\", \"photo\", \"\"), so two photos in the same folder with no metadata produce e.g. `Unknown_photo__001.<ext>` / `Unknown_photo__002.<ext>`. There is no next_free_path / dest-exists guard here, unlike every import path (import_from_device, mtp_import, rebucket_unknown_folder all use next_free_path per v1.5.389). The frontend (dist/index.html applyRename ~line 22816) only shows a preview table and calls the command directly — no collision check client-side either.",
+  "repro": "1. In one folder F, select 2 photos that have no AI description / no estimated location / no date_taken. Smart Rename -> they become Unknown_photo__001.jpg and Unknown_photo__002.jpg. Apply.\n2. Select 2 OTHER photos (C, D) in the SAME folder F and run Smart Rename again. idx resets, so the previews are again Unknown_photo__001.jpg / Unknown_photo__002.jpg. Apply.\n3. fs::rename(C, F/Unknown_photo__001.jpg) overwrites photo A's file on disk (A is a different photo). A's pixels are gone permanently; A's DB row now points at a path holding C's bytes. Same for B/D.",
+  "fix": "Before renaming, if r.new_path exists and is a different file than r.old_path, route through next_free_path(&r.new_path) (the helper already in this file) and use the returned free path for both the fs::rename and update_photo_path. Equivalently: skip/disambiguate when Path::new(&r.new_path).exists() && new_path != old_path. Also dedup new_path values within the same `renames` batch.",
+  "confidence": "high",
+  "area": "be-import",
+  "verdict": {
+   "isReal": true,
+   "severity": "critical",
+   "justification": "apply_rename (commands.rs:12066) calls std::fs::rename(old_path,new_path) with no dest-exists guard; smart names use a per-call idx and collapse to Unknown_photo__NNN defaults when metadata is empty, so a second Smart Rename batch in the same folder regenerates names already on disk, and on Windows MoveFileExW(MOVEFILE_REPLACE_EXISTING) silently overwrites the other photo's file — the exact data-loss hazard the import paths already guard with next_free_path (v1.5.389)."
+  }
+ },
+ {
+  "title": "Quick-filter chips / rating / status / sort change render into the hidden Gallery grid when used from Timeline/Map/Calendar/Dashboard",
+  "category": "broken-flow",
+  "severity": "high",
+  "file": "dist/index.html",
+  "line": 8692,
+  "evidence": "The toolbar (id=\"toolbar\", line 1225) — which holds the search box, the status <select>, the sort <select>, and the quick-filter chips (❤ / ✕, id=\"quickFilterChips\", line 1329) — is shown via display:flex and is NEVER toggled when switching views (the tab handler at lines 3951-3963 only toggles the view containers gridWrap/timelineView/mapView/calView/etc.). So the chips stay clickable in every view. Their handlers reload but never switch to Gallery:\n  $('ratingFilter').onchange=e=>{curRating=e.target.value;_syncQuickFilterChips();loadPhotos()};   // line 8613\n  $('statusFilter').onchange=e=>{curStatus=e.target.value;loadPhotos()};                            // line 8612\n  document.querySelectorAll('#quickFilterChips .qf-chip').forEach(el=>{ el.onclick=()=>{ const v=el.dataset.qf; curRating=(curRating===v)?'':v; $('ratingFilter').value=curRating; _syncQuickFilterChips();loadPhotos(); }; }); // lines 8692-8698\nloadPhotos() never branches on curView — it always ends with renderGrid() (line 4353), which paints into #gridWrap. In Timeline/Map/Calendar/Dashboard #gridWrap is display:none, so the filtered photos render invisibly. The chip flips to active and photoCount updates, but the visible view does not change. This is the exact bug class v1.5.405/406 fixed for Favorites/Collection/On-This-Day/person, but the rating/status/sort/quick-chip paths were left unfixed.",
+  "repro": "Click the Timeline tab. In the toolbar (still visible), click the ❤ Favorites quick-filter chip (or change the Sort/Status dropdown). The chip turns active and the photo count drops, but the Timeline dial shows the same buckets — nothing visibly happens. The favorites grid was painted into the hidden Gallery container.",
+  "fix": "Make every toolbar filter entry point switch to Gallery before loading, mirroring filterFavorites()/setPersonFilter(). E.g. in the chip handler and the two onchange handlers add `if(curView!=='gallery') switchToView('gallery');` immediately before `loadPhotos()`. Cleanest: wrap with a small helper `function applyGalleryFilter(fn){ fn(); if(curView!=='gallery') switchToView('gallery'); loadPhotos(); }`.",
+  "confidence": "high",
+  "area": "fe-nav",
+  "verdict": {
+   "isReal": true,
+   "severity": "high",
+   "justification": "Confirmed in dist/index.html: the toolbar (#toolbar, line 1225) hosts the view-tabs so it stays display:flex in every view; the visible status select (handler line 8612), sort select (handler 8618-8622) and ❤/✕ quick-filter chips (handler 8692-8698) all call loadPhotos() with no curView/switchToView guard, and loadPhotos always ends in renderGrid() painting into #gridWrap which is display:none outside Gallery (line 3951) — while Timeline/Calendar/Dashboard render from independent data (e.g. _tlBuckets via get_timeline_buckets), so from those views the chip flips active and photoCount drops but the visible view never changes; this is the exact broken-flow class the team explicitly switchToView('gallery')-fixed for Favorites/On-This-Day/person (filterFavorites line 21366, filterOnThisDay line 21406), left unpatched here. (Minor: the cited ratingFilter.onchange at line 8613 is on a display:none select and isn't a direct user entry point, but the chips drive curRating instead, so the bug stands.)"
+  }
+ },
+ {
+  "title": "Deleting a photo from a Timeline/Calendar/LAN lightbox desyncs the nav context list, leaving a phantom (deleted) photo navigable and breaking the counter",
+  "category": "broken-flow",
+  "severity": "high",
+  "file": "dist/index.html",
+  "line": 5839,
+  "evidence": "deleteCurrentPhoto() only mutates the global `photos` array and never touches `window._lbContextPhotos`:\n\n  const lb = $('lightbox');\n  const lbOpen = !!(lb && lb.style.display === 'flex');\n  const idx = (typeof photos !== 'undefined') ? photoIdxOf(id) : -1;   // index in GLOBAL photos\n  if (idx >= 0) photos.splice(idx, 1);\n  ...\n  if (lbOpen) {\n    if (!photos || photos.length === 0) { closeLightbox(); }\n    else {\n      const nextIdx = Math.min(Math.max(0, idx), photos.length - 1);\n      const target = photos[nextIdx];            // a photo from GLOBAL photos\n      selectPhoto(target.id, target.path);\n      await openLightbox(target.id);             // openLightbox indexes _lbList()\n    }\n  }\n\nBut the lightbox navigates against `_lbList()` (line 16647), which returns `_lbContextPhotos` when set (Timeline line 9388, Calendar line 22589, LAN line 19012). That list is never spliced, so: (1) the deleted photo stays in `_lbContextPhotos` and remains reachable via ←/→ (its file is gone → 'Failed to load photo' toast or video error); (2) openLightbox is handed `target.id` from the GLOBAL list, which usually is NOT in `_lbContextPhotos`, so `_list.findIndex` returns -1 → counter renders empty and progress fill goes to 0%; (3) for the Calendar/LAN cases where the deleted photo is in `_lbContextPhotos` but NOT in global `photos`, `photoIdxOf(id)` returns -1, the `if (idx >= 0) photos.splice` is skipped entirely, and `nextIdx` collapses to 0 so the lightbox jumps to `photos[0]` — a completely unrelated photo from whatever the background gallery is showing.",
+  "repro": "Open Timeline, click into 'March 2019' (counter shows e.g. '5 / 50 · March 2019'). Press Delete and confirm. The image jumps to an unrelated photo, the counter goes blank, and pressing ← / → can land back on the just-deleted photo, which then fails to load. With Calendar-day or a LAN-peer lightbox (where the day/peer set differs from the background gallery) the post-delete image is an arbitrary global photo[0].",
+  "fix": "In deleteCurrentPhoto(), also splice the context list and compute the next target from whichever list the lightbox is actually navigating. e.g. after the existing global splice add:\n\n  if (window._lbContextPhotos && window._lbContextPhotos.length) {\n    const ci = window._lbContextPhotos.findIndex(p => p.id === id);\n    if (ci >= 0) window._lbContextPhotos.splice(ci, 1);\n  }\n\nand in the `lbOpen` branch derive nextIdx/target from `_lbList()` (the active list) instead of the global `photos`, closing the lightbox when that list becomes empty.",
+  "confidence": "high",
+  "area": "fe-lightbox",
+  "verdict": {
+   "isReal": true,
+   "severity": "high",
+   "justification": "Confirmed in code: deleteCurrentPhoto (dist/index.html:5839-5868) splices only global `photos` and never `_lbContextPhotos`, while the lightbox navigates/indexes via `_lbList()` (16647) which returns the unspliced context set used by Timeline (9388), Calendar-stay (22589), and LAN (19012); delete is reachable from a scoped lightbox (keydown 14032), photoIdxOf (3358) only sees global `photos` so context-only photos return -1 and nextIdx collapses to photos[0], and the deleted photo stays in the context list reachable via arrows — a real, reproducible broken nav flow (data-safe, so high not critical)."
+  }
+ },
+ {
+  "title": "Lightbox 'p' shortcut toggles photo private/vault status while user is typing a person's name (no input-focus guard)",
+  "category": "data-loss",
+  "severity": "high",
+  "file": "dist/index.html",
+  "line": 19162,
+  "evidence": "// Add \"Make private\" to the lightbox keyboard shortcuts.\nwindow.addEventListener('keydown', ev => {\n  if (ev.key === 'p' && _lbCurrentId && document.getElementById('lightbox').style.display==='flex') {\n    invoke('toggle_photo_private', { photoId: _lbCurrentId })\n      .then(isPriv => toast(isPriv ? 'Marked private (vault)' : 'Made public again'))\n      .catch(err => toast('Failed: '+err,'error'));\n  }\n});\n\nThis standalone window-level keydown listener fires on EVERY lowercase 'p' keystroke while the lightbox is open. It has NO check for whether the user is currently typing in an input. The lightbox contains the face-name <input id=\"lbFaceNameInput\"> (line 1620), which is shown and focused (line 19960-19962: nb.style.display='block'; input.focus()) whenever the user clicks a face box to name a person. The MAIN lightbox keydown handler explicitly bails out for exactly this input (lines 13621-13624: `if (ae && (ae.id === 'lbFaceNameInput' || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;`) and even adds a redundant per-key guard for F (line 13789: `if(e.target && e.target.id === 'lbFaceNameInput') return;`), proving the intended contract is 'don't fire shortcuts while typing in this field'. This standalone 'p' handler is the only one that skips that guard.",
+  "repro": "1. Open a photo in the lightbox. 2. Press F (or click a detected face) so the face-name box appears and the cursor lands in the name input. 3. Type a person's name that contains the letter 'p' — e.g. 'Pelin', 'Pablo', 'Pierre', 'Sophie', 'Stephan', 'Pia'. 4. Each 'p' typed silently calls toggle_photo_private on the CURRENT photo, encrypting it into the vault (or pulling it back out, depending on the previous state and how many p's are in the name). The photo then disappears from the normal gallery into the vault — data the user did not intend to move — and a 'Marked private (vault)' / 'Made public again' toast flashes mid-typing. An even number of p's may leave state visibly unchanged but still churns the file through encrypt/decrypt.",
+  "fix": "Add the same input-focus guard the rest of the lightbox uses. Replace the condition with one that bails out when an editable element has focus, e.g.:\n\nwindow.addEventListener('keydown', ev => {\n  if (ev.key !== 'p') return;\n  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;\n  const ae = document.activeElement;\n  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;\n  if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA' || ev.target.isContentEditable)) return;\n  if (_lbCurrentId && document.getElementById('lightbox').style.display === 'flex') {\n    ev.preventDefault();\n    invoke('toggle_photo_private', { photoId: _lbCurrentId })\n      .then(isPriv => toast(isPriv ? 'Marked private (vault)' : 'Made public again'))\n      .catch(err => toast('Failed: '+err,'error'));\n  }\n});\n\nGuarding on both document.activeElement and ev.target matches the pattern already used at line 13601-13604.",
+  "confidence": "high",
+  "area": "fe-modals",
+  "verdict": {
+   "isReal": true,
+   "severity": "high",
+   "justification": "Confirmed: the standalone window keydown listener at dist/index.html:19162-19168 fires on every lowercase 'p' while the lightbox is open (only checks ev.key==='p' && _lbCurrentId && lightbox display==='flex') with zero input-focus/modifier guard, yet the in-lightbox lbFaceNameInput (line 1620, focused at line 19962 when naming a face) requires typing names like \"Pelin/Sophie\"; the main lightbox handler deliberately bails for that same input (lines 13621-13624), proving the intended no-shortcuts-while-typing contract this handler skips, and backend toggle_photo_private (commands.rs:14002) genuinely encrypt-moves the file into the vault when the vault is unlocked (it only hard-fails when locked), so each 'p' silently toggles the current photo's vault state — real, reproducible data movement, though gated on the vault being unlocked."
+  }
+ },
+ {
+  "title": "Stopping a face scan permanently abandons the unprocessed tail of the batch (faces lost forever)",
+  "category": "data-loss",
+  "severity": "high",
+  "file": "src-tauri/src/commands.rs",
+  "line": 9460,
+  "evidence": "detect_faces_background marks the ENTIRE 500-photo batch faces_scanned=1 up front:\n\n    {\n        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());\n        let ids: String = photos.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>().join(\",\");\n        let _ = conn.execute(\n            &format!(\"UPDATE photos SET faces_scanned = 1 WHERE id IN ({})\", ids),\n            [],\n        );\n    }\n\nThen the per-photo loop honors the Stop flag by returning early WITHOUT un-marking the photos it never reached (line ~9579-9606):\n\n    if stop_flag.load(Ordering::SeqCst) {\n        ... emit progress ...\n        return Ok((idx, total_detected));   // photos[idx..] already marked scanned=1, never processed\n    }\n\nThere is no command anywhere that resets faces_scanned back to 0 (grep confirms only the one-time v1.5.402 backfill and the SET ...=1 sites). The next detect_faces_background call selects `WHERE faces_scanned = 0` and so will never revisit the abandoned tail. count_unscanned_faces also filters faces_scanned=0, so the UI shows them as 'done'.",
+  "repro": "User opens Identify Faces on a large library, the batch of 500 begins, and after ~50 photos they click Stop. Photos 51-500 in that batch are now permanently marked faces_scanned=1 even though they were never opened or detected. Every person in those ~450 photos is silently missing from the People view and will never be found by any future scan.",
+  "fix": "On the stop path (and ideally any early return), re-queue the photos that were not yet processed before returning, e.g. before `return Ok((idx, total_detected))` run `UPDATE photos SET faces_scanned = 0 WHERE id IN (<ids of photos[idx..]>)`. Alternatively, move the up-front marking to mark each photo only after it is processed (mark photo_id at the end of each loop iteration, as scan_and_cluster_faces already does at line ~9106), which preserves termination for faceless photos while not stranding unscanned ones on stop.",
+  "confidence": "high",
+  "area": "be-faces",
+  "verdict": {
+   "isReal": true,
+   "severity": "high",
+   "justification": "Verified in commands.rs: detect_faces_background marks the whole 500-photo batch faces_scanned=1 up front (L9460-9467), then the Stop path returns early at L9606 without un-marking photos[idx..]; the only SET faces_scanned=0 write is the one-time flag-guarded db.rs backfill, so the unprocessed tail is never re-selected (SELECT/count both filter faces_scanned=0) — silent permanent loss of all faces in those photos when a user clicks the real stop_face_scan command mid-batch."
+  }
+ },
+ {
+  "title": "LAN /api/photo and /api/thumb gate on .rtenc extension, not the private flag — plaintext vault photos leak to any paired peer",
+  "category": "security",
+  "severity": "critical",
+  "file": "src-tauri/src/lan_server.rs",
+  "line": 556,
+  "evidence": "In photo_for_id (and identically in thumb_for_id at line 415) the vault gate is keyed ONLY on whether the on-disk path ends in .rtenc:\n\n    let path = { ... get_photo_path_and_hash(&conn, photo_id) ... };  // SELECT path, hash — no `private`\n    let is_vault = crate::vault_files::is_encrypted_path(std::path::Path::new(&path));\n    if is_vault {\n        let unlocked = ... app_state.vault_is_unlocked() ...;\n        if !unlocked { return (StatusCode::UNAUTHORIZED, \"Vault locked\").into_response(); }\n    }\n    // else: NO gate at all — bytes are streamed straight off disk\n\nget_photo_path_and_hash (db.rs:2224) runs `SELECT path, hash FROM photos WHERE id = ?1` and never reads `photos.private`. But private photos are NOT always .rtenc on disk: (a) legacy v1.5.63 vaults keep photos \"unencrypted at rest\" (db.rs vault_unlock_kek comment); (b) XMP import flips `private = 1` with no file encryption (commands.rs:15931 `UPDATE photos SET private = ?2` on retinatag:Private=true); (c) the vault_migrate_to_store_sync candidate query (commands.rs:12990) only touches rows `WHERE private = 1 AND path LIKE '%.rtenc'`, leaving private-but-plaintext rows behind. For any such row is_vault is false, so the handler serves the raw plaintext bytes with no vault-unlock check.",
+  "repro": "1. A second RetinaTag desktop (or the iOS app) pairs with this PC over the LAN and obtains a bearer token (normal, supported flow). 2. The PC has a vault photo that is flagged private but still plaintext on disk (e.g. a photo imported from Mac with retinatag:Private=true XMP, or any legacy v1.5.63 vault item). 3. The paired peer leaves the PC's vault LOCKED and simply requests GET /api/photo/<id> with its bearer token. Because photos.id is INTEGER PRIMARY KEY AUTOINCREMENT (db.rs:18), the peer enumerates /api/photo/1, /api/photo/2, ... /api/photo/74000 — it does not need the photo to appear in /api/photos (which correctly returns only private=0). Every private photo whose path is not .rtenc is returned in full, completely bypassing the vault.",
+  "fix": "Gate on the `private` DB flag, not the file extension. Add a private column to the lookup (e.g. a get_photo_path_hash_private helper doing `SELECT path, hash, private FROM photos WHERE id = ?1`) and in both thumb_for_id and photo_for_id require the vault to be unlocked whenever `private != 0` OR is_encrypted_path(path). I.e. replace `let is_vault = is_encrypted_path(...)` with `let needs_vault = is_private || is_encrypted_path(...)` and use needs_vault for the unlock check (still use is_encrypted_path only to decide whether to decrypt).",
+  "confidence": "high",
+  "area": "be-lan-vault",
+  "verdict": {
+   "isReal": true,
+   "severity": "high",
+   "justification": "Confirmed: photo_for_id/thumb_for_id gate the vault only on the .rtenc extension (is_encrypted_path) and get_photo_path_and_hash never reads photos.private, so private-but-plaintext rows (XMP import flips private=1 without encrypting; migration only touches private=1 AND path LIKE '%.rtenc') are streamed raw to any token-paired peer via the enumerable autoincrement-ID endpoint while the vault stays locked, even though /api/photos hides them with private=0."
+  }
+ },
+ {
+  "title": "M / U / Shift+Digit filter hotkeys fire in any view and silently repaint the hidden grid",
+  "category": "broken-flow",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 14262,
+  "evidence": "The global keydown handler (document.addEventListener('keydown', …) at line 13579) gates only on lightbox-open and editable-element focus (lines 13590-13608). There is NO curView==='gallery' guard. So these filter shortcuts run in Timeline/Map/Calendar/Dashboard/Cleanup:\n  // M — media type cycle (line 14262)\n  if((e.key==='m'||e.key==='M')&&...){ ...; curMediaType = next; toast(`Filter: ${labels[next]||'All'}`,'info'); loadPhotos(); e.preventDefault();return; }\n  // U — status cycle (line 14276): curStatus=next; ...; loadPhotos();\n  // Shift+Digit — rating filter (line 14293): curRating=val; ...; loadPhotos();\nEach mutates filter state and calls loadPhotos() → renderGrid() into the hidden #gridWrap. The user sees a toast (\"Filter: Videos only\") confirming the action, but the current Timeline/Calendar view is unchanged because it is driven by loadTimeline()/loadCalendar(), not loadPhotos(). loadTimeline() only honors curFolder (line 9111) and ignores curRating/curMediaType/curStatus entirely.",
+  "repro": "Switch to Timeline. Press M (toast says 'Videos only') or Shift+5 (toast says 'Filter: ≥5★'). The toast confirms a filter was applied, but the Timeline dial is identical — the filtered result rendered into the hidden Gallery grid. Switching back to Gallery later reveals the now-mysteriously-filtered set.",
+  "fix": "Add `if(curView!=='gallery') switchToView('gallery');` before the `loadPhotos();` call in the M, U, and Shift+Digit handlers (lines ~14268, ~14283, ~14299), so the filter the user just triggered becomes visible. (Alternatively gate the whole filter-shortcut block on curView==='gallery'.)",
+  "confidence": "high",
+  "area": "fe-nav",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed: the global keydown handler (dist/index.html:13579) gates only on lightbox/editable focus with no curView guard, so the M (14262), U (14276), and Shift+Digit (14293) handlers each mutate filter state, show a confirming toast, and call loadPhotos() — which applies the filters client-side and renders into #gridWrap (display:none outside gallery, line 3951) while loadTimeline (9111) ignores those filters; the codebase itself already fixed this identical pattern for collections at line 4193 (if(curView!=='gallery') switchToView('gallery')), validating both the bug and the proposed fix."
+  }
+ },
+ {
+  "title": "Typing a search while in Timeline/Map/Calendar runs the search into the hidden grid",
+  "category": "broken-flow",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 8029,
+  "evidence": "The search Enter handler runs the pipeline and closes the Spotlight overlay but never switches to Gallery:\n  $('searchInput').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); _runFullSearch(); _searchFocusClose(); return; } ... }); // lines 8029-8043\n_runFullSearch() dispatches the input event whose pipeline sets curSearch and calls loadPhotos() (line 8451), and _searchFocusClose() just restores the search box position + removes the backdrop (lines 7981-8001) — neither calls switchToView. loadPhotos() → renderGrid() paints into #gridWrap, which is display:none under Timeline/Map/Calendar. So after Enter, the backdrop lifts and the user is staring at the unchanged Timeline/Calendar while the actual search results sit invisibly in the hidden Gallery grid.",
+  "repro": "Switch to Timeline (or Calendar/Map). Click the search box, type 'beach', press Enter. The overlay closes, but the Timeline dial is unchanged — the search results were rendered into the hidden Gallery container. The user concludes search is broken.",
+  "fix": "In the Enter handler (around line 8040) add `if(typeof curView!=='undefined' && curView!=='gallery') switchToView('gallery');` after `_runFullSearch();` (and similarly guard the empty-query reset branch at line 8417), so committing a search brings the user to the Gallery where results are visible.",
+  "confidence": "high",
+  "area": "fe-nav",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed: the Enter handler (index.html:8029-8042) calls _runFullSearch()+_searchFocusClose(), neither switches view; the pipeline's loadPhotos()/renderGrid() (8451/8563, 4353) paints into #gridWrap which line 3951 sets to display:none under Timeline/Map/Calendar, and the codebase's own v1.5.406/407 pattern (4193,4205,21366,21406) proves the missing `if(curView!=='gallery') switchToView('gallery')` guard, so committed search results render invisibly in the hidden grid."
+  }
+ },
+ {
+  "title": "\"Clear / Reset All Filters\" leaves the person filter and map-region filter active (and their pills visible)",
+  "category": "wrong-result",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 11066,
+  "evidence": "_dashResetFilters() and clearAllFilters() zero curStatus/curFolder/curRating/curMonth/curMediaType/curSearch but never touch _currentPersonFilter (the map-region case is handled only in clearAllFilters):\n  function _dashResetFilters(){ curStatus='';...; curFolder=''; curRating='';...; curMonth='';curMediaType=''; curSearch='';...; _resetFolderHighlight(); }  // lines 11066-11073 — no _currentPersonFilter\n  function clearAllFilters(){ _dashResetFilters(); ...; _mapRegionFilter = null; ...; loadPhotos(); ... }  // lines 11077-11091 — clears map region but NOT _currentPersonFilter / its pill\nThe command-palette 'Reset All Filters' has the same gap (lines 21883-21913: clears folder/rating/media/month/status/search, never _currentPersonFilter or _mapRegionFilter), as does 'All Photos' (line 21434: `curFolder='';curRating='';curSearch='';loadPhotos();`). Because loadPhotos() checks _currentPersonFilter FIRST (line 4275) and routes to find_photos_by_person, the grid stays scoped to that person after a 'clear', and the search-bar person pill (#searchPersonPill, set in setPersonFilter line 7896) is never removed — so the UI still shows the person is active.",
+  "repro": "Click a person in the sidebar (pill 'Buğra' appears, grid shows only Buğra). Apply any second filter so the 'Clear filters' pill appears (it needs >=2 filters), then click 'Clear filters' (or run command-palette 'Reset All Filters'). Toast says filters cleared, but the grid still shows only Buğra and the 'Buğra' pill is still in the search bar — the person filter survived the reset.",
+  "fix": "In _dashResetFilters() (or at the top of clearAllFilters and the command-palette reset) also clear the person and map filters and their chrome: `_currentPersonFilter=null; $('searchPersonPill')?.classList.remove('active'); document.querySelector('.search-box')?.classList.remove('person-active'); _mapRegionFilter=null;` before calling loadPhotos().",
+  "confidence": "high",
+  "area": "fe-nav",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed in code: _dashResetFilters (11066-11073), clearAllFilters (11077-11091), command-palette 'Reset All Filters' (21883-21913), and 'All Photos' (21434) all zero the cur* filters but none clear _currentPersonFilter or its #searchPersonPill/.person-active chrome; loadPhotos checks _currentPersonFilter first (line 4275) and routes to find_photos_by_person, so after a 'clear' the grid stays scoped to the person with a stale pill — a real wrong-result/misleading-UI bug the devs explicitly guarded against elsewhere (filterOnThisDay 21383-21396)."
+  }
+ },
+ {
+  "title": "Map-region filter can become stuck with no clear affordance (pill auto-hidden, _clearMapRegion never wired)",
+  "category": "broken-flow",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 11094,
+  "evidence": "_updateClearFiltersPill() decides the 'Clear filters' pill purely from folder/rating/status/search/month/media and requires >=2 of them; it ignores _mapRegionFilter:\n  function _updateClearFiltersPill(){ const pill=$('clearFiltersPill'); ...; const parts=[]; if(curFolder)... if(curRating)... if(curStatus)... if(curSearch)... if(curMonth)... if(curMediaType)...; pill.style.display=n>=2?'inline-flex':'none'; ... }  // lines 11094-11107\nWhen a map cluster is clicked, _selectMapRegion (line 3402) sets _mapRegionFilter and manually shows the pill (lines 3414-3421), but it calls loadPhotos() first (line 3412, not awaited); loadPhotos's async tail runs _updateClearFiltersPill() (line 4355) which then sets pill.style.display='none' because no other filter is active. So a map-region-ONLY filter ends with the pill hidden. loadPhotos still intersects every subsequent load with _mapRegionFilter (line 4331), silently narrowing the whole gallery. The dedicated clearer `function _clearMapRegion()` (line 3424) is defined but never called anywhere (no wiring found), and command-palette 'All Photos'/'Reset All Filters' do not clear _mapRegionFilter either.",
+  "repro": "Open Map, click a cluster → it jumps to Gallery showing 'N photos from this region'. The 'Clear filters' pill flashes then disappears. Now every folder you click or filter you toggle is silently intersected to that map region, and there's no visible button to undo it (short of triggering >=2 other filters to resurrect the pill, then clicking Clear filters).",
+  "fix": "Include the map region in the pill logic — in _updateClearFiltersPill add `if(_mapRegionFilter && _mapRegionFilter.size) parts.push('region');` and show the pill when n>=1 (or special-case region to always show). Also clear _mapRegionFilter in the command-palette 'All Photos'/'Reset All Filters' handlers, and/or wire _clearMapRegion() to a visible control.",
+  "confidence": "high",
+  "area": "fe-nav",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Code confirms it: _updateClearFiltersPill (11094-11107) ignores _mapRegionFilter and needs n>=2, so loadPhotos's async tail (await at 4276/4280, pill update at 4355) hides the pill that _selectMapRegion synchronously showed (3417) for a map-only filter; loadPhotos keeps intersecting _mapRegionFilter every load (4331-4332), _clearMapRegion (3424) is dead (only definition found), and neither command-palette 'All Photos'/'Reset All Filters' (21434, 21883-21914) nor sidebar selectFolder (4094)/'All Photos' (4057) clear it — only the now-hidden clearAllFilters pill does — leaving a stuck, silently-narrowing filter with no visible affordance."
+  }
+ },
+ {
+  "title": "Lightbox progress-bar click/drag-seek jumps into the full global gallery instead of the scoped Timeline/Calendar set it visually represents",
+  "category": "wrong-result",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 20237,
+  "evidence": "The progress-fill position is computed against the scoped list in openLightbox (line 16728: `pct = ((idx+1)/_list.length)*100` where `_list = _lbList()`), but every seek helper reads the global `photos` array:\n\n  function idxFromEvent(e){\n    const rect = bar.getBoundingClientRect();\n    if(rect.width <= 0 || !photos.length) return -1;\n    ...\n    return Math.max(0, Math.min(photos.length-1, Math.round(ratio * (photos.length-1))));\n  }\n  function updateHint(e){ ... const p = photos[i]; ... hint.textContent = `→ ${i+1} / ${photos.length} ...`; }\n  function jumpTo(i){ if(i < 0 || i >= photos.length) return; const target = photos[i]; ... openLightbox(target.id); }\n\nSo when the lightbox is opened from Timeline ('5 / 50 · March 2019') or a Calendar day, the bar is drawn against the 50-item month but clicking/dragging it maps the ratio onto the ~74k global library and opens an unrelated photo. The hover hint also lies ('→ 31402 / 74821' over a bar labeled 'March 2019'). This silently drops the user out of their scoped browsing set.",
+  "repro": "Open a photo from a Timeline month (or a Calendar day). Click anywhere on the small progress bar under the counter. Instead of jumping within the 50 month-photos, the lightbox jumps to an arbitrary photo from the full library and the counter/context falls apart.",
+  "fix": "Route all three helpers (idxFromEvent, updateHint, jumpTo) through the active list: `const L = (typeof _lbList==='function') ? _lbList() : photos;` and use `L.length` / `L[i]` everywhere instead of `photos.length` / `photos[i]`.",
+  "confidence": "high",
+  "area": "fe-lightbox",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed: the lightbox counter/progress-fill are drawn against the scoped _lbList() set (lines 16720/16728) and lbNav prev/next correctly uses _lbList() (line 20454), but the progress-bar seek helpers idxFromEvent/updateHint/jumpTo (lines 20237-20266) all read the global photos array, so in Timeline/Calendar/peer-device scoped contexts a click/drag maps the ratio onto the full library and opens an unrelated photo (and the hover hint shows wrong indices)."
+  }
+ },
+ {
+  "title": "Scoped face scan surfaces and Skip-Alls whole-library unknown faces (scope bleed)",
+  "category": "wrong-result",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 7783,
+  "evidence": "The scan binds _scope = activeFaceScope() (line 7564), which can be { yearMonth } (timeline/calendar) or { photoIds } (gallery) with folder=null. detect_faces_background and recognize_all_faces are called with _scope, but the unknown-face fetch uses only the folder:\n  unknownFaces = await invoke('get_unknown_faces', { folder: activeFolderScope() });\nactiveFolderScope() returns '' when no sidebar folder is selected (line 3032-3036), and get_unknown_faces treats an empty folder as the WHOLE LIBRARY (commands.rs:7540-7542, 7663-7669). So after scanning, say, May 2026 (a yearMonth scope), the popup is populated with unknown faces from the entire library. Worse, after the popup the loop auto-skips everything it showed: skip_faces_batch over allShownFaceIds (line 7815-7817), and Skip All in the popup does the same — marking unscanned-scope faces as skipped.",
+  "repro": "1. In Timeline (or Calendar), focus a single month, then click Identify Faces (scope = that month). 2. After a batch finds faces, the \"Who is this?\" popup shows clusters from OTHER months/folders too (whole library), contradicting the \"scan only what I'm looking at\" contract. 3. If the user clicks \"Skip All\", faces belonging to months/folders they never intended to touch get person_id = -1 (skipped) and won't be asked about later.",
+  "fix": "Pass the full active scope to get_unknown_faces (it only accepts `folder` today, so either extend the command to honor photoIds/yearMonth like detect_faces_background/recognize_all_faces, or restrict the popup to faces within _scope). At minimum, derive the folder consistently from _scope (e.g. _scope.folder) and only auto-skip face IDs that fall inside the scanned scope, so a month/photoIds scan can never mark out-of-scope faces as skipped.",
+  "confidence": "high",
+  "area": "fe-faces",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed: line 7783 fetches get_unknown_faces with only { folder: activeFolderScope() }, which returns '' for any yearMonth/photoIds scope (index.html:3032-3036); the backend treats empty folder as whole library (commands.rs:7540-7542,7663-7669 → db.rs:3287-3306 selects ALL unassigned faces), so a month/gallery-scoped scan populates the popup with library-wide unknowns and then auto-skips them (skip_faces_batch line 7817 + backend Step-1 skip), permanently marking out-of-scope faces person_id=-1 — a real scope-bleed contradicting the documented \"scan only what I'm looking at\" contract; recoverable via Reset skipped faces, hence medium."
+  }
+ },
+ {
+  "title": "Person names rendered via innerHTML without escaping → stored XSS in privileged Tauri frontend",
+  "category": "security",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 15758,
+  "evidence": "Person names (free-form, user/import-supplied) are interpolated straight into innerHTML in the face/person UI with no escaping, e.g.:\n- renderPersonsSidebar: `<div class=\"person-name\">${p.name}</div>` (line 15758)\n- face popup suggestion chip: chip.innerHTML = `...<span ...>${s.name}</span>...` (line 16038)\n- assign modal list/suggestions: `...${p.name}...` / `...${s.name}...` (lines 15335, 15381)\n- merge dialog header/rows: `Merge \"${source.name}\" into…` and `${other.name}` (lines 15643-15644, 15660)\nThe app already has an _esc() helper (line 5108) and uses it in _fixMixedOpen (line 14994: _esc(p.name)), so these sites are an inconsistent omission. Person names can originate from untrusted external data: the restore/import path creates persons directly from a payload name (commands.rs:3126-3140 create_person(&conn, name)), so a crafted backup or imported sidecar can seed a name like <img src=x onerror=invoke('...')>.",
+  "repro": "1. Rename a person (or import/restore a library) so a person's name is `<img src=x onerror=\"document.title='pwned'\">` (the rename dialog only checks non-empty and length<=64, no character sanitization — lines 15554-15559). 2. The persons sidebar (or the assign/merge/suggestion UI) renders the name via innerHTML and the onerror handler executes in the WebView2 frontend, which has full `invoke()` access to backend commands (filesystem, DB).",
+  "fix": "Wrap every person-name interpolation that goes into innerHTML with _esc(...), matching the existing _fixMixedOpen usage: e.g. `<div class=\"person-name\">${_esc(p.name)}</div>`, `${_esc(s.name)}`, `${_esc(other.name)}`, `${_esc(source.name)}`. Also escape names placed into title/attribute contexts (e.g. the chip.title at line 16039).",
+  "confidence": "medium",
+  "area": "fe-faces",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Verified: person names are interpolated raw into innerHTML at all cited sites (dist/index.html:15758, 16038, 15335, 15381, 15643-15644, 15660) with no escaping, while _esc() exists (5108) and is used for the same data at 14994; rename validation (15554-15559) allows arbitrary characters and import_metadata_snapshot (commands.rs:3028/3137) seeds person names from an attacker-controlled JSON file, so a crafted backup yields stored XSS executing with full invoke() access in the privileged Tauri WebView — real, though it requires user-initiated import/rename (no remote vector), hence medium."
+  }
+ },
+ {
+  "title": "saveAllFoldersAsCollections creates DUPLICATE collections (does not honor its own \"name collisions are skipped\" promise) because the dedupe snapshot is never updated mid-loop",
+  "category": "wrong-result",
+  "severity": "medium",
+  "file": "src-tauri/src/commands.rs",
+  "line": 15588,
+  "evidence": "existing_names is built ONCE before the loop (line 15566-15574) from the collections already in the DB, then never updated as the loop inserts new ones:\n\n  let name = if existing_names.contains(&base_name) {\n      ... try 3-segment longer name, else skip ...\n  } else {\n      base_name              // <-- taken for EVERY collision created during THIS run\n  };\n  let coll_id = match db::create_collection(&conn, &name, \"manual\", None) { Ok(id) => id, ... };\n\nTwo different folders that map to the same 2-segment label collide only against the PRE-RUN snapshot. The second folder's base_name is NOT in existing_names (it was just created moments ago in the same loop, not in the original DB), so it falls into the `else` branch and create_collection inserts a SECOND collection with the identical name. The collections table has no UNIQUE on name (db.rs:104 `name TEXT NOT NULL`, no UNIQUE), so the duplicate insert succeeds instead of erroring/skipping.",
+  "repro": "Library has two distinct folders that share their last two path segments, e.g. C:\\Photos\\2020\\Vacation and D:\\Backup\\2020\\Vacation (both -> label \"2020 / Vacation\"). User clicks the 📁⇢ button (saveAllFoldersAsCollections). The modal promises \"Name collisions are skipped.\" Result: TWO sidebar collections both named \"2020 / Vacation\" are created (the report's `skipped` count under-reports, `created` over-reports), each holding a different folder's photos. The user sees confusing identical-name duplicates and cannot tell them apart.",
+  "fix": "Make the dedupe set live: after a successful create, insert the chosen name into the set so later iterations see it. e.g. change `existing_names` to `let mut existing_names` and after `let coll_id = ...Ok(id)`, add `existing_names.insert(name.clone());`. Then the second colliding folder will hit the `existing_names.contains(&base_name)` branch and either get the 3-segment name or be skipped as advertised.",
+  "confidence": "high",
+  "area": "fe-collections",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Verified: existing_names is an immutable pre-loop snapshot never updated after each create (commands.rs:15566-15639), _folder_collection_name yields a 2-segment label (15537), create_collection is a plain INSERT with no UNIQUE on collections.name (db.rs:104,2248-2251), so a second folder sharing the same 2-segment label hits the else branch and inserts a duplicate collection, breaking the modal's \"Name collisions are skipped\" promise (dist/index.html:20908) and miscounting created/skipped."
+  }
+ },
+ {
+  "title": "Stored XSS: collection name rendered into sidebar innerHTML without escaping in refreshCollections",
+  "category": "security",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 4110,
+  "evidence": "refreshCollections() builds each row via innerHTML with the raw, unescaped collection name:\n\n  item.innerHTML=`<span class=\"ci-icon\">${c.collection_type==='smart'?'⚡':'📁'}</span>\n    <span class=\"folder-name\">${c.name}</span><span class=\"folder-count\">${c.photo_count}</span>`;\n\nEvery other render path in this file routes user/DB strings through _esc() (def at line 5108) or escapeHtml() (line 7067) — e.g. tag chips (line 5275), filenames (4559), descriptions (4906). This collection path is the lone omission. Collection names are arbitrary user input: btnNewCollection's inputModal (line 4214) and saveCluster's inputModal (line 20936) apply no sanitization, and the name is persisted (db::create_collection) and re-rendered on every refreshCollections() call.",
+  "repro": "User clicks Collections '+' and names a new collection `<img src=x onerror=\"window.__TAURI__.invoke('delete_photos',{ids:[...]})\">` (or any script). On the next refreshCollections() (startup line 14712, or any add-to-collection) the payload executes in the WebView2 context, which has full `invoke` access to backend commands (delete/move files, read library DB, etc.). Folder-derived names from imported/external libraries are a secondary vector.",
+  "fix": "Escape the name: `<span class=\"folder-name\">${_esc(c.name)}</span>` (and similarly guard c.collection_type / c.photo_count if ever non-trivial). _esc already exists and is null-safe.",
+  "confidence": "high",
+  "area": "fe-collections",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed: dist/index.html:4109-4110 interpolates the raw collection name into innerHTML (every other path, e.g. tag chips at 5275, uses the null-safe _esc() at 5108); names are only .trim()'d before persistence (create_collection 4243, save_gps_cluster 20946) and re-rendered each refreshCollections(); tauri.conf.json sets \"csp\": null and withGlobalTauri:true, so injected inline onerror executes with full window.__TAURI__.invoke access to dangerous commands (delete_photos, move_library) — real stored XSS, medium because the main vector is self-typed while folder-import names form a genuine cross-source vector."
+  }
+ },
+ {
+  "title": "Calendar day query (get_photos_calendar) leaks vaulted photos: counts and thumbnail of private photos surface on the Calendar grid while the vault is locked",
+  "category": "security",
+  "severity": "high",
+  "file": "src-tauri/src/db.rs",
+  "line": 4348,
+  "evidence": "pub fn get_photos_calendar(conn: &Connection, year: i32, month: i32) -> Result<Vec<crate::models::CalendarDay>> {\n    let prefix = format!(\"{:04}-{:02}\", year, month);\n    let mut stmt = conn.prepare(\n        \"SELECT CAST(SUBSTR(COALESCE(date_taken, created_at), 9, 2) AS INTEGER) as day,\n                COUNT(*) as cnt,\n                MIN(id) as first_id\n         FROM photos\n         WHERE SUBSTR(COALESCE(date_taken, created_at), 1, 7) = ?1\n         GROUP BY day\n         ORDER BY day\"\n    )?;\n    // NO `private = 0` filter — unlike every other listing/aggregate in this file\n    // (get_library_analytics, get_photos_on_this_day, get_photos_timeline,\n    //  get_stats, get_folders*, get_status_counts, map/dedupe/CLIP queries all have it).\n\n// Frontend (dist/index.html ~22510): the per-day count AND the representative\n// thumbnail come straight from this query, with no vault gating:\n//   const thumbId = has ? info.first_photo_id : null;   // = MIN(id), may be a private photo\n//   if (thumbId) html += `<div class=\"d-thumb\" data-cal-tid=\"${thumbId}\"></div>`;\n//   html += `<div class=\"d-count\">${info.count}</div>`;  // count includes vaulted photos\n// get_thumbnail_path/get_photo_thumbnail_path (commands.rs:1602, db.rs:2232) fetch the\n// thumbnail for ANY id with no private check, so a legacy-vaulted photo (one whose on-disk\n// thumb was never sealed — see db.rs:490-496) renders its thumbnail directly on the calendar cell.",
+  "repro": "1. Set a Private Vault PIN and move some photos into the vault (or have legacy-vaulted photos from before thumb-sealing). 2. Lock the vault. 3. Open the Calendar view. 4. Observe: days that contain ONLY vaulted photos still show a non-zero count badge, and the day-cell representative thumbnail (data-cal-tid = MIN(id) of the day) can be a vaulted photo's image. Clicking the day calls filterByDate -> get_photos (which IS private-filtered) and shows 'No photos on <date>', proving the calendar count is leaking hidden-photo metadata that the rest of the app hides.",
+  "fix": "Add `AND private = 0` to the WHERE clause so the calendar matches the privacy model used everywhere else: `... WHERE SUBSTR(COALESCE(date_taken, created_at), 1, 7) = ?1 AND private = 0 GROUP BY day ...`. This fixes both the count leak and prevents MIN(id) from selecting a vaulted photo as the day thumbnail.",
+  "confidence": "high",
+  "area": "be-db",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "get_photos_calendar (db.rs:4348) genuinely omits the `private = 0` filter that the v1.5.127-documented privacy model applies to every other aggregate, so vaulted photos leak their existence and per-day counts onto the Calendar grid; the actual thumbnail image only renders for legacy pre-sealing vault entries (modern vaulted photos point to a .rtenc blob that get_thumbnail_path can't decode), making this a real metadata leak but medium rather than high."
+  }
+ },
+ {
+  "title": "Year/month count query (get_year_month_counts) omits private=0, leaking vault size into the Calendar year/month navigation totals",
+  "category": "security",
+  "severity": "medium",
+  "file": "src-tauri/src/db.rs",
+  "line": 4370,
+  "evidence": "pub fn get_year_month_counts(conn: &Connection) -> Result<Vec<(i32, i32, i64)>> {\n    let mut stmt = conn.prepare(\n        \"SELECT CAST(SUBSTR(COALESCE(date_taken, created_at), 1, 4) AS INTEGER) as y,\n                CAST(SUBSTR(COALESCE(date_taken, created_at), 6, 2) AS INTEGER) as m,\n                COUNT(*) as cnt\n         FROM photos\n         WHERE COALESCE(date_taken, created_at) IS NOT NULL\n           AND LENGTH(COALESCE(date_taken, created_at)) >= 7\n         GROUP BY y, m\n         HAVING y > 0 AND m > 0 AND m <= 12\n         ORDER BY y DESC, m DESC\"\n    )?;\n    // No `private = 0` — the per-year/month counts include vaulted photos.\n\n// Frontend (dist/index.html:22405): drives the Calendar's year aggregation/labels:\n//   const raw = await invoke('get_year_month_counts').catch(() => []);\n//   _calYearMonthData = raw.map(r => ({ year: r[0], month: r[1], count: r[2] }));",
+  "repro": "1. Vault some photos, e.g. all from August 2024. 2. Lock vault. 3. Open Calendar. 4. The year/month totals derived from get_year_month_counts still count those vaulted photos, so a month that is empty in the (private-filtered) gallery still reports a non-zero photo count — revealing how many hidden photos exist in that period. This is the exact metadata-leak class fixed for the dashboard/header in v1.5.123/125/126 and for folders/status in v1.5.127/128/182; these two calendar queries were not updated.",
+  "fix": "Add `AND private = 0` to the WHERE clause: `... WHERE COALESCE(date_taken, created_at) IS NOT NULL AND LENGTH(COALESCE(date_taken, created_at)) >= 7 AND private = 0 GROUP BY y, m ...` so the calendar navigation counts match the private-filtered gallery.",
+  "confidence": "high",
+  "area": "be-db",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed: get_year_month_counts (db.rs:4370) omits `AND private = 0` while every other count query (dashboard 2053-2078, status 2217-2220, folders 2401/2432, analytics 4246-4327, map 2556) filters it; the result drives the Calendar's visible per-year totals and per-month \"has-data\" indicators (dist/index.html:22405,22459,22468-69), so vaulted photos (private=1, set at db.rs:3514/3520/4952) leak their count/existence into navigation — a real metadata leak."
+  }
+ },
+ {
+  "title": "LAN /api/vault/unlock has no rate limit / lockout — a paired peer can brute-force the vault PIN at full speed",
+  "category": "security",
+  "severity": "medium",
+  "file": "src-tauri/src/lan_server.rs",
+  "line": 245,
+  "evidence": "vault_unlock authenticates the bearer token, then calls db::vault_unlock_kek with the supplied PIN and returns 401 on a miss, with an explicit note that no lockout exists:\n\n    let Some((kek, _phrase)) = kek_opt else {\n        // Mac's spec uses 401 for this case (vs 429 for\n        // lockout, which we don't implement on PC yet — out of scope\n        // for this release).\n        return (StatusCode::UNAUTHORIZED, \"wrong PIN\").into_response();\n    };\n\ndb::vault_unlock_kek (db.rs:3741) bails on a wrong PIN at a cheap SHA-256 check BEFORE the ~250 ms Argon2id step:\n\n    let mut h = Sha256::new();\n    h.update(pin.as_bytes());\n    h.update(salt.as_bytes());\n    if hex::encode(h.finalize()) != stored_hash { return Ok(None); } // wrong PIN — fast\n\nThere is no per-device or global attempt counter / backoff on this endpoint, so a paired peer can submit thousands of PIN guesses per second. The vault_crypto threat-model comment assumes a wrong-PIN backoff (\"3 fails → 30 s, 10 fails → wipe\") caps online attempts, but that backoff is not enforced on the LAN unlock path.",
+  "repro": "A device that has paired (e.g. an old phone, or an attacker who obtained a bearer token) repeatedly POSTs /api/vault/unlock {pin:\"000000\"}, {pin:\"000001\"}, ... A typical 6-digit PIN is exhausted in well under a minute because each wrong guess returns immediately at the SHA gate. On success the peer unlocks the vault remotely and can then read all vault photos via /api/photos?vault_only=true and /api/photo/<id>.",
+  "fix": "Add server-side throttling to vault_unlock: track consecutive failures (e.g. per paired device id from auth_device_id, persisted or in a Mutex<HashMap>) and after N failures return 429 with an exponentially growing cooldown, mirroring the local backoff the crypto module already assumes. Optionally also require that the local user has explicitly opted into remote vault unlock.",
+  "confidence": "medium",
+  "area": "be-lan-vault",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed: lan_server.rs vault_unlock (line 245) returns 401 on wrong PIN with no per-device/global attempt counter, and db.rs:3744 fast-fails wrong PINs at a cheap SHA-256 gate before Argon2id, so a paired peer holding a bearer token can brute-force a 6-digit vault PIN at full speed; the vault_crypto threat model assumes a 3-fail/30s backoff that is not enforced (or implemented) on this LAN path."
+  }
+ },
+ {
+  "title": "PNG 'Creation Time' parser panics on non-ASCII byte at index 19, aborting the whole scan",
+  "category": "crash-panic",
+  "severity": "medium",
+  "file": "src-tauri/src/scanner.rs",
+  "line": 1046,
+  "evidence": "parse_png_creation_date slices a &str by BYTE index without checking a char boundary:\n\n```\nfn parse_png_creation_date(s: &str) -> Option<chrono::NaiveDateTime> {\n    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], \"%Y:%m:%d %H:%M:%S\") { ... }\n    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], \"%Y-%m-%dT%H:%M:%S\") { ... }\n    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], \"%Y-%m-%d %H:%M:%S\") { ... }\n```\n\n`s` is built from the raw PNG tEXt/iTXt 'Creation Time' chunk via std::str::from_utf8 (read_png_creation_time, line ~1034), so it can contain multibyte UTF-8 (a localized weekday in a PIL/iTXt RFC822 string, or arbitrary bytes in a crafted file). If a multibyte codepoint straddles byte offset 19, `&s[..19]` panics: 'byte index 19 is not a char boundary'. This runs inside extract_date_taken (scanner.rs line ~281), which is called from the rayon par_iter().for_each worker in scan_folder_parallel — an unhandled panic there propagates out of the blocking task and aborts the entire library scan, not just the one file.",
+  "repro": "Have a single .png in a scanned/watch folder whose 'Creation Time' text chunk contains a non-ASCII character positioned so a UTF-8 byte lands at offset 19 (e.g. a non-Latin weekday/month name, or any corrupt/crafted chunk). Run a scan over that folder -> the scan thread panics on that file and the whole scan dies.",
+  "fix": "Don't byte-slice a &str. Use a boundary-safe truncation, e.g. `let head: String = s.chars().take(19).collect();` and parse `&head`, or `let head = &s[..s.char_indices().nth(19).map(|(i,_)|i).unwrap_or(s.len())];`. Alternatively wrap the call in catch_unwind, but fixing the slice is the minimal correct change.",
+  "confidence": "medium",
+  "area": "be-import",
+  "verdict": {
+   "isReal": true,
+   "severity": "medium",
+   "justification": "Confirmed: scanner.rs:1046/1050/1054 byte-slice a UTF-8 &str (sourced unfiltered from the PNG Creation Time chunk via from_utf8) as &s[..s.len().min(19)] with no char-boundary check, so a multibyte char straddling offset 19 panics; this runs in extract_date_taken inside par_iter().for_each in scan_folder_impl with no catch_unwind, so rayon re-propagates the panic and aborts the whole scan (and skips scan_running.store(false), wedging future scans) — real but rarely triggered, so medium."
+  }
+ },
+ {
+  "title": "Selecting a sidebar folder while in Timeline/Calendar view does not rescope that view",
+  "category": "broken-flow",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 4094,
+  "evidence": "selectFolder only reloads the Gallery grid:\n  function selectFolder(f){ curFolder=f; document.querySelectorAll('.folder-item').forEach(el=>el.classList.toggle('active',el.dataset.folder===f)); loadPhotos(); _updateFaceBtnLabel(); } // lines 4094-4099\nFolder rows call it directly: `item.onclick=()=>selectFolder(path);` (line 4042). loadTimeline() and loadCalendar() DO honor curFolder (timeline: get_timeline_buckets {folder:curFolder||null}, line 9111; calendar uses curFolder, line 22574) — but only when they are (re)invoked. selectFolder never re-invokes them. So if the user is already inside Timeline and clicks a different folder/year/month in the sidebar, curFolder changes and the hidden Gallery grid repaints, but the visible Timeline keeps showing the previously-scoped buckets. v1.5.403 made Timeline inherit folder scope only on entry, not on live folder change.",
+  "repro": "Open Timeline. In the sidebar folder tree, expand a year and click a month folder. The Timeline dial does not change to that folder's months; it still shows the prior scope. (Switching away and back to Timeline finally picks up the new folder.)",
+  "fix": "Make folder selection re-render the active view. In selectFolder, after setting curFolder, dispatch by view: e.g. `if(curView==='timeline'){loadTimeline();return;} if(curView==='calendar'){loadCalendar();return;}` before/instead of the unconditional loadPhotos(); (or call switchToView('gallery') if folder picks should always drop the user into the grid).",
+  "confidence": "medium",
+  "area": "fe-nav",
+  "verdict": {
+   "isReal": true,
+   "severity": "low",
+   "justification": "Confirmed: selectFolder (dist/index.html:4094-4099) only sets curFolder and calls loadPhotos(), which ends in renderGrid() (line 4353) and never re-invokes loadTimeline(); since Timeline IS folder-scoped via get_timeline_buckets{folder:curFolder||null} (line 9111) but is only re-run on tab entry (line 3962), clicking a sidebar folder while in Timeline leaves the visible dial showing stale prior-folder buckets — a real but transient, trivially-recoverable stale-view (downgraded from medium; note the finding's claim that the main Calendar render honors curFolder is inaccurate — loadCalendar at 22397 ignores curFolder, only filterByDate uses it)."
+  }
+ },
+ {
+  "title": "Slideshow 'don't cut videos off' guard reads the wrong list in Timeline/Calendar context, so videos are skipped before they finish",
+  "category": "broken-flow",
+  "severity": "low",
+  "file": "dist/index.html",
+  "line": 22785,
+  "evidence": "The slideshow tick looks the current item up only in the global `photos` array, not the active lightbox list:\n\n  const cur = (typeof photos!=='undefined' && _lbCurrentId!=null)\n    ? photos.find(p=>p.id===_lbCurrentId)\n    : null;\n  if (cur && cur.media_type === 'video') {\n    const vid = document.getElementById('lbVideo');\n    if (vid && !vid.paused && !vid.ended && vid.currentSrc) return; // wait\n  }\n  lbNav(1);\n\nWhen the lightbox is scoped to a Timeline month or Calendar day (`_lbContextPhotos` set), `_lbCurrentId` is typically only in that context list, so `photos.find(...)` returns undefined, the `cur.media_type === 'video'` guard never trips, and the slideshow advances past a still-playing video instead of letting it play through — the exact behaviour the v1.5.116 comment says it prevents.",
+  "repro": "Open a Calendar day (or Timeline month) that contains a video, start the slideshow (Space). When the slideshow reaches the video it advances on the next interval tick rather than waiting for the clip to finish.",
+  "fix": "Resolve `cur` from the active list: `const L = (typeof _lbList==='function') ? _lbList() : photos; const cur = (_lbCurrentId!=null) ? L.find(p=>p.id===_lbCurrentId) : null;`",
+  "confidence": "medium",
+  "area": "fe-lightbox",
+  "verdict": {
+   "isReal": true,
+   "severity": "low",
+   "justification": "Confirmed: the slideshow tick at dist/index.html:22785 resolves the current item via global `photos.find()` instead of the canonical `_lbList()` accessor (16647), so in Timeline (`_lbContextPhotos=_tlFlatPhotos`, 9388) and stay-in-Calendar (`_lbContextPhotos=dayPhotos`, 22589) contexts — where context items are not in global `photos` (per the code's own comment at 9396-9399) — `cur` is undefined, the video guard never fires, and a still-playing video is cut off; cosmetic-only impact in scoped slideshow, so low is correct."
+  }
+ },
+ {
+  "title": "refreshCollections renders every collection row synchronously on the main thread (no virtualization); thousands of rows cause UI jank on each rebuild",
+  "category": "perf",
+  "severity": "medium",
+  "file": "dist/index.html",
+  "line": 4102,
+  "evidence": "refreshCollections() clears and rebuilds the entire list each call, one DOM node + two closures per collection, with no virtualization or batching:\n\n  const el=$('collectionsList');el.innerHTML='';\n  for(const c of cols){\n    const item=document.createElement('div');\n    item.innerHTML=`...${c.name}...`;\n    item.onclick=()=>loadCollectionPhotos(c);\n    item.oncontextmenu=(ev)=>{...exportCollectionToFolder(c);};\n    el.appendChild(item);\n  }\n\nThe container (#collectionsList, index.html:1136) is `max-height:120px;overflow-y:auto`, and the collapse mechanism is pure CSS (`.collapsed{max-height:0}`, line 91-92) — so ALL nodes are built even when the section is collapsed. With the ~3992 collections produced by the folders→collections run (plus real ones) this is ~4000-8000 nodes built synchronously. refreshCollections runs on startup (line 14712), after every add-to-collection (5904), and after saveAllFoldersAsCollections (20926).",
+  "repro": "After running saveAllFoldersAsCollections on a 74k-photo library with thousands of folders, the sidebar holds thousands of collections. Each subsequent add-to-collection or app restart triggers refreshCollections(), which rebuilds all rows on the main thread, producing a visible multi-hundred-ms hitch every time. The overflow:auto + max-height:120px means only ~6 rows are ever visible, so the cost is entirely wasted on off-screen nodes.",
+  "fix": "Virtualize or cap the render: only render rows near the visible 120px viewport (e.g. on scroll), or render the first N (e.g. 200) with a 'show more' affordance, or use DocumentFragment + IntersectionObserver. At minimum, only rebuild when the section is expanded and skip the build while collapsed.",
+  "confidence": "medium",
+  "area": "fe-collections",
+  "verdict": {
+   "isReal": true,
+   "severity": "low",
+   "justification": "Confirmed: refreshCollections (index.html:4102-4117) synchronously builds one DOM div + 2 closures per collection with no virtualization/batching, get_collections (db.rs:2260) has no LIMIT, collapse is pure CSS so nodes build even when hidden, and save_all_folders_as_collections (commands.rs:15541) makes one collection per folder — so thousands of rows are rebuilt on each of the confirmed call sites (14712/5904/20926); real but gated behind an explicit power-user action and the per-rebuild cost is closer to tens of ms than the claimed multi-hundred-ms, so low severity."
+  }
+ },
+ {
+  "title": "A transient/decode failure marks the photo faces_scanned=1 and its faces are never recovered",
+  "category": "data-loss",
+  "severity": "medium",
+  "file": "src-tauri/src/commands.rs",
+  "line": 9629,
+  "evidence": "Every photo in the batch is marked faces_scanned=1 up front (line ~9460). When open_image or detect_faces then fails, the loop simply skips the photo while it stays marked scanned:\n\n    let img = match crate::thumbnail::open_image(path) {\n        Ok(i) => { opened += 1; i },\n        Err(_) => { open_failed += 1; continue; },   // still faces_scanned=1\n    };\n    let detected = match crate::face::detect_faces(&face_models, &img) {\n        Ok(d) => d,\n        Err(e) => { eprintln!(\"[face] detect error on {}: {}\", path, e); continue; },  // still faces_scanned=1\n    };\n\nopen_image fails for transient/recoverable reasons that are NOT 'this photo has no face': HEIC/HEIF when the Microsoft HEIF Image Extension is not yet installed (convert_heic_to_image hard-fails), RAW needing a codec not yet installed, a file briefly locked by another process, or a flaky network/removable drive. The v1.5.401 up-front-mark rationale was specifically for faceless photos, not for 'could not even decode'. Because no command ever resets faces_scanned to 0, these photos are excluded from every future scan and the user has no way to retry them.",
+  "repro": "User runs a face scan before installing the HEIF Image Extension (or while photos live on a removable drive that disconnects briefly). All HEIC photos hit the open_image error path, are marked faces_scanned=1, and contribute 0 faces. Later the user installs the codec / reconnects the drive and re-runs Identify Faces — those HEIC photos are skipped forever and none of their faces ever appear.",
+  "fix": "Only mark a photo faces_scanned=1 after a successful open_image+detect_faces (i.e. mark at the end of the iteration, not up front), OR on the open_failed/detect-error branch reset that photo's marker (UPDATE photos SET faces_scanned = 0 WHERE id = ?). Distinguish 'scanned, no face' (mark) from 'could not decode' (leave unscanned for retry).",
+  "confidence": "medium",
+  "area": "be-faces",
+  "verdict": {
+   "isReal": true,
+   "severity": "low",
+   "justification": "Real bug: a transient open_image/detect failure (e.g. HEIC before the HEIF codec is installed) leaves the photo marked faces_scanned=1 (commands.rs:9460-9639), and all batch scans filter WHERE faces_scanned=0 with no auto-reset, so they're permanently excluded from bulk re-scans — but the finding's \"no way to retry\" is false: detect_faces_in_photo (lightbox ↻ rescan button) and redetect_unnamed_faces_in_folder both re-detect ignoring faces_scanned, so faces are recoverable per-photo, lowering severity."
+  }
+ },
+ {
+  "title": "backfill_dates stamps file mtime/ctime as 'date taken', re-polluting dates the scanner intentionally left NULL",
+  "category": "wrong-result",
+  "severity": "low",
+  "file": "src-tauri/src/commands.rs",
+  "line": 2304,
+  "evidence": "backfill_dates fills missing date_taken using EXIF, else file created/modified time, with no placeholder filtering and no oldest-wins logic:\n\n```\nlet date = crate::exif_reader::read_exif(path).ok().and_then(|e| e.date_taken)\n    .or_else(|| {\n        std::fs::metadata(path).ok().and_then(|m| {\n            m.created().or_else(|_| m.modified()).ok().map(|t| {\n                let dt: chrono::DateTime<chrono::Local> = t.into();\n                dt.format(\"%Y-%m-%d %H:%M:%S\").to_string()\n            })\n        })\n    });\n```\n\nThis directly contradicts the scanner's deliberate v1.5.266 decision (scanner.rs lines ~310-320) to DROP mtime/ctime as a date source because 'mtime is a lie for date taken' (it's usually the date the file was dragged onto the PC), leaving such photos date_taken=NULL on purpose. Running this user-facing backfill writes those import-time timestamps as capture dates for every EXIF-less photo (Facebook/WhatsApp exports, screenshots), which then drives the Newest/Oldest sort, the timeline, and the calendar to show wrong dates — exactly the bug v1.5.266 was meant to prevent.",
+  "repro": "Have EXIF-less photos (e.g. WhatsApp/Facebook exports) in the library whose mtime is recent (when they were copied to the PC). They correctly have date_taken=NULL. Click the 'backfill dates' action -> they get date_taken = recent copy time and now appear at the top of 'Newest' / on today's month in timeline/calendar.",
+  "fix": "Make backfill_dates use the same source-of-truth resolver the scanner uses: call crate::scanner::extract_date_taken(path) (which filters placeholders, ignores mtime, and only uses EXIF/embedded-XMP/MP4/PNG/path-pattern signals) and only update when it returns Some. Drop the raw created()/modified() fallback so the backfill never writes import-time as capture time.",
+  "confidence": "medium",
+  "area": "be-import",
+  "verdict": {
+   "isReal": true,
+   "severity": "low",
+   "justification": "Confirmed: backfill_dates (commands.rs:2304-2311) falls back to fs created()/modified() for exactly the date_taken IS NULL photos (db.rs:1577) that scanner.rs:310-320 (v1.5.266) deliberately left NULL because \"mtime is a lie for date taken,\" and read_exif lacks the scanner's XMP/PNG/MP4/path-pattern and placeholder filtering — so EXIF-less photos get import-time stamped as capture date, mis-sorting Newest/timeline/calendar; real and reachable (invoked from loadTimeline) but a recoverable cosmetic wrong-result, hence low."
+  }
+ }
+]

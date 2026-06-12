@@ -3102,17 +3102,27 @@ function activeFaceScope() {
   if (folder) return { folder, yearMonth: null, photoIds: null };
 
   // 2. Timeline view focused on a single year+month
+  // v1.5.409 — TYPE FIX: the dial stores _tlYear as a STRING ('2019' — it
+  // comes from year_month.split('-') and _tlByYear's string keys), so the old
+  // `typeof _tlYear === 'number'` guard NEVER matched and every Timeline-
+  // scoped face scan silently fell through to the whole library ("Scan
+  // 58,829 photos?" while looking at one month). Parse instead of
+  // type-checking; same for the Calendar branch below.
   if (typeof curView === 'string' && curView === 'timeline'
-      && typeof _tlYear === 'number' && typeof _tlMonth === 'number') {
-    const ym = `${_tlYear}-${String(_tlMonth).padStart(2,'0')}`;
-    return { yearMonth: ym, folder: null, photoIds: null };
+      && _tlYear != null && _tlMonth != null) {
+    const _y = parseInt(_tlYear, 10), _m = parseInt(_tlMonth, 10);
+    if (Number.isFinite(_y) && Number.isFinite(_m) && _m >= 1 && _m <= 12) {
+      return { yearMonth: `${_y}-${String(_m).padStart(2,'0')}`, folder: null, photoIds: null };
+    }
   }
 
   // 3. Calendar view focused on a single year+month
   if (typeof curView === 'string' && curView === 'calendar'
-      && typeof _calYear === 'number' && typeof _calMonth === 'number') {
-    const ym = `${_calYear}-${String(_calMonth).padStart(2,'0')}`;
-    return { yearMonth: ym, folder: null, photoIds: null };
+      && _calYear != null && _calMonth != null) {
+    const _y = parseInt(_calYear, 10), _m = parseInt(_calMonth, 10);
+    if (Number.isFinite(_y) && Number.isFinite(_m) && _m >= 1 && _m <= 12) {
+      return { yearMonth: `${_y}-${String(_m).padStart(2,'0')}`, folder: null, photoIds: null };
+    }
   }
 
   // 4. v1.5.299 — Gallery view with the month chip set.  This was the
@@ -16067,11 +16077,16 @@ function showFacePopup(faces, idx){
         clusterFaceIds: clusterIds
       });
       // Record undo point BEFORE advancing — Back needs to know this action happened.
+      // v1.5.409 — also capture the exact face ids this Save assigned (seeds +
+      // propagated). Back passes them to undo_face_name so undoing a Save on an
+      // EXISTING person reverts only this action instead of wiping every face
+      // the person accumulated across sessions.
       _facePopupHistory.push({
         idx,
         type: 'name',
         personId: result.person_id,
         wasNewPerson: !!result.was_new_person,
+        faceIds: Array.isArray(result.assigned_face_ids) ? result.assigned_face_ids : null,
       });
       statusEl.textContent=`✓ "${name}" — ${result.total} face(s) tagged`;
       // Refresh sidebar so counts animate up as the user names faces.
@@ -16185,6 +16200,10 @@ function showFacePopup(faces, idx){
           await invoke('undo_face_name', {
             personId: last.personId,
             deletePerson: last.wasNewPerson,
+            // v1.5.409 — scope the undo to the faces this Save actually
+            // assigned (see push site). null → backend legacy whole-person
+            // path, which is only correct for a brand-new person.
+            faceIds: last.faceIds || null,
           });
         }
       } catch (e) {
