@@ -8601,8 +8601,17 @@ $('searchInput').oninput=e=>{
     }
   },300);
 };
-$('statusFilter').onchange=e=>{curStatus=e.target.value;loadPhotos()};
-$('ratingFilter').onchange=e=>{curRating=e.target.value;_syncQuickFilterChips();loadPhotos()};
+// v1.5.413 — toolbar filters must show their results in the Gallery grid.
+// Like the sidebar filters fixed in v1.5.405/406, status/rating/sort/quick-chip
+// changes called loadPhotos() — which renders by curView — so from Timeline/
+// Map/Calendar the filtered set painted into the hidden #gridWrap and nothing
+// visibly changed (chip went active, count dropped, view unchanged).
+function _toolbarFilterReload(){
+  if (typeof curView==='string' && curView!=='gallery' && typeof switchToView==='function') switchToView('gallery');
+  loadPhotos();
+}
+$('statusFilter').onchange=e=>{curStatus=e.target.value;_toolbarFilterReload()};
+$('ratingFilter').onchange=e=>{curRating=e.target.value;_syncQuickFilterChips();_toolbarFilterReload()};
 // Sort preference (toolbar) — persists across sessions. Applied client-side in
 // loadPhotos() after all filters run. "" means "keep backend order" (which is
 // roughly newest-first by id).
@@ -8610,7 +8619,7 @@ let curSort=(()=>{try{return localStorage.getItem('rt_sort_v1')||''}catch(_){ret
 (()=>{const s=$('sortSelect');if(s){s.value=curSort||'';s.onchange=e=>{
   curSort=e.target.value;
   try{localStorage.setItem('rt_sort_v1',curSort);}catch(_){}
-  loadPhotos();
+  _toolbarFilterReload();
 };}})();
 function _applySort(arr){
   if(!curSort||!Array.isArray(arr))return arr;
@@ -8686,7 +8695,7 @@ document.querySelectorAll('#quickFilterChips .qf-chip').forEach(el=>{
     const v=el.dataset.qf;
     curRating=(curRating===v)?'':v;
     $('ratingFilter').value=curRating;
-    _syncQuickFilterChips();loadPhotos();
+    _syncQuickFilterChips();_toolbarFilterReload();
   };
 });
 
@@ -11074,6 +11083,14 @@ function clearAllFilters(){
   // v1.5.201 — also drop any active map-region filter so "Clear filters"
   // actually clears everything visible.
   _mapRegionFilter = null;
+  // v1.5.413 — also drop the person filter. It wasn't cleared here, so
+  // "Clear filters" left the sidebar person pill active and the grid still
+  // scoped to that person (find_photos_by_person), contradicting the button.
+  if (typeof _currentPersonFilter !== 'undefined' && _currentPersonFilter) {
+    _currentPersonFilter = null;
+    const pp = $('searchPersonPill'); if (pp) pp.classList.remove('active');
+    const sb = document.querySelector('.search-box'); if (sb) sb.classList.remove('person-active');
+  }
   const mcnt = document.getElementById('clearFiltersCount');
   if (mcnt) mcnt.textContent = '';
   // Repaint
@@ -11087,6 +11104,7 @@ function _updateClearFiltersPill(){
   const pill=$('clearFiltersPill'); if(!pill)return;
   const parts=[];
   if(curFolder) parts.push('folder');
+  if(typeof _currentPersonFilter!=='undefined'&&_currentPersonFilter) parts.push('person');
   if(curRating) parts.push('rating');
   if(curStatus) parts.push('status');
   if(curSearch) parts.push('search');
