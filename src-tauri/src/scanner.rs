@@ -250,7 +250,13 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
                 // truncating after the seconds field. ISO-8601 form
                 // is "YYYY-MM-DDTHH:MM:SS" = 19 chars; longer strings
                 // tack on .frac and/or tz, which we don't need.
-                let trimmed = if s.len() >= 19 { &s[..19] } else { s };
+                // v1.5.412 — char-boundary-safe truncation to 19 chars (was
+                // `&s[..19]`, which panics if byte 19 splits a multibyte char
+                // in a malformed/garbage date field, aborting the scan).
+                let trimmed = match s.char_indices().nth(19) {
+                    Some((b, _)) => &s[..b],
+                    None => s,
+                };
                 // Try a handful of common shapes.
                 let candidates_fmt = [
                     "%Y-%m-%dT%H:%M:%S",
@@ -1042,16 +1048,22 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn parse_png_creation_date(s: &str) -> Option<chrono::NaiveDateTime> {
     use chrono::NaiveDateTime;
+    // v1.5.412 — char-safe 19-char prefix. The old `&s[..s.len().min(19)]`
+    // byte-slices: when a PNG "Creation Time" tEXt value has a multibyte char
+    // (e.g. a Turkish letter) such that byte 19 is not a char boundary, the
+    // slice PANICS and aborts the whole library scan. Dates are ASCII so the
+    // char-prefix is identical for valid input and merely safe for garbage.
+    let head: String = s.chars().take(19).collect();
     // EXIF colon
-    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], "%Y:%m:%d %H:%M:%S") {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&head, "%Y:%m:%d %H:%M:%S") {
         return Some(dt);
     }
     // ISO 8601 with T
-    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], "%Y-%m-%dT%H:%M:%S") {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&head, "%Y-%m-%dT%H:%M:%S") {
         return Some(dt);
     }
     // ISO with space
-    if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..s.len().min(19)], "%Y-%m-%d %H:%M:%S") {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&head, "%Y-%m-%d %H:%M:%S") {
         return Some(dt);
     }
     // RFC 822 like "Sun, 06 Oct 2024 20:20:11 GMT" — chrono can parse via DateTime

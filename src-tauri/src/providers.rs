@@ -461,7 +461,10 @@ pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result
     let (tags, desc, loc) = extract_tags_and_description(text);
 
     if tags.is_empty() {
-        let preview = &text[..text.len().min(200)];
+        // v1.5.412 — char-safe truncation. `&text[..min(200)]` panics when the
+        // 200th byte splits a multibyte char (common with Turkish/non-ASCII
+        // model output), killing the tagging worker on the error path itself.
+        let preview: String = text.chars().take(200).collect();
         return Err(anyhow::anyhow!(
             "Ollama response could not be parsed into tags. Raw: {}",
             preview
