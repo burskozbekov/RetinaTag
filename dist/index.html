@@ -7802,58 +7802,17 @@ $('btnScanFacesAll').onclick=async()=>{
         // refresh sidebar so the user sees counts climb each batch.
         refreshPersonsSidebar();
 
-        let unknownFaces = [];
-        // v1.5.410 — pass the scan's LOCKED scope (folder / yearMonth /
-        // photoIds), not just the folder. Pre-1.5.410 a Timeline-scoped scan's
-        // between-batch popup surfaced WHOLE-LIBRARY unknown faces (and the
-        // post-popup batch skip then skipped them all) — scope bleed.
-        try { unknownFaces = await invoke('get_unknown_faces', _scope); } catch(_) {}
-        // get_unknown_faces also auto-assigns via centroid matching —
-        // refresh again to reflect those bumps.
-        refreshPersonsSidebar();
-
-        if (unknownFaces && unknownFaces.length > 0) {
-          // Collect ALL face IDs that will be shown in the popup
-          const allShownFaceIds = [];
-          for (const f of unknownFaces) {
-            if (f.cluster_face_ids && f.cluster_face_ids.length > 0) {
-              allShownFaceIds.push(...f.cluster_face_ids);
-            } else {
-              allShownFaceIds.push(f.id);
-            }
-          }
-
-          toast(`${unknownFaces.length} unknown face(s) — please identify them`, 'info');
-          await new Promise(resolve => {
-            showFacePopup(unknownFaces, 0);
-            // v1.5.75 — bounded poll (see same fix above for explanation).
-            let ticks = 0;
-            const checkInterval = setInterval(() => {
-              ticks++;
-              if (!document.querySelector('#faceNameInput') || ticks > 120) {
-                clearInterval(checkInterval);
-                resolve();
-              }
-            }, 500);
-          });
-
-          // AFTER popup closes: skip ALL shown faces that weren't named.
-          // Named faces already have person_id set, so this only affects unnamed ones.
-          if (allShownFaceIds.length > 0) {
-            try {
-              const skipped = await invoke('skip_faces_batch', {faceIds: allShownFaceIds});
-              console.log('[face] Auto-skipped unnamed faces:', skipped);
-            } catch(e) {
-              console.error('[face] Batch skip error:', e);
-              // Fallback: try one by one
-              for (const fid of allShownFaceIds) {
-                try { await invoke('skip_face', {faceId: fid}); } catch(_) {}
-              }
-            }
-          }
-
-          refreshPersonsSidebar();
-        }
+        // v1.5.411 — NO MORE mid-scan "Who is this?" modal. The user asked
+        // (repeatedly): "sormasın" — don't interrupt. The auto-popup had two
+        // structural problems beyond annoyance: (1) embedding suppression can
+        // never be perfect (meme/filtered media keeps producing "novel" faces
+        // of already-skipped people), so the popup kept resurfacing people the
+        // user had dealt with; (2) when it closed it force-skipped everything
+        // unnamed, silently burning pending faces mid-scan. Unknown faces now
+        // simply accumulate as pending; the sidebar badge shows the count and
+        // the user reviews via the 👤 Faces button whenever THEY choose.
+        // (recognize_all_faces above still auto-matches known people each
+        // batch, so naming keeps propagating silently.)
       }
     }
 
@@ -7864,7 +7823,13 @@ $('btnScanFacesAll').onclick=async()=>{
     if (window._faceScanStopped) {
       toast(`Face scan stopped — scanned ${totalScanned.toLocaleString()} photos, found ${totalNewFaces} face(s).`, 'warn');
     } else if (totalNewFaces > 0) {
-      toast(`Done! ${totalNewFaces} face(s) detected in ${totalScanned.toLocaleString()} photos.`, 'success');
+      // v1.5.411 — single OPT-IN review offer at scan end (replaces the
+      // per-batch auto-modal). Clicking opens the same Who-is-this flow;
+      // ignoring it leaves the faces pending for later.
+      toastAction(
+        `Done! ${totalNewFaces} face(s) detected in ${totalScanned.toLocaleString()} photos.`,
+        'success', '👤 Review unknown faces', () => { try { checkUnknownFaces(true); } catch(_) {} }
+      );
     } else {
       toast(`Face scan complete — scanned ${totalScanned.toLocaleString()} photos, no new faces.`, 'info');
     }

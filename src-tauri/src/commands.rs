@@ -7818,8 +7818,12 @@ pub async fn get_unknown_faces(
             && named1_sim >= NAMED_FLAT_ASSIGN
             && (named1_sim - named2_sim) >= NAMED_FLAT_MARGIN
             && named1_sim > best_skip_sim;
-        let skip_ok = best_skip_sim >= SKIP_THRESH
-            && best_skip_sim >= best_known_sim;
+        // v1.5.411 — dropped the old `best_skip_sim >= best_known_sim` veto.
+        // Both assignment paths already ran first (each requiring they beat
+        // the skip signal), so by this point the only outcomes are SKIP or
+        // ASK — and a weak, non-actionable named-person similarity must not
+        // override the user's explicit skip.
+        let skip_ok = best_skip_sim >= SKIP_THRESH;
 
         if assign_ok {
             if let Some(&(pid, name, _, _)) = known_scored.first() {
