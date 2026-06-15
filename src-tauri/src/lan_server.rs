@@ -209,6 +209,15 @@ struct VaultUnlockBody {
     pin: String,
 }
 
+// v1.5.420 — brute-force guard for the LAN vault-unlock endpoint. A paired
+// peer could otherwise hammer /api/vault/unlock with PIN guesses (the vault PIN
+// is short + numeric). After VAULT_MAX_FAILS wrong PINs the endpoint locks for
+// VAULT_LOCKOUT; a correct PIN — or the lockout expiring — resets the counter.
+static VAULT_UNLOCK_GUARD: std::sync::Mutex<(u32, Option<std::time::Instant>)> =
+    std::sync::Mutex::new((0, None));
+const VAULT_MAX_FAILS: u32 = 5;
+const VAULT_LOCKOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 async fn vault_unlock(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -222,6 +231,17 @@ async fn vault_unlock(
         };
         if auth_device_id(&headers, &conn).is_none() {
             return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
+        }
+    }
+    // v1.5.420 — reject while locked out from prior wrong PINs.
+    {
+        let mut g = VAULT_UNLOCK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        match g.1 {
+            Some(until) if std::time::Instant::now() < until => {
+                return (StatusCode::TOO_MANY_REQUESTS, "Too many wrong PINs — locked out").into_response();
+            }
+            Some(_) => { g.0 = 0; g.1 = None; } // lockout window elapsed — reset
+            None => {}
         }
     }
     // Derive KEK on the blocking pool (Argon2id can hit 1 s on a
@@ -243,11 +263,23 @@ async fn vault_unlock(
         }
     };
     let Some((kek, _phrase)) = kek_opt else {
-        // Wrong PIN.  Mac's spec uses 401 for this case (vs 429 for
-        // lockout, which we don't implement on PC yet — out of scope
-        // for this release).
+        // Wrong PIN. v1.5.420 — count it; after VAULT_MAX_FAILS the endpoint
+        // locks (429) for VAULT_LOCKOUT. Mac uses 401 for the wrong-PIN case.
+        {
+            let mut g = VAULT_UNLOCK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+            g.0 = g.0.saturating_add(1);
+            if g.0 >= VAULT_MAX_FAILS {
+                g.1 = Some(std::time::Instant::now() + VAULT_LOCKOUT);
+            }
+        }
         return (StatusCode::UNAUTHORIZED, "wrong PIN").into_response();
     };
+    // Correct PIN — clear the brute-force counter.
+    {
+        let mut g = VAULT_UNLOCK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        g.0 = 0;
+        g.1 = None;
+    }
     // Stash the KEK in AppState so the future remote-photo endpoints
     // (and any local FE code) see the vault as unlocked.
     if let Some(ref handle) = state.app_handle {
