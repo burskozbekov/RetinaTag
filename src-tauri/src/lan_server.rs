@@ -400,20 +400,28 @@ async fn thumb_for_id(
             return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
         }
     }
-    // Resolve photo + hash.
-    let (path, hash) = {
+    // Resolve photo + hash + private flag.
+    let (path, hash, is_private) = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
         };
-        match crate::db::get_photo_path_and_hash(&conn, photo_id) {
+        let (p, h) = match crate::db::get_photo_path_and_hash(&conn, photo_id) {
             Ok(v) => v,
             Err(_) => return (StatusCode::NOT_FOUND, format!("photo {photo_id} not found")).into_response(),
-        }
+        };
+        // v1.5.417 — gate on the DB `private` flag, not just the .rtenc
+        // extension. A photo can be marked private (e.g. via XMP cross-sync
+        // from the Mac) while still stored as plaintext on disk; the old
+        // .rtenc-only gate served those straight to a paired peer.
+        let is_private = conn
+            .query_row("SELECT private FROM photos WHERE id=?1", [photo_id], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) == 1;
+        (p, h, is_private)
     };
-    // Vault gate: if the path is a .rtenc, vault must be unlocked.
+    // Vault gate: encrypted (.rtenc) OR DB-private → vault must be unlocked.
     let is_vault = crate::vault_files::is_encrypted_path(std::path::Path::new(&path));
-    if is_vault {
+    if is_vault || is_private {
         let unlocked = if let Some(ref handle) = state.app_handle {
             use tauri::Manager;
             let app_state = handle.state::<crate::AppState>();
@@ -542,19 +550,25 @@ async fn photo_for_id(
             return (StatusCode::UNAUTHORIZED, "Invalid or missing bearer token").into_response();
         }
     }
-    // Resolve photo.
-    let path = {
+    // Resolve photo + private flag.
+    let (path, is_private) = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db lock poisoned").into_response(),
         };
-        match crate::db::get_photo_path_and_hash(&conn, photo_id) {
+        let p = match crate::db::get_photo_path_and_hash(&conn, photo_id) {
             Ok((p, _)) => p,
             Err(_) => return (StatusCode::NOT_FOUND, format!("photo {photo_id} not found")).into_response(),
-        }
+        };
+        // v1.5.417 — gate on the DB `private` flag too (a photo can be private
+        // without being .rtenc-encrypted — e.g. private set via XMP sync).
+        let is_private = conn
+            .query_row("SELECT private FROM photos WHERE id=?1", [photo_id], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) == 1;
+        (p, is_private)
     };
     let is_vault = crate::vault_files::is_encrypted_path(std::path::Path::new(&path));
-    if is_vault {
+    if is_vault || is_private {
         let unlocked = if let Some(ref handle) = state.app_handle {
             use tauri::Manager;
             let app_state = handle.state::<crate::AppState>();
