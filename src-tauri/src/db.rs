@@ -3312,13 +3312,18 @@ pub fn get_unassigned_faces_with_embeddings_in_folder(
     conn: &Connection,
     folder: &str,
 ) -> Result<Vec<(i64, i64, Vec<u8>)>> {
+    // v1.5.423 — gate out private (vaulted) photos. Without `p.private = 0`
+    // this folder-scoped query surfaced face embeddings of hidden photos into
+    // the public "Who is this?" tagging UI — leaking a vaulted photo's
+    // existence + the person's face. The month-scoped sibling already gates.
     let mut stmt = conn.prepare(
         "SELECT f.id, f.photo_id, f.embedding
          FROM face_regions f
          JOIN photos p ON p.id = f.photo_id
          WHERE f.embedding IS NOT NULL
            AND f.person_id IS NULL
-           AND p.folder = ?1",
+           AND p.folder = ?1
+           AND p.private = 0",
     )?;
     let rows = stmt
         .query_map(params![folder], |r| {
@@ -3376,13 +3381,17 @@ pub fn get_propagatable_faces_with_embeddings_in_folder(
     folder: &str,
 ) -> Result<Vec<(i64, i64, Vec<u8>)>> {
     // v1.5.45 — STRICT folder match (see top-level note).
+    // v1.5.423 — also gate out private (vaulted) photos (same leak as the
+    // unassigned-faces query above): name-and-propagate must never retag or
+    // expose faces that live in the vault.
     let mut stmt = conn.prepare(
         "SELECT f.id, f.photo_id, f.embedding
          FROM face_regions f
          JOIN photos p ON p.id = f.photo_id
          WHERE f.embedding IS NOT NULL
            AND (f.person_id IS NULL OR f.person_id = -1)
-           AND p.folder = ?1",
+           AND p.folder = ?1
+           AND p.private = 0",
     )?;
     let rows = stmt
         .query_map(params![folder], |r| {
