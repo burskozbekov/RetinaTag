@@ -9892,7 +9892,27 @@ pub async fn detect_faces_background(
             // Use open_image which supports RAW/HEIC/video
             let img = match crate::thumbnail::open_image(path) {
                 Ok(i) => { opened += 1; i },
-                Err(_) => { open_failed += 1; continue; },
+                Err(_) => {
+                    open_failed += 1;
+                    // v1.5.422 — this photo was marked faces_scanned=1 UP FRONT
+                    // (so the loop terminates). If the decode failed only because
+                    // the file isn't reachable right now — the external D: drive is
+                    // offline, the file is mid-move, a network volume dropped — then
+                    // un-mark it so a LATER scan retries once it's back. Without
+                    // this, an offline drive during a scan permanently buries every
+                    // face on it (marked scanned, never actually processed). We do
+                    // NOT un-mark when the file still exists but won't decode
+                    // (genuinely corrupt): re-queuing those would revive the
+                    // v1.5.401 runaway re-scan that finds zero faces every pass.
+                    if !std::path::Path::new(path).exists() {
+                        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+                        let _ = conn.execute(
+                            "UPDATE photos SET faces_scanned = 0 WHERE id = ?1",
+                            rusqlite::params![*photo_id],
+                        );
+                    }
+                    continue;
+                },
             };
             let detected = match crate::face::detect_faces(&face_models, &img) {
                 Ok(d) => d,
