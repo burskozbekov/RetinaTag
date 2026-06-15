@@ -1201,6 +1201,7 @@ pub fn run() {
             commands::get_photos_timeline,
             commands::get_timeline_buckets,
             commands::backfill_dates,
+            commands::repair_mtime_dates,
             commands::set_photo_date_taken,
             commands::check_ffmpeg,
             commands::get_settings,

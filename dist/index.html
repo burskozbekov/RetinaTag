@@ -9101,6 +9101,16 @@ async function loadTimeline(reset=true){
     _tlBackfilled=true;
     (async () => {
       try{
+        // v1.5.414 — first UNDO the old mtime date-corruption: photos whose
+        // date_taken was wrongly stamped with their file-modified time (e.g.
+        // a batch of EXIF-less photos copied today, all forced to "today").
+        // One-shot + backend-guarded, so it does real work only once ever.
+        const fixed = await invoke('repair_mtime_dates');
+        if(fixed > 0){
+          toast(`📅 ${fixed} wrong photo dates repaired — re-open Timeline to refresh`, 'info');
+        }
+      }catch(_){}
+      try{
         const n = await invoke('backfill_dates');
         if(n > 0){
           toast(`${n} photo dates extracted — re-open Timeline to refresh`, 'info');

@@ -2299,16 +2299,26 @@ pub async fn backfill_dates(
     let count = tokio::task::spawn_blocking(move || {
         let mut updated = 0usize;
         for (id, path) in &photos {
-            let date = crate::exif_reader::read_exif(path)
-                .ok().and_then(|e| e.date_taken)
-                .or_else(|| {
-                    std::fs::metadata(path).ok().and_then(|m| {
-                        m.created().or_else(|_| m.modified()).ok().map(|t| {
-                            let dt: chrono::DateTime<chrono::Local> = t.into();
-                            dt.format("%Y-%m-%d %H:%M:%S").to_string()
-                        })
-                    })
-                });
+            // v1.5.414 — CRITICAL date-integrity fix. This used to be
+            //   read_exif().or_else(|| metadata.created()/.modified())
+            // i.e. fall back to the file's mtime/ctime when EXIF had no
+            // date. That mtime fallback is exactly what v1.5.266 deleted
+            // from the scanner ("mtime is a lie for date taken") — but this
+            // function was missed. Real-world damage: the user copied ~2,000
+            // EXIF-less iPhone JPGs into D:\Fotograflar\2026\06-June\; their
+            // file mtime was the copy-time (today). backfill ran on Timeline
+            // open, EXIF read None, and stamped date_taken = today ~noon on
+            // all of them — flooding the Timeline with a fake "June 15, 2026
+            // — 2,067 photos" bucket.
+            //
+            // Fix: delegate to scanner::extract_date_taken, the single source
+            // of truth (EXIF → embedded-XMP → PNG/MP4 → path-pattern → None).
+            // For the June-folder photos that yields 2026-06-01 from the
+            // "2026\06" path pattern (matches how the user filed them);
+            // genuinely signal-less photos stay NULL, which is correct — we
+            // do not know when they were taken, and NULL sorts to the end
+            // instead of polluting today.
+            let date = crate::scanner::extract_date_taken(path);
             if let Some(d) = date {
                 if let Ok(conn) = db_arc.lock() {
                     db::update_photo_date_taken(&conn, *id, &d).ok();
@@ -2319,6 +2329,150 @@ pub async fn backfill_dates(
         updated
     }).await.map_err(|e| e.to_string())?;
     Ok(count)
+}
+
+/// v1.5.414 — One-shot library-wide repair for the mtime date-corruption
+/// bug fixed in `backfill_dates` above. The old fallback stamped
+/// `date_taken` = the file's mtime/ctime whenever EXIF had no date; for
+/// freshly-copied EXIF-less photos that meant "today", which flooded the
+/// Timeline (the user's real DB had 2,067 photos forced to 2026-06-15).
+///
+/// SURGICAL + SELF-CORRECTING. A row is considered for repair ONLY if its
+/// stored `date_taken` (to the second) exactly equals the file's current
+/// mtime OR ctime formatted in local time — the exact fingerprint the old
+/// fallback produced. That gate alone already protects every photo with a
+/// real EXIF date or a manual "Set date" edit (their date_taken won't equal
+/// the file mtime). On top of that, we re-derive the correct date via
+/// `scanner::extract_date_taken` (the mtime-free source of truth) and only
+/// WRITE when the re-derived value DIFFERS from the stored stamp. So even if
+/// the mtime gate ever false-matched a genuinely-correct date, re-derivation
+/// reproduces that same date and we skip — the repair can replace a bogus
+/// stamp but can never corrupt a correct one.
+///
+/// Idempotent, flag-guarded (`mtime_date_repair_v1_done`) so it runs at most
+/// once, and it makes a best-effort DB backup before the first write.
+#[tauri::command]
+pub async fn repair_mtime_dates(
+    state: tauri::State<'_, AppState>,
+) -> Result<usize, String> {
+    let db_arc = state.db.clone();
+    let db_path = state.db_path.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        // Run-once guard.
+        {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            if let Ok(Some(v)) = db::get_setting(&conn, "mtime_date_repair_v1_done") {
+                if v == "1" { return Ok(0); }
+            }
+        }
+
+        // Pull only RECENTLY-dated photos (id, path, stored date).
+        //
+        // CRITICAL scope guard. The mtime/ctime signature alone is NOT a
+        // reliable corruption marker: a large fraction of any library has
+        // file-mtime == date_taken for perfectly legitimate reasons (the
+        // capture time was copied to mtime by the camera/transfer tool, or
+        // an old backfill derived it). Re-deriving all of those would
+        // DOWNGRADE precise timestamps to coarse path-pattern noon dates.
+        //
+        // The bug we're undoing is COPY-TIME corruption: freshly-imported
+        // files get mtime = now, so their bogus stamp is always RECENT.
+        // Restricting to the last 60 days targets exactly that window and
+        // makes it structurally impossible to touch the years of older,
+        // correctly-dated photos. (Combined with the EXIF-aware re-derive
+        // below, a genuinely-recent photo that has real EXIF is reproduced
+        // identically and skipped — only the dateless copy-time stamps move.)
+        let rows: Vec<(i64, String, String)> = {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            let mut stmt = conn
+                .prepare("SELECT id, path, date_taken FROM photos
+                          WHERE date_taken IS NOT NULL AND date_taken != ''
+                            AND date_taken >= date('now','-60 days')")
+                .map_err(|e| e.to_string())?;
+            let v = stmt
+                .query_map([], |r| Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                )))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            v
+        };
+
+        // Best-effort backup before any write.
+        {
+            let bak = format!("{}.bak-mtime-repair", db_path.to_string_lossy());
+            let _ = std::fs::copy(&db_path, &bak);
+        }
+
+        fn fmt_local(t: std::time::SystemTime) -> String {
+            let dt: chrono::DateTime<chrono::Local> = t.into();
+            dt.format("%Y-%m-%d %H:%M:%S").to_string()
+        }
+
+        // Decide fixes in parallel: cheap stat + signature compare for every
+        // row; the (expensive) EXIF/path re-derivation runs only for rows that
+        // match the mtime fingerprint.
+        use rayon::prelude::*;
+        let fixes: Vec<(i64, Option<String>)> = rows
+            .par_iter()
+            .filter_map(|(id, path, stored)| {
+                let meta = std::fs::metadata(path).ok()?;
+                // Match the stamp ONLY against a RECENT file time. Copy-time
+                // corruption is always fresh (the file was just imported, so
+                // its mtime/ctime is days old at most). An OLD file time that
+                // happens to equal date_taken is a legitimate/long-standing
+                // date — never touch it. This (plus the EXIF-aware re-derive
+                // below) is what makes the repair safe: it can only move the
+                // recently-stamped copy-time dates, not years of real dates.
+                const RECENT: std::time::Duration =
+                    std::time::Duration::from_secs(21 * 24 * 3600);
+                let now = std::time::SystemTime::now();
+                let recent_match = [meta.modified().ok(), meta.created().ok()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|t| now.duration_since(*t).map(|d| d <= RECENT).unwrap_or(false))
+                    .any(|t| fmt_local(t) == *stored);
+                if !recent_match {
+                    return None; // not a fresh copy-time stamp — leave untouched
+                }
+                let real = crate::scanner::extract_date_taken(path);
+                if real.as_deref() == Some(stored.as_str()) {
+                    return None; // re-derivation reproduces it → it was correct
+                }
+                Some((*id, real))
+            })
+            .collect();
+
+        // Apply in one transaction.
+        let mut changed = 0usize;
+        {
+            let conn = db_arc.lock().map_err(|_| "db lock".to_string())?;
+            let txn = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            for (id, real) in &fixes {
+                let res = match real {
+                    Some(d) => txn.execute(
+                        "UPDATE photos SET date_taken = ?1 WHERE id = ?2",
+                        rusqlite::params![d, id],
+                    ),
+                    None => txn.execute(
+                        "UPDATE photos SET date_taken = NULL WHERE id = ?1",
+                        rusqlite::params![id],
+                    ),
+                };
+                if matches!(res, Ok(n) if n > 0) { changed += 1; }
+            }
+            txn.commit().map_err(|e| e.to_string())?;
+            let _ = db::set_setting(&conn, "mtime_date_repair_v1_done", "1");
+        }
+        eprintln!("[repair] mtime-date repair: {} row(s) corrected", changed);
+        Ok(changed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -9703,6 +9857,27 @@ pub async fn detect_faces_background(
                     "auto_skipped_on_insert": auto_skipped_on_insert,
                     "clip_active": clip_available,
                 })).ok();
+                // v1.5.414 — RE-QUEUE the unprocessed tail (audit #6). photos[idx..]
+                // were all marked faces_scanned=1 up front (so the loop advances
+                // + terminates), but Stop fired before we detected their faces.
+                // Without this they'd stay marked-scanned-but-never-processed and
+                // their faces would be lost forever. Reset them to 0 so a later
+                // scan picks them up. (photos[..idx] were really processed — leave
+                // them marked.)
+                {
+                    let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+                    let tail_ids: String = photos[idx..]
+                        .iter()
+                        .map(|(pid, _)| pid.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    if !tail_ids.is_empty() {
+                        let _ = conn.execute(
+                            &format!("UPDATE photos SET faces_scanned = 0 WHERE id IN ({})", tail_ids),
+                            [],
+                        );
+                    }
+                }
                 return Ok((idx, total_detected));
             }
             // Progress every 20 photos
