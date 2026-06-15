@@ -4382,7 +4382,8 @@ pub fn get_photos_calendar(conn: &Connection, year: i32, month: i32) -> Result<V
                 COUNT(*) as cnt,
                 MIN(id) as first_id
          FROM photos
-         WHERE SUBSTR(COALESCE(date_taken, created_at), 1, 7) = ?1
+         WHERE private = 0
+           AND SUBSTR(COALESCE(date_taken, created_at), 1, 7) = ?1
          GROUP BY day
          ORDER BY day"
     )?;
@@ -4403,7 +4404,8 @@ pub fn get_year_month_counts(conn: &Connection) -> Result<Vec<(i32, i32, i64)>> 
                 CAST(SUBSTR(COALESCE(date_taken, created_at), 6, 2) AS INTEGER) as m,
                 COUNT(*) as cnt
          FROM photos
-         WHERE COALESCE(date_taken, created_at) IS NOT NULL
+         WHERE private = 0
+           AND COALESCE(date_taken, created_at) IS NOT NULL
            AND LENGTH(COALESCE(date_taken, created_at)) >= 7
          GROUP BY y, m
          HAVING y > 0 AND m > 0 AND m <= 12
