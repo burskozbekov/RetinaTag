@@ -4104,7 +4104,18 @@ function renderFolders(folders){
 function selectFolder(f){
   curFolder=f;
   document.querySelectorAll('.folder-item').forEach(el=>el.classList.toggle('active',el.dataset.folder===f));
-  loadPhotos();
+  // v1.5.421 — rescope the ACTIVE view, not just the hidden gallery grid.
+  // Timeline honours curFolder (get_timeline_buckets), so reload it in place.
+  // Calendar/Map/etc. don't fold a folder filter, so jump to Gallery (which
+  // does) and load the folder there. Previously selectFolder always called
+  // loadPhotos(), which painted the off-screen gallery grid while the visible
+  // Timeline/Calendar never rescoped to the chosen folder.
+  if(curView==='timeline'){
+    loadTimeline();
+  }else{
+    if(curView!=='gallery' && typeof switchToView==='function') switchToView('gallery');
+    loadPhotos();
+  }
   _updateFaceBtnLabel();
 }
 
@@ -11129,13 +11140,20 @@ function _updateClearFiltersPill(){
   const parts=[];
   if(curFolder) parts.push('folder');
   if(typeof _currentPersonFilter!=='undefined'&&_currentPersonFilter) parts.push('person');
+  const _mapOn = (typeof _mapRegionFilter!=='undefined'&&_mapRegionFilter&&_mapRegionFilter.size>0);
+  if(_mapOn) parts.push('map region');
   if(curRating) parts.push('rating');
   if(curStatus) parts.push('status');
   if(curSearch) parts.push('search');
   if(curMonth) parts.push('month');
   if(typeof curMediaType!=='undefined'&&curMediaType) parts.push('media');
   const n=parts.length;
-  pill.style.display=n>=2?'inline-flex':'none';
+  // v1.5.421 — person + map-region filters have no inline control to clear
+  // them, so surface the "Clear filters" pill even when one of them is the
+  // ONLY active filter (was hidden until n>=2, leaving a lone map-region
+  // selection stuck with no affordance and _clearMapRegion unwired).
+  const _hardToClear = (typeof _currentPersonFilter!=='undefined'&&_currentPersonFilter) || _mapOn;
+  pill.style.display=(n>=2||(n>=1&&_hardToClear))?'inline-flex':'none';
   const cnt=$('clearFiltersCount'); if(cnt) cnt.textContent=n?`(${n})`:'';
   pill.title=n?`Aktif: ${parts.join(', ')}`:'';
 }
