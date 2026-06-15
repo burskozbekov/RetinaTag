@@ -3993,7 +3993,7 @@ async function refreshProviders(){
     for(const p of active){
       const row=document.createElement('div');row.className='provider-row';
       row.innerHTML=`<span class="prov-dot ${p.has_key&&p.enabled?'on':'off'}"></span>
-        <span class="prov-name">${p.name}</span>
+        <span class="prov-name">${_esc(p.name)}</span>
         <span class="prov-stat">${p.has_key?fmt(p.total_tagged)+' imgs':'—'}</span>`;
       el.appendChild(row);
     }
@@ -4117,7 +4117,7 @@ async function refreshCollections(){
       const item=document.createElement('div');
       item.className='collection-item'+(c.collection_type==='smart'?' smart':'');
       item.innerHTML=`<span class="ci-icon">${c.collection_type==='smart'?'⚡':'📁'}</span>
-        <span class="folder-name">${c.name}</span><span class="folder-count">${c.photo_count}</span>`;
+        <span class="folder-name">${_esc(c.name)}</span><span class="folder-count">${c.photo_count}</span>`;
       item.onclick=()=>loadCollectionPhotos(c);
       item.oncontextmenu=(ev)=>{ev.preventDefault();exportCollectionToFolder(c);};
       item.title='Click to open · Right-click to export as folder';
@@ -11737,7 +11737,7 @@ async function openSettings(){
           el.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;cursor:pointer;border:1px solid '+(isActive?'var(--red-dark)':'var(--border2)')+';background:'+(isActive?'var(--red-bg)':'var(--card2)')+';transition:all .15s';
           el.innerHTML=`
             <div style="flex:1;min-width:0">
-              <div style="font-size:11px;font-weight:700;color:var(--cream2)">${p.name} <span style="font-size:9px;color:var(--text3);font-weight:400">${p.ollama_tag}</span></div>
+              <div style="font-size:11px;font-weight:700;color:var(--cream2)">${_esc(p.name)} <span style="font-size:9px;color:var(--text3);font-weight:400">${_esc(p.ollama_tag||'')}</span></div>
               <div style="font-size:9px;color:var(--text3)">${p.description} · ${p.recommended_for}</div>
             </div>
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
@@ -15366,7 +15366,7 @@ function openAssignModal(face, photoId) {
       item.className = 'person-pick-item' + (face.person_id === p.id ? ' active' : '');
       item.innerHTML = `
         <div class="person-avatar">${p.thumbnail ? `<img src="data:image/jpeg;base64,${p.thumbnail}" style="width:100%;height:100%;object-fit:cover">` : '👤'}</div>
-        <div style="flex:1"><div style="font-size:12px;font-weight:700;color:var(--cream2)">${p.name}</div><div style="font-size:10px;color:var(--text3)">${p.face_count} faces</div></div>`;
+        <div style="flex:1"><div style="font-size:12px;font-weight:700;color:var(--cream2)">${_esc(p.name)}</div><div style="font-size:10px;color:var(--text3)">${p.face_count} faces</div></div>`;
       item.onclick = async () => {
         try {
           await invoke('assign_face_to_person', { faceId: _assignFaceId, personId: p.id });
@@ -15555,7 +15555,7 @@ function showDeletePersonMenu(e, p) {
   // v1.5.249 — start off-screen so we can measure and clamp to viewport.
   menu.style.cssText = `position:fixed;left:-9999px;top:-9999px;background:var(--surface);
     border:1px solid var(--border);border-radius:6px;padding:4px;z-index:9999;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.5)`;
-  menu.innerHTML = `<div style="padding:6px 10px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border);margin-bottom:2px">${p.name}</div>
+  menu.innerHTML = `<div style="padding:6px 10px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border);margin-bottom:2px">${_esc(p.name)}</div>
     <div id="_renamePersonBtn" style="padding:7px 10px;font-size:12px;color:var(--cream);cursor:pointer;border-radius:4px"
       onmouseenter="this.style.background='var(--card2)'" onmouseleave="this.style.background=''">✏ Rename</div>
     <div id="_timelinePersonBtn" style="padding:7px 10px;font-size:12px;color:var(--cream);cursor:pointer;border-radius:4px"
@@ -15737,7 +15737,7 @@ async function showPersonTimeline(p) {
   modal.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;color:#fff;margin-bottom:10px">
       <div>
-        <div style="font-size:16px;font-weight:600">${p.name} — Timeline</div>
+        <div style="font-size:16px;font-weight:600">${_esc(p.name)} — Timeline</div>
         <div style="font-size:11px;color:rgba(255,255,255,.6)">${rows.length} photos · earliest ${((rows[0]||[])[1]||'?').slice(0,10)} · latest ${((rows[rows.length-1]||[])[1]||'?').slice(0,10)}</div>
       </div>
       <button onclick="document.getElementById('_timelineModal').remove()" style="background:rgba(255,255,255,.15);border:none;color:#fff;width:36px;height:36px;border-radius:50%;font-size:20px;cursor:pointer">&times;</button>
@@ -15789,7 +15789,7 @@ function renderPersonsSidebar(persons) {
     item.innerHTML = `
       <div class="person-avatar">${p.thumbnail ? `<img src="data:image/jpeg;base64,${p.thumbnail}" style="width:100%;height:100%;border-radius:50%;object-fit:cover">` : '👤'}</div>
       <div class="person-info">
-        <div class="person-name">${p.name}</div>
+        <div class="person-name">${_esc(p.name)}</div>
         <div class="person-count">${p.face_count} faces</div>
       </div>
       <button class="person-del" title="Clear filter" data-pid="${p.id}">&times;</button>`;
