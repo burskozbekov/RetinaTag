@@ -4194,11 +4194,16 @@ pub async fn mtp_import(
                 let final_path: std::path::PathBuf = if use_fast_path {
                     dest_path.clone()
                 } else {
-                    let (year, month) = date_bucket_for_file(&dest_path.to_string_lossy());
-                    let month_name = english_month_name(month);
-                    let real_dir = dest_root
-                        .join(format!("{:04}", year))
-                        .join(format!("{:02}-{}", month, month_name));
+                    // v1.5.415 — bucket by real capture date; no date → Unknown,
+                    // never today (was: date_bucket_for_file always returned a
+                    // mtime/now fallback, dumping dateless photos into the
+                    // current month folder).
+                    let real_dir = match date_bucket_for_file(&dest_path.to_string_lossy()) {
+                        Some((year, month)) => dest_root
+                            .join(format!("{:04}", year))
+                            .join(format!("{:02}-{}", month, english_month_name(month))),
+                        None => dest_root.join("Unknown"),
+                    };
                     if let Err(e) = std::fs::create_dir_all(&real_dir) {
                         eprintln!("create_dir {:?}: {}", real_dir, e);
                         let _ = std::fs::remove_file(&dest_path);
@@ -4775,15 +4780,16 @@ pub async fn import_from_device(
                 continue;
             }
 
-            // 2. Figure out the year/month bucket from EXIF, or fall back to mtime
-            // v1.5.147 — see parse_mtp_date_bucket: English names, no
-            // year prefix inside the year folder. Same folder layout
-            // for the import_from_device path.
-            let (year, month) = date_bucket_for_file(&src_str);
-            let month_name = english_month_name(month);
-            let subdir = dest_root
-                .join(format!("{:04}", year))
-                .join(format!("{:02}-{}", month, month_name));
+            // 2. Figure out the year/month bucket from the real capture date.
+            // v1.5.415 — was "from EXIF, or fall back to mtime"; the mtime
+            // fallback dumped old, EXIF-unreadable photos into today's folder.
+            // Now: strong EXIF/XMP/path extractor, no mtime; no date → Unknown.
+            let subdir = match date_bucket_for_file(&src_str) {
+                Some((year, month)) => dest_root
+                    .join(format!("{:04}", year))
+                    .join(format!("{:02}-{}", month, english_month_name(month))),
+                None => dest_root.join("Unknown"),
+            };
             if std::fs::create_dir_all(&subdir).is_err() {
                 skipped += 1;
                 continue;
@@ -4905,43 +4911,26 @@ pub async fn import_from_device(
 /// so a 2014 photo with a clobbered 2016 EXIF still files under 2014 when its
 /// preserved file-time is older. Never returns a placeholder/Unknown year:
 /// always a real timestamp the file actually carries.
-fn date_bucket_for_file(path: &str) -> (i32, u32) {
-    use chrono::Datelike;
-    let floor = chrono::NaiveDate::from_ymd_opt(1995, 1, 1).unwrap();
-    let today = chrono::Local::now().date_naive();
-    let mut cands: Vec<chrono::NaiveDate> = Vec::new();
-
-    if let Ok(exif) = crate::exif_reader::read_exif(path) {
-        if let Some(dt) = exif.date_taken {
-            if let Some((y, m)) = parse_year_month(&dt) {
-                if let Some(d) = chrono::NaiveDate::from_ymd_opt(y, m, 1) {
-                    cands.push(d);
-                }
-            }
-        }
-    }
-    if let Ok(meta) = std::fs::metadata(path) {
-        for t in [meta.modified().ok(), meta.created().ok()].into_iter().flatten() {
-            let dt: chrono::DateTime<chrono::Local> = t.into();
-            if let Some(d) = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1) {
-                cands.push(d);
-            }
-        }
-    }
-    cands.retain(|d| *d >= floor && *d <= today);
-    if let Some(d) = cands.iter().min() {
-        return (d.year(), d.month());
-    }
-
-    // Last resort: raw mtime even if outside the sane range, else "now".
-    if let Ok(meta) = std::fs::metadata(path) {
-        if let Ok(t) = meta.modified() {
-            let dt: chrono::DateTime<chrono::Local> = t.into();
-            return (dt.year(), dt.month());
-        }
-    }
-    let now = chrono::Local::now();
-    (now.year(), now.month())
+fn date_bucket_for_file(path: &str) -> Option<(i32, u32)> {
+    // v1.5.415 — CRITICAL folder-integrity fix. This used to:
+    //   1. try the WEAK exif_reader::read_exif, then
+    //   2. ALWAYS add the file's mtime AND ctime as candidates, and
+    //   3. take the OLDEST candidate (and if everything was out of the
+    //      1995..today range, fall back to raw mtime, else to "now").
+    // The weak reader failed on lots of real photos (it can't read what
+    // scanner::extract_date_taken can), so the only candidate left was the
+    // file's mtime = the COPY time. Importing an old photo TODAY therefore
+    // bucketed it into "2026\06-June\" — the user's recurring
+    // "klasörlerim bozuldu / tarihlerim bozuldu". (Sister bug to the
+    // backfill_dates mtime stamp fixed in v1.5.414.)
+    //
+    // Now: use scanner::extract_date_taken — the SAME strong, mtime-free
+    // logic the scanner + Timeline use (EXIF → embedded-XMP → PNG/MP4 →
+    // path-pattern → None). NEVER mtime. Return None when there is no real
+    // capture-date signal; the caller files those under "Unknown\" rather
+    // than inventing today's date and scattering old photos into a wrong
+    // year/month folder.
+    crate::scanner::extract_date_taken(path).and_then(|dt| parse_year_month(&dt))
 }
 
 fn parse_year_month(s: &str) -> Option<(i32, u32)> {
