@@ -5848,8 +5848,22 @@ async function deleteCurrentPhoto(){
     // lightbox if the library is now empty.
     const lb = $('lightbox');
     const lbOpen = !!(lb && lb.style.display === 'flex');
-    const idx = (typeof photos !== 'undefined') ? photoIdxOf(id) : -1;
-    if (idx >= 0) photos.splice(idx, 1);
+    // v1.5.418 — advance within the ACTIVE nav context. Timeline / Calendar /
+    // LAN set window._lbContextPhotos as the photo list the lightbox arrows
+    // walk (see _lbList); the gallery falls back to `photos`. The old code
+    // only spliced + advanced through `photos`, so in those views the deleted
+    // photo stayed in _lbContextPhotos and arrow-nav after a delete landed
+    // right back on the just-deleted (now broken) photo.
+    const ctx = (window._lbContextPhotos && window._lbContextPhotos.length)
+      ? window._lbContextPhotos
+      : ((typeof photos !== 'undefined') ? photos : []);
+    const cidx = ctx ? ctx.findIndex(p => p && p.id === id) : -1;
+
+    // Keep the gallery `photos` array in sync (grid virtual-scroll height).
+    const pidx = (typeof photos !== 'undefined') ? photoIdxOf(id) : -1;
+    if (pidx >= 0) photos.splice(pidx, 1);
+    // Keep the context list in sync too when it's a separate array.
+    if (ctx !== photos && cidx >= 0) ctx.splice(cidx, 1);
 
     // Remove cards from any visible grid, then close detail panel
     document.querySelectorAll(`[data-id="${id}"]`).forEach(el=>el.remove());
@@ -5858,11 +5872,11 @@ async function deleteCurrentPhoto(){
     refreshStats();
 
     if (lbOpen) {
-      if (!photos || photos.length === 0) {
+      if (!ctx || ctx.length === 0) {
         if (typeof closeLightbox === 'function') closeLightbox();
       } else {
-        const nextIdx = Math.min(Math.max(0, idx), photos.length - 1);
-        const target = photos[nextIdx];
+        const nextIdx = Math.min(Math.max(0, cidx >= 0 ? cidx : 0), ctx.length - 1);
+        const target = ctx[nextIdx];
         if (target) {
           selectPhoto(target.id, target.path);
           await openLightbox(target.id);
