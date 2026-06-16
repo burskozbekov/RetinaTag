@@ -4800,32 +4800,12 @@ pub async fn import_from_device(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let mut dest_file = subdir.join(&filename);
-
-            // 3. Same-name collision → append _1, _2, ...
-            if dest_file.exists() {
-                let stem = src
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                let ext = src
-                    .extension()
-                    .map(|e| format!(".{}", e.to_string_lossy()))
-                    .unwrap_or_default();
-                let mut n = 1;
-                loop {
-                    let candidate = subdir.join(format!("{}_{}{}", stem, n, ext));
-                    if !candidate.exists() {
-                        dest_file = candidate;
-                        break;
-                    }
-                    n += 1;
-                    if n > 9999 {
-                        break;
-                    }
-                }
-            }
+            // 3. Same-name collision → append _1, _2, … via next_free_path.
+            // v1.5.425 — the old inline loop, on the n>9999 overflow, broke
+            // WITHOUT updating dest_file, leaving it at the original colliding
+            // path so the std::fs::copy below OVERWROTE the first imported
+            // photo. next_free_path never returns an existing path.
+            let dest_file = next_free_path(&subdir.join(&filename));
 
             // 4. Copy (robust to flaky SD card reads — one retry)
             let copy_result = std::fs::copy(src, &dest_file)

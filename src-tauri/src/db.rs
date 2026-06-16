@@ -2325,11 +2325,16 @@ pub fn query_smart_collection(conn: &Connection, rules: &[crate::models::Collect
             }
             "date_after" => {
                 args.push(Box::new(rule.value.clone()));
-                conditions.push(format!("p.created_at >= ?{}", args.len()));
+                // v1.5.425 — filter by CAPTURE date, not import date. Was
+                // p.created_at, so a "photos taken in 2024" smart collection
+                // actually filtered by when the file was imported — a 1990
+                // photo imported today wrongly matched, a 2024 photo imported
+                // years ago was wrongly excluded.
+                conditions.push(format!("COALESCE(p.date_taken, p.created_at) >= ?{}", args.len()));
             }
             "date_before" => {
                 args.push(Box::new(rule.value.clone()));
-                conditions.push(format!("p.created_at <= ?{}", args.len()));
+                conditions.push(format!("COALESCE(p.date_taken, p.created_at) <= ?{}", args.len()));
             }
             _ => {}
         }
