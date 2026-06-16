@@ -3498,15 +3498,67 @@ pub fn get_persons(conn: &Connection) -> Result<Vec<PersonRow>> {
 }
 
 pub fn delete_person(conn: &Connection, person_id: i64) -> Result<()> {
+    // v1.5.434 — also remove this person's MIRRORED name tags. Naming a face
+    // drops a tag (source='face', tag = person name) on the photo so search and
+    // the name UI can find them; deleting only the persons row left those tags
+    // behind, so the "deleted" person kept reappearing in search + the name
+    // system — the recurring "neden hâlâ onu soruyor / why won't it stop asking
+    // about her". The FK (ON DELETE SET NULL) nulls this person's faces, so after
+    // the delete we drop the name tag ONLY from photos that no longer have a face
+    // for ANY person of that name (a second, same-named person keeps its tags).
+    // The tags_ad trigger keeps tags_fts in sync automatically.
+    let name: Option<String> = conn
+        .query_row("SELECT name FROM persons WHERE id = ?1", params![person_id], |r| r.get(0))
+        .ok();
     conn.execute("DELETE FROM persons WHERE id = ?1", params![person_id])?;
+    if let Some(name) = name {
+        let _ = conn.execute(
+            "DELETE FROM tags
+              WHERE source = 'face' AND tag = ?1 COLLATE NOCASE
+                AND photo_id NOT IN (
+                    SELECT fr.photo_id FROM face_regions fr
+                    JOIN persons pe ON pe.id = fr.person_id
+                    WHERE pe.name = ?1 COLLATE NOCASE
+                )",
+            params![name],
+        );
+    }
     Ok(())
 }
 
 pub fn rename_person(conn: &Connection, person_id: i64, new_name: &str) -> Result<()> {
+    // v1.5.434 — also rename the MIRRORED name tags. Person names are mirrored
+    // into `tags` (source='face') so search + the name system find them; the old
+    // code updated only persons.name, so after a rename the person's photos could
+    // no longer be found by the NEW name via the tag route, and the OLD name
+    // lingered as a ghost tag (Turkish names hit hardest). Move the face tags on
+    // THIS person's photos from the old name to the new. tags has UNIQUE(photo_id,
+    // tag), so a photo that already carries the new-name tag would collide: use
+    // UPDATE OR IGNORE, then delete any old-name tag that survived the collision.
+    // The tags_au/tags_ad triggers keep tags_fts in sync.
+    let old_name: Option<String> = conn
+        .query_row("SELECT name FROM persons WHERE id = ?1", params![person_id], |r| r.get(0))
+        .ok();
     conn.execute(
         "UPDATE persons SET name = ?1 WHERE id = ?2",
         params![new_name, person_id],
     )?;
+    if let Some(old_name) = old_name {
+        if !old_name.eq_ignore_ascii_case(new_name) {
+            let _ = conn.execute(
+                "UPDATE OR IGNORE tags SET tag = ?1
+                  WHERE source = 'face' AND tag = ?2 COLLATE NOCASE
+                    AND photo_id IN (SELECT photo_id FROM face_regions WHERE person_id = ?3)",
+                params![new_name, old_name, person_id],
+            );
+            let _ = conn.execute(
+                "DELETE FROM tags
+                  WHERE source = 'face' AND tag = ?1 COLLATE NOCASE
+                    AND photo_id IN (SELECT photo_id FROM face_regions WHERE person_id = ?2)",
+                params![old_name, person_id],
+            );
+        }
+    }
     Ok(())
 }
 
@@ -3521,12 +3573,34 @@ pub fn merge_persons(conn: &Connection, from_person_id: i64, into_person_id: i64
     if from_person_id == into_person_id {
         return Ok(0);
     }
+    // v1.5.434 — capture the source person's name so we can clean up its mirrored
+    // name tags after the merge (same class as delete_person). Without this the
+    // merged-away person's name tags linger and it keeps appearing in search / the
+    // name UI.
+    let from_name: Option<String> = conn
+        .query_row("SELECT name FROM persons WHERE id = ?1", params![from_person_id], |r| r.get(0))
+        .ok();
     let txn = conn.unchecked_transaction()?;
     let moved = txn.execute(
         "UPDATE face_regions SET person_id = ?1 WHERE person_id = ?2",
         params![into_person_id, from_person_id],
     )?;
     txn.execute("DELETE FROM persons WHERE id = ?1", params![from_person_id])?;
+    if let Some(from_name) = from_name {
+        // Drop the source name tag ONLY from photos that, after the merge, no
+        // longer have a face for ANY person of that name. When into_person shares
+        // the name, the moved faces still match, so those tags are kept.
+        let _ = txn.execute(
+            "DELETE FROM tags
+              WHERE source = 'face' AND tag = ?1 COLLATE NOCASE
+                AND photo_id NOT IN (
+                    SELECT fr.photo_id FROM face_regions fr
+                    JOIN persons pe ON pe.id = fr.person_id
+                    WHERE pe.name = ?1 COLLATE NOCASE
+                )",
+            params![from_name],
+        );
+    }
     txn.commit()?;
     Ok(moved as i64)
 }
