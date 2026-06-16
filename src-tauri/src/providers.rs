@@ -404,8 +404,13 @@ pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 /// Call a local Ollama model with vision support (e.g. gemma3:4b, qwen2.5vl:7b).
 /// Ollama uses the `/api/chat` endpoint with `images` field for base64 data.
 pub async fn call_ollama(image_b64: &str, model: &str, endpoint: &str) -> Result<(Vec<String>, Option<String>, Option<EstimatedLocation>)> {
+    // v1.5.443 — 180s (was 300s). A vision model that FITS in GPU VRAM answers
+    // in well under a minute; one too large offloads to CPU and crawls for
+    // minutes. A tighter ceiling lets the tagger recognise "model too large for
+    // this GPU" and stop with a clear message (see tagger.rs) instead of leaving
+    // the batch stuck at 0% with the GPU memory full but nothing completing.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(180))
         .build()
         .context("HTTP client build failed")?;
 

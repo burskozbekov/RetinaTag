@@ -58,6 +58,12 @@ pub async fn run_tagging(
 
     let completed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
+    // v1.5.443 — "stuck at 0%" guard. Counts local requests that run to (near)
+    // the request timeout — the tell-tale of a model too large for the GPU's
+    // VRAM (offloaded to CPU, minutes per photo). `too_large_warned` makes the
+    // explanatory message fire exactly once.
+    let local_stalls = Arc::new(AtomicUsize::new(0));
+    let too_large_warned = Arc::new(AtomicBool::new(false));
 
     // Concurrency: local Ollama can only handle 1 at a time (serial processing).
     // Cloud APIs can run in parallel. Check if the only provider is Local.
@@ -88,6 +94,8 @@ pub async fn run_tagging(
             let fail = failed.clone();
             let ah = app_handle.clone();
             let bd = breakdown.clone();
+            let slow = local_stalls.clone();
+            let warned = too_large_warned.clone();
 
             tokio::spawn(async move {
                 if stop.load(Ordering::Relaxed) {
@@ -168,6 +176,12 @@ pub async fn run_tagging(
                 const MAX_ATTEMPTS: usize = 4;
 
                 loop {
+                    // v1.5.443 — bail promptly once the run has been stopped (e.g.
+                    // the local-model-too-large guard below tripped) instead of
+                    // burning more retry attempts on a photo that can't succeed.
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     attempt += 1;
 
                     // Emit progress
@@ -184,6 +198,7 @@ pub async fn run_tagging(
                     )
                     .ok();
 
+                    let req_started = std::time::Instant::now();
                     let result = providers::call_provider(
                         current_provider,
                         &image_b64,
@@ -191,6 +206,29 @@ pub async fn run_tagging(
                         &current_model,
                     )
                     .await;
+
+                    // v1.5.443 — "stuck at 0%" guard. A local request that runs to
+                    // (near) the 180s client timeout means the model is too large
+                    // for this GPU's VRAM and is crawling on CPU — localhost has no
+                    // network flakiness, so this is never a transient blip. After
+                    // two such stalls, stop the doomed run and tell the user exactly
+                    // how to fix it instead of grinding for days at 0%.
+                    if current_provider == AiProvider::Local
+                        && req_started.elapsed().as_secs() >= 170
+                    {
+                        let n = slow.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n >= 2 && !warned.swap(true, Ordering::Relaxed) {
+                            ah.emit(
+                                "tag-error",
+                                format!(
+                                    "AI tagging stopped: your local model '{}' is too large for your GPU and is running on CPU (minutes per photo). Switch to a smaller model like qwen2.5vl:7b — run `ollama pull qwen2.5vl:7b`, pick it in Settings → AI, then start tagging again.",
+                                    current_model
+                                ),
+                            )
+                            .ok();
+                            stop.store(true, Ordering::Relaxed);
+                        }
+                    }
 
                     match result {
                         Ok((tags, description, location)) if !tags.is_empty() => {
