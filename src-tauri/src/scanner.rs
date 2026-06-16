@@ -147,7 +147,7 @@ pub fn best_date_taken(path: &str) -> Option<String> {
 ///      the EARLIEST survivor. Capture is older than every later
 ///      copy, re-save, or share.
 pub fn extract_date_taken(path: &str) -> Option<String> {
-    use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone, Timelike, Utc};
+    use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone, Timelike};
 
     // v1.5.252 — Was picking the oldest *timestamp* across all candidates,
     // which meant the path-pattern's synthesized 12:00:00 always beat the
@@ -418,7 +418,16 @@ pub fn extract_date_taken(path: &str) -> Option<String> {
     }
 
     // Clamp to plausible window.
-    let now = Utc::now().naive_utc();
+    // v1.5.426 — ceiling is LOCAL now (+ a 2-day grace), NOT UTC now. Every
+    // candidate is a naive wall-clock value treated as LOCAL (EXIF stores local
+    // time; line ~448 formats the result as local). The old Utc::now().naive_utc()
+    // ceiling trails local by the timezone offset — 3 h in Turkey — so a photo
+    // taken in the last few hours, or any same-day photo whose local time-of-day
+    // exceeded the current UTC time-of-day, was wrongly rejected as "future" and
+    // lost its date entirely (→ no date_taken, filed into Unknown). The 2-day
+    // grace also absorbs camera-clock skew and photos shot in a timezone east of
+    // the scanning PC, while still rejecting absurd future dates (e.g. 2099).
+    let now = Local::now().naive_local() + chrono::Duration::days(2);
     let earliest_plausible = chrono::NaiveDate::from_ymd_opt(1990, 1, 1)
         .unwrap()
         .and_hms_opt(0, 0, 0)
@@ -1067,8 +1076,15 @@ fn parse_png_creation_date(s: &str) -> Option<chrono::NaiveDateTime> {
         return Some(dt);
     }
     // RFC 822 like "Sun, 06 Oct 2024 20:20:11 GMT" — chrono can parse via DateTime
+    // v1.5.426 — RFC2822 carries a REAL timezone (e.g. GMT). Convert it to LOCAL
+    // wall-clock before going naive, matching how every other candidate is
+    // treated (naive = local) and how extract_date_taken formats the result. The
+    // old naive_utc() stripped the tz and relabeled the UTC clock as local, so
+    // "22:00 GMT" was stored as 22:00 local instead of the correct 01:00 next-day
+    // local (UTC+3) — wrong time, and a wrong calendar DAY when it crosses
+    // midnight.
     if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
-        return Some(dt.naive_utc());
+        return Some(dt.with_timezone(&chrono::Local).naive_local());
     }
     None
 }
