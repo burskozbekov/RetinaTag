@@ -21454,7 +21454,15 @@ async function filterOnThisDay(){
   const monthDay=`${mm}-${dd}`;
   document.querySelectorAll('.folder-item').forEach(f=>f.classList.remove('active'));
   $('onThisDayItem').classList.add('active');
-  curFolder=''; curSearch=''; curRating=''; curMonth='';
+  // v1.5.441 — also reset status / media-type / map-region (not just folder/
+  // search/rating/month/person). On This Day builds its own result set and
+  // bypasses loadPhotos, so these were never applied here AND, left set, they
+  // "leaked" into the NEXT view the user opened (exit On This Day → click All
+  // Photos → grid silently still filtered to e.g. videos). Clearing them keeps
+  // On This Day a clean "everything from this date" action.
+  curFolder=''; curSearch=''; curRating=''; curMonth=''; curStatus=''; curMediaType='';
+  if($('statusFilter')) $('statusFilter').value='';
+  if(typeof _mapRegionFilter!=='undefined') _mapRegionFilter=null;
   // v1.5.134 — Also clear the person filter. get_on_this_day is called
   // directly below (it doesn't route through loadPhotos), so leaving
   // _currentPersonFilter set would keep the "Buğra" pill visible while
@@ -21480,6 +21488,9 @@ async function filterOnThisDay(){
     // On-This-Day grid is visible when triggered from Timeline/Map/Calendar.
     if(curView!=='gallery') switchToView('gallery');
     renderGrid();
+    // v1.5.441 — refresh the Clear-filters pill (loadPhotos is bypassed here),
+    // so it reflects the filters we just cleared instead of a stale count.
+    if(typeof _updateClearFiltersPill==='function') _updateClearFiltersPill();
     const suffix=years.length? ` (${years.join(', ')})` : '';
     $('photoCount').textContent=`On this day · ${photos.length} photo${photos.length===1?'':'s'}${suffix}`;
     // Sidebar badge
