@@ -3200,10 +3200,16 @@ pub async fn import_metadata_snapshot(
     let snapshot: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("Invalid JSON: {}", e))?;
 
+    // v1.5.431 — the apply loop holds the DB lock while it walks every photo in
+    // the snapshot doing 5–10 UPDATE/INSERT per matched row; on a big snapshot
+    // that froze the tokio runtime (and every other DB command) for seconds. Run
+    // the whole apply on a blocking thread so the UI stays responsive.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
     let photos = snapshot.get("photos").and_then(|v| v.as_array())
         .ok_or_else(|| "Snapshot is missing 'photos' array".to_string())?;
 
-    let conn = state.db.lock().map_err(|_| "db lock")?;
+    let conn = db.lock().map_err(|_| "db lock")?;
 
     let mut matched = 0usize;
     let mut missing = 0usize;
@@ -3348,6 +3354,9 @@ pub async fn import_metadata_snapshot(
         "persons_created_or_existing": persons_created,
         "faces_bound": faces_bound,
     }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 3. Drag & Drop scan ────────────────────────────────────────────────────
