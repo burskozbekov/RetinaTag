@@ -2162,10 +2162,16 @@ pub fn get_pending_photos(conn: &Connection) -> Result<Vec<(i64, String)>> {
 pub fn clear_all_tags(conn: &Connection) -> Result<usize> {
     conn.execute("DELETE FROM tags", [])?;
     conn.execute("INSERT INTO tags_fts(tags_fts) VALUES('rebuild')", []).ok();
-    // Clear descriptions and FTS
-    conn.execute("DELETE FROM desc_fts", []).ok();
+    // v1.5.427 — PRESERVE user-written descriptions. "Clear All Tags" resets
+    // photos to 'pending' so AI tagging re-runs; it must NOT wipe `description`,
+    // which is ALSO user-writable (set_photo_description) and therefore
+    // irreplaceable. The old code NULLed description AND deleted desc_fts, so a
+    // user who hand-wrote captions lost every one on a re-tag. Re-tagging
+    // refreshes AI descriptions on its own; manual ones (and their search
+    // index) now survive. estimated_* stay cleared — those are AI-derived
+    // location guesses, re-derived on the next tag pass.
     let count = conn.execute(
-        "UPDATE photos SET status = 'pending', tagged_at = NULL, description = NULL, \
+        "UPDATE photos SET status = 'pending', tagged_at = NULL, \
          estimated_lat = NULL, estimated_lon = NULL, estimated_location = NULL",
         [],
     )?;
