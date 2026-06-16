@@ -8501,23 +8501,32 @@ pub async fn batch_assign_person(
             tagged += 1;
         }
 
-        // Try to attach the largest unassigned face region (if any) to this
-        // person. Keeps our face index coherent: once a face is bound, the
-        // person's detail page will include this photo.
-        let face_id: Option<i64> = conn
-            .query_row(
+        // v1.5.435 — attach a face region to this person ONLY when the photo has
+        // EXACTLY ONE unassigned face, so it's unambiguous which face is theirs.
+        // The old code bound the LARGEST unassigned face on every photo: in a
+        // multi-person photo (e.g. Person A's large face + the assigned Person B's
+        // small face, both unassigned) it bound A's face to B — a wrong-person
+        // assignment that also pollutes B's face set for future recognition.
+        // With 2+ unassigned faces we now bind nothing and leave it to explicit
+        // selection / embedding-based propagation; the name tag added above
+        // already makes the photo findable. (LIMIT 2 distinguishes 1 from many.)
+        let unassigned: Vec<i64> = conn
+            .prepare(
                 "SELECT id FROM face_regions
                  WHERE photo_id = ?1
                    AND (person_id IS NULL OR person_id <= 0)
-                 ORDER BY ((x2 - x1) * (y2 - y1)) DESC
-                 LIMIT 1",
-                rusqlite::params![pid],
-                |r| r.get::<_, i64>(0),
+                 LIMIT 2",
             )
-            .ok();
+            .ok()
+            .and_then(|mut s| {
+                s.query_map(rusqlite::params![pid], |r| r.get::<_, i64>(0))
+                    .ok()
+                    .map(|it| it.filter_map(|r| r.ok()).collect::<Vec<_>>())
+            })
+            .unwrap_or_default();
 
-        if let Some(fid) = face_id {
-            if db::assign_face_to_person(&conn, fid, Some(person_id)).is_ok() {
+        if unassigned.len() == 1 {
+            if db::assign_face_to_person(&conn, unassigned[0], Some(person_id)).is_ok() {
                 faces_assigned += 1;
             }
         }
