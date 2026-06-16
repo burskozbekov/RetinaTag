@@ -161,30 +161,23 @@ fn month_name_en(m: u32) -> &'static str {
 /// date_bucket_for_file so a file dropped into the library lands in the same
 /// YEAR\MM bucket the library/import would choose. None if nothing usable.
 fn oldest_ym(path: &str) -> Option<(i32, u32)> {
-    use chrono::Datelike;
-    let floor = chrono::NaiveDate::from_ymd_opt(1995, 1, 1)?;
-    let today = chrono::Local::now().date_naive();
-    let mut cands: Vec<chrono::NaiveDate> = Vec::new();
-    if let Ok(exif) = crate::exif_reader::read_exif(path) {
-        if let Some(dt) = exif.date_taken {
-            let s = dt.trim();
-            if let (Some(ys), Some(ms)) = (s.get(0..4), s.get(5..7)) {
-                if let (Ok(y), Ok(m)) = (ys.parse::<i32>(), ms.parse::<u32>()) {
-                    if (1..=12).contains(&m) {
-                        if let Some(d) = chrono::NaiveDate::from_ymd_opt(y, m, 1) { cands.push(d); }
-                    }
-                }
-            }
-        }
+    // v1.5.447 — CRITICAL date-corruption fix. This used to add the file's
+    // modified/created timestamps as date candidates, so a file with no real
+    // EXIF/embedded date got bucketed by its mtime. When AI tagging embeds an
+    // XMP packet the file's bytes + mtime change to "now", so the next watch
+    // event re-bucketed thousands of already-correct photos into the CURRENT
+    // month folder (e.g. 2026\06-June) and re-dated them to today. Now we use
+    // the canonical scanner::extract_date_taken (EXIF / embedded XMP / path
+    // pattern only — NO mtime, per v1.5.266/415). None => the caller leaves the
+    // file in place and never moves or re-dates it.
+    let dt = crate::scanner::extract_date_taken(path)?;
+    let s = dt.trim();
+    let year: i32 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
     }
-    if let Ok(meta) = std::fs::metadata(path) {
-        for t in [meta.modified().ok(), meta.created().ok()].into_iter().flatten() {
-            let dt: chrono::DateTime<chrono::Local> = t.into();
-            if let Some(d) = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1) { cands.push(d); }
-        }
-    }
-    cands.retain(|d| *d >= floor && *d <= today);
-    cands.iter().min().map(|d| (d.year(), d.month()))
+    Some((year, month))
 }
 
 /// v1.5.388 — Library root = parent-of-parent of any canonical
@@ -317,16 +310,12 @@ fn process_new_files(
         let size = std::fs::metadata(&work_path).map(|m| m.len() as i64).unwrap_or(0);
 
         let mtype = crate::scanner::media_type_for_path(path);
-        let date_taken = crate::exif_reader::read_exif(&work_path)
-            .ok().and_then(|e| e.date_taken)
-            .or_else(|| {
-                std::fs::metadata(&work_path).ok().and_then(|m| {
-                    m.created().or_else(|_| m.modified()).ok().map(|t| {
-                        let dt: chrono::DateTime<chrono::Local> = t.into();
-                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
-                    })
-                })
-            });
+        // v1.5.447 — use the canonical date reader (EXIF / embedded XMP / path
+        // pattern, NO file-mtime fallback). A file with no real capture date gets
+        // a NULL date_taken — it must NEVER be stamped with the file's mtime,
+        // which becomes "today" the moment AI tagging rewrites the file's XMP.
+        // That mtime fallback is what re-dated thousands of photos to today.
+        let date_taken = crate::scanner::extract_date_taken(&work_path);
         let duration_secs = if mtype == "video" {
             crate::scanner::extract_video_duration_pub(&work_path)
         } else {
