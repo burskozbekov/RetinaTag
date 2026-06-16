@@ -9501,6 +9501,7 @@ pub async fn count_unscanned_faces(
             let sql = format!(
                 "SELECT COUNT(*) FROM photos
                  WHERE faces_scanned = 0
+                   AND private = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND strftime('%Y-%m', COALESCE(date_taken, created_at)) = ?1",
                 art_sql
@@ -9512,6 +9513,7 @@ pub async fn count_unscanned_faces(
             let sql = format!(
                 "SELECT COUNT(*) FROM photos
                  WHERE faces_scanned = 0
+                   AND private = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND id IN ({})",
                 art_sql, id_list
@@ -9531,6 +9533,7 @@ pub async fn count_unscanned_faces(
             let sql = format!(
                 "SELECT COUNT(*) FROM photos
                  WHERE faces_scanned = 0
+                   AND private = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})
                    AND folder = ?1",
                 art_sql
@@ -9541,6 +9544,7 @@ pub async fn count_unscanned_faces(
             let sql = format!(
                 "SELECT COUNT(*) FROM photos
                  WHERE faces_scanned = 0
+                   AND private = 0
                    AND id NOT IN (SELECT DISTINCT photo_id FROM tags WHERE LOWER(tag) IN {})",
                 art_sql
             );

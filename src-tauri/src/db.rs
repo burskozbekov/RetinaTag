@@ -4258,8 +4258,11 @@ pub fn get_photos_without_clip_emb(conn: &Connection, tier: &str) -> Result<Vec<
 
 /// Count how many photos have CLIP embeddings for a given tier.
 pub fn count_clip_indexed(conn: &Connection, tier: &str) -> i64 {
+    // v1.5.438 — exclude vaulted photos from the CLIP-index count shown in the
+    // Semantic Search settings panel, so the number can't reveal that hidden
+    // photos exist / are indexed.
     conn.query_row(
-        "SELECT COUNT(*) FROM photos WHERE clip_emb IS NOT NULL AND clip_tier = ?1",
+        "SELECT COUNT(*) FROM photos WHERE clip_emb IS NOT NULL AND clip_tier = ?1 AND private = 0",
         params![tier],
         |r| r.get(0),
     )
