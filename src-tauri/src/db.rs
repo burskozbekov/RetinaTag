@@ -2331,6 +2331,16 @@ pub fn get_collection_photo_ids(conn: &Connection, collection_id: i64) -> Result
     Ok(ids)
 }
 
+/// v1.5.445 — Escape LIKE wildcards in a user-supplied smart-rule value so the
+/// value matches literally. Without this, a tag/folder value containing `%` or
+/// `_` matched too broadly — and `_` is common in real folder names (e.g.
+/// `06_June` would also match `061June`). Backslash is escaped first (and used
+/// as the ESCAPE char) so Windows folder paths (which contain `\`) still match
+/// literally. Pair with `ESCAPE '\'` on the LIKE clause.
+fn escape_like_wildcards(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
 /// Execute smart collection rules to find matching photos
 pub fn query_smart_collection(conn: &Connection, rules: &[crate::models::CollectionRule]) -> Result<Vec<PhotoSummary>> {
     let mut conditions = Vec::new();
@@ -2339,14 +2349,14 @@ pub fn query_smart_collection(conn: &Connection, rules: &[crate::models::Collect
     for rule in rules {
         match rule.field.as_str() {
             "tag" => {
-                args.push(Box::new(format!("%{}%", rule.value)));
+                args.push(Box::new(format!("%{}%", escape_like_wildcards(&rule.value))));
                 conditions.push(format!(
-                    "p.id IN (SELECT photo_id FROM tags WHERE tag LIKE ?{})", args.len()
+                    "p.id IN (SELECT photo_id FROM tags WHERE tag LIKE ?{} ESCAPE '\\')", args.len()
                 ));
             }
             "folder" => {
-                args.push(Box::new(format!("%{}%", rule.value)));
-                conditions.push(format!("p.folder LIKE ?{}", args.len()));
+                args.push(Box::new(format!("%{}%", escape_like_wildcards(&rule.value))));
+                conditions.push(format!("p.folder LIKE ?{} ESCAPE '\\'", args.len()));
             }
             "provider" => {
                 args.push(Box::new(rule.value.clone()));
