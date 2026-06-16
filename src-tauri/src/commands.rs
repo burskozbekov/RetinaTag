@@ -4211,21 +4211,20 @@ pub async fn mtp_import(
                         continue;
                     }
                     let mut real_path = real_dir.join(&filename);
-                    // Late dest-exists check: file might already be in
-                    // the real bucket from a prior import. Honour the
-                    // same size-match shortcut as the fast path.
+                    // Late dest-exists check: a file with this name may already
+                    // be in the real bucket from a prior import.
                     if real_path.exists() {
-                        if let Ok(md) = std::fs::metadata(&real_path) {
-                            if md.len() == obj.size {
-                                let _ = std::fs::remove_file(&dest_path);
-                                skip_dest += 1;
-                                continue;
-                            }
-                        }
-                        // v1.5.389 — different-content collision: never
-                        // overwrite the existing photo. Move into a fresh
-                        // _N name. (Was: std::fs::rename below replaced the
-                        // existing file → permanent data loss.)
+                        // v1.5.428 — never trust a same-name + same-SIZE match to
+                        // mean "duplicate": two different photos can share a byte
+                        // length. Unlike the fast path, this file is ALREADY
+                        // downloaded, so there's no download to save — move it to
+                        // a fresh _N name and let the content-HASH dedup below
+                        // decide. That dedup deletes the file if (and only if) its
+                        // hash already exists in the library. (Was: a size-only
+                        // match discarded the just-downloaded file, so a DISTINCT
+                        // photo sharing a name+size with an existing one was
+                        // silently never imported.) v1.5.389 already prevents the
+                        // rename below from overwriting via this fresh name.
                         real_path = next_free_path(&real_path);
                     }
                     if let Err(e) = std::fs::rename(&dest_path, &real_path) {
@@ -4242,6 +4241,12 @@ pub async fn mtp_import(
                 let hash = match crate::scanner::compute_hash(&src_str) {
                     Ok(h) => h,
                     Err(_) => {
+                        // v1.5.428 — the file was already moved into its year/month
+                        // bucket. If we can't hash it we can't register a DB row,
+                        // so remove it rather than strand an untracked orphan file
+                        // in a dated folder where the user would never find it.
+                        // The phone original is untouched, so a retry is safe.
+                        let _ = std::fs::remove_file(&final_path);
                         skip_fail += 1;
                         continue;
                     }
