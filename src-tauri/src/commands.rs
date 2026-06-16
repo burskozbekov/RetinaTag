@@ -5183,33 +5183,23 @@ pub async fn rebucket_unknown_folder(
         let mut failed = 0usize;
         let mut last_msg = String::new();
         for (i, src) in candidates.iter().enumerate() {
-            // Resolve (year, month). Prefer EXIF DateTimeOriginal so
-            // we honour the actual capture date even when the file's
-            // mtime was clobbered by a copy. Fall back to mtime.
+            // v1.5.424 — Resolve (year, month) through the SAME canonical
+            // resolver the library scanner / MTP import / repair_mtime_dates
+            // use: scanner::extract_date_taken (EXIF DateTimeOriginal → embedded
+            // XMP packet → PNG tEXt → MP4 creation_time → path pattern), and
+            // NEVER file mtime. The old path used the weak exif_reader (bare EXIF
+            // tags only) and then FELL BACK TO mtime to choose the year/month
+            // folder — so a re-downloaded Facebook/Photoshop export (empty EXIF,
+            // real capture date in the embedded XMP packet, fresh mtime = today)
+            // got filed into a TODAY folder. That is exactly the "klasörler
+            // bugün'e gidiyor" corruption. If no real capture date can be found
+            // we now leave the photo in Unknown rather than guess a wrong folder.
             let src_str = src.to_string_lossy().to_string();
-            let (year, month, used_mtime) = {
-                let mut y: i32 = 0;
-                let mut m: u32 = 0;
-                let mut fb = false;
-                if let Ok(exif) = crate::exif_reader::read_exif(&src_str) {
-                    if let Some(dt) = exif.date_taken {
-                        if let Some((yy, mm)) = parse_year_month(&dt) {
-                            y = yy;
-                            m = mm;
-                        }
-                    }
-                }
-                if y == 0 {
-                    if let Ok(meta) = std::fs::metadata(src) {
-                        if let Ok(t) = meta.modified() {
-                            let dt: chrono::DateTime<chrono::Local> = t.into();
-                            y = chrono::Datelike::year(&dt);
-                            m = chrono::Datelike::month(&dt);
-                            fb = true;
-                        }
-                    }
-                }
-                (y, m, fb)
+            let (year, month, used_mtime) = match crate::scanner::extract_date_taken(&src_str)
+                .and_then(|dt| parse_year_month(&dt))
+            {
+                Some((yy, mm)) => (yy, mm, false),
+                None => (0i32, 0u32, false),
             };
             if year == 0 || !(1..=12).contains(&month) {
                 failed += 1;
@@ -5276,20 +5266,12 @@ pub async fn rebucket_unknown_folder(
                     );
                     continue;
                 }
-                let stem = src.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                let ext = src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-                let mut n = 1;
-                loop {
-                    let cand = dest_dir.join(format!("{}_{}{}", stem, n, ext));
-                    if !cand.exists() {
-                        dest = cand;
-                        break;
-                    }
-                    n += 1;
-                    if n > 9999 {
-                        break;
-                    }
-                }
+                // v1.5.424 — use the next_free_path helper instead of an inline
+                // _N loop. The old loop, on the (implausible) n>9999 overflow,
+                // broke WITHOUT updating `dest`, leaving it at the original
+                // colliding path so the std::fs::rename below OVERWROTE the
+                // existing photo. next_free_path never returns an existing path.
+                dest = next_free_path(&dest_dir.join(&filename));
             }
             match std::fs::rename(src, &dest) {
                 Ok(_) => {
