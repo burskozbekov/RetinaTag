@@ -3967,9 +3967,18 @@ pub async fn mtp_import(
             if let Some(min_date) = date_from_iso.as_deref().filter(|s| !s.is_empty()) {
                 // Lex-compare on ISO date prefixes — both sides are in the
                 // same YYYY-MM-DD shape so the string comparison is correct.
+                // v1.5.433 — char-safe prefix compare. date_created comes from the
+                // phone over MTP/WPD (external, untrusted); a malformed value with
+                // a multibyte byte at offset 10 made the old `&d[..10]` byte-slice
+                // PANIC and abort the entire import. Take the first 10 CHARS and
+                // require a full date prefix instead of byte-slicing.
                 objects.retain(|o| match o.date_created.as_deref() {
-                    Some(d) if d.len() >= 10 => &d[..10] >= &min_date[..min_date.len().min(10)],
-                    _ => false, // no date → exclude when user asked for a window
+                    Some(d) => {
+                        let dp: String = d.chars().take(10).collect();
+                        let mp: String = min_date.chars().take(10).collect();
+                        dp.chars().count() == 10 && dp.as_str() >= mp.as_str()
+                    }
+                    None => false, // no date → exclude when user asked for a window
                 });
             }
 
