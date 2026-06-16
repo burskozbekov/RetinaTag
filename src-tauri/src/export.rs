@@ -14,7 +14,7 @@ pub fn export_csv_with_options(conn: &Connection, output_path: &str, strip_gps: 
         "SELECT p.id, p.path, p.filename, p.folder, p.status, p.provider_used,
                 p.gps_lat, p.gps_lon,
                 COALESCE((SELECT GROUP_CONCAT(tag, '; ') FROM tags WHERE photo_id = p.id), '') AS all_tags
-         FROM photos p ORDER BY p.folder, p.filename"
+         FROM photos p WHERE p.private = 0 ORDER BY p.folder, p.filename"
     )?;
 
     let mut wtr = csv::Writer::from_path(output_path).context("Failed to create CSV file")?;
@@ -75,7 +75,7 @@ pub fn export_json_with_options(conn: &Connection, output_path: &str, strip_gps:
     let mut stmt = conn.prepare(
         "SELECT p.id, p.path, p.filename, p.folder, p.status, p.provider_used,
                 p.gps_lat, p.gps_lon, p.created_at, p.tagged_at
-         FROM photos p ORDER BY p.folder, p.filename"
+         FROM photos p WHERE p.private = 0 ORDER BY p.folder, p.filename"
     )?;
 
     let mut photos = Vec::new();
@@ -152,7 +152,12 @@ pub fn export_markdown(conn: &Connection, output_path: &str, strip_gps: bool) ->
     // Tag frequency first — cheap count query.
     let mut freq: BTreeMap<String, i64> = BTreeMap::new();
     {
-        let mut s = conn.prepare("SELECT tag, COUNT(*) FROM tags GROUP BY tag")?;
+        // v1.5.436 — exclude vaulted photos from the tag-frequency summary too,
+        // so the "Top Tags" list can't reveal that hidden photos carry a tag.
+        let mut s = conn.prepare(
+            "SELECT t.tag, COUNT(*) FROM tags t JOIN photos p ON p.id = t.photo_id
+             WHERE p.private = 0 GROUP BY t.tag",
+        )?;
         let rows = s.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
         for r in rows.flatten() { freq.insert(r.0, r.1); }
     }
@@ -164,7 +169,7 @@ pub fn export_markdown(conn: &Connection, output_path: &str, strip_gps: bool) ->
         "SELECT p.id, p.path, p.filename, p.folder, p.status, p.provider_used,
                 p.gps_lat, p.gps_lon, p.rating, p.favorite,
                 COALESCE((SELECT GROUP_CONCAT(tag, ', ') FROM tags WHERE photo_id = p.id), '') AS all_tags
-         FROM photos p ORDER BY p.folder, p.filename"
+         FROM photos p WHERE p.private = 0 ORDER BY p.folder, p.filename"
     )?;
 
     let rows = stmt.query_map([], |row| {

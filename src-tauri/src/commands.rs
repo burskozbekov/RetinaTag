@@ -3091,7 +3091,7 @@ pub async fn export_metadata_snapshot(
         .prepare(
             "SELECT id, hash, filename, rating, favorite, COALESCE(description, '')
              FROM photos
-             WHERE hash IS NOT NULL AND hash != ''",
+             WHERE hash IS NOT NULL AND hash != '' AND private = 0",
         )
         .map_err(|e| e.to_string())?;
     let photo_rows: Vec<(i64, String, String, i64, i64, String)> = photos_stmt
