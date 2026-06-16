@@ -1549,6 +1549,17 @@ select.tb-select:focus{border-color:var(--red-dark)}
     <!-- v1.5.448 — discoverable rotate controls (also: R / Shift+R). -->
     <button onclick="rotatePhoto(-90)" title="Rotate left (R)" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:19px;cursor:pointer;line-height:1">&#8634;</button>
     <button onclick="rotatePhoto(90)" title="Rotate right (Shift+R)" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:19px;cursor:pointer;line-height:1">&#8635;</button>
+    <!-- v1.5.449 — flip (mirror) + light/color adjustments -->
+    <button onclick="flipPhoto('h')" title="Flip horizontal" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:18px;cursor:pointer;line-height:1">&#8596;</button>
+    <button onclick="flipPhoto('v')" title="Flip vertical" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:18px;cursor:pointer;line-height:1">&#8597;</button>
+    <button onclick="toggleAdjPanel()" title="Adjust light & colour" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:18px;cursor:pointer;line-height:1">&#9728;</button>
+  </div>
+  <!-- v1.5.449 — non-destructive light/colour adjustments panel (CSS filter). -->
+  <div id="lbAdjPanel" style="display:none;position:absolute;bottom:64px;left:16px;flex-direction:column;gap:10px;background:rgba(20,20,20,.92);border:1px solid rgba(255,255,255,.12);padding:14px 16px;border-radius:10px;z-index:6;width:200px;color:#fff;font-size:11px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+    <div style="display:flex;justify-content:space-between;align-items:center"><span style="font-weight:700;letter-spacing:.3px">Adjust</span><button onclick="resetPhotoFx()" style="background:rgba(255,255,255,.12);border:none;color:#fff;font-size:10px;padding:3px 8px;border-radius:5px;cursor:pointer">Reset</button></div>
+    <label style="display:flex;flex-direction:column;gap:3px">Brightness<input id="adjBr" type="range" min="0.4" max="1.8" step="0.05" value="1" oninput="adjustPhoto('br',parseFloat(this.value))"></label>
+    <label style="display:flex;flex-direction:column;gap:3px">Contrast<input id="adjCo" type="range" min="0.4" max="1.8" step="0.05" value="1" oninput="adjustPhoto('co',parseFloat(this.value))"></label>
+    <label style="display:flex;flex-direction:column;gap:3px">Saturation<input id="adjSa" type="range" min="0" max="2" step="0.05" value="1" oninput="adjustPhoto('sa',parseFloat(this.value))"></label>
   </div>
   <!-- Compact face-count status pill, anchored under the rescan button. -->
   <div id="lbFaceStatusBadge" style="display:none;position:absolute;top:248px;right:14px;width:40px;text-align:center;font-size:9.5px;color:rgba(255,255,255,.78);font-weight:600;letter-spacing:.3px;pointer-events:none;z-index:5;text-shadow:0 1px 3px rgba(0,0,0,.6)"></div>
@@ -4651,11 +4662,9 @@ function applyThumb(card,id){
   const img=document.createElement('img');img.className='photo-thumb';
   img.decoding='async';img.loading='lazy';
   img.src=u;img.alt='';
-  // v1.5.448 — reflect the saved rotation in the gallery grid too. Previously
-  // rotation only applied to the detail/lightbox image, so a rotated photo
-  // still looked sideways in the grid and the feature felt broken.
-  const _rot=getStoredRotation(id);
-  if(_rot) img.style.transform=`rotate(${_rot}deg)`;
+  // v1.5.448/449 — reflect saved rotation + flip + adjustments in the grid too,
+  // so an edited photo looks consistent everywhere (was: grid stayed un-edited).
+  _applyFxToImg(img,id);
   ph.replaceWith(img);
 }
 function drainThumbs(){
@@ -5840,25 +5849,60 @@ function _rotKey(id){return 'retinatag_rot_'+id;}
 function getStoredRotation(id){const v=parseInt(localStorage.getItem(_rotKey(id))||'0',10);return ((v%360)+360)%360;}
 function setStoredRotation(id,deg){const v=((deg%360)+360)%360;if(v===0)localStorage.removeItem(_rotKey(id));else localStorage.setItem(_rotKey(id),String(v));}
 function applyStoredRotation(id){
-  const deg=getStoredRotation(id);
+  // v1.5.449 — applies rotation + flip + light adjustments to the detail image.
   const img=$('detailImg');
   if(!img)return;
   img.style.transition='transform .25s ease';
-  img.style.transform=`rotate(${deg}deg)`;
+  _applyFxToImg(img,id);
+}
+// v1.5.449 — flip (mirror) + light adjustments (brightness / contrast /
+// saturation), same non-destructive, per-photo, view-only model as rotation:
+// nothing is written to the original file, all stored in localStorage and
+// applied as CSS transform (flip) + filter (adjustments) wherever we render the
+// photo. Default = no change, so an un-edited photo behaves exactly as before.
+function _fxKey(id){return 'retinatag_fx_'+id;}
+function getFx(id){try{const o=JSON.parse(localStorage.getItem(_fxKey(id))||'{}');return {fh:o.fh?1:0,fv:o.fv?1:0,br:(o.br==null?1:o.br),co:(o.co==null?1:o.co),sa:(o.sa==null?1:o.sa)};}catch(e){return {fh:0,fv:0,br:1,co:1,sa:1};}}
+function setFx(id,f){const def=!f.fh&&!f.fv&&f.br==1&&f.co==1&&f.sa==1;if(def)localStorage.removeItem(_fxKey(id));else localStorage.setItem(_fxKey(id),JSON.stringify(f));}
+function fxFilterStr(id){const f=getFx(id);return (f.br==1&&f.co==1&&f.sa==1)?'':`brightness(${f.br}) contrast(${f.co}) saturate(${f.sa})`;}
+function fxFlipStr(id){const f=getFx(id);return ` scaleX(${f.fh?-1:1}) scaleY(${f.fv?-1:1})`;}
+// Apply to a NON-zoom image element (grid thumb / detail). Lightbox composes its
+// own transform (zoom/pan) in _lbApplyTransform, so it's handled separately.
+function _applyFxToImg(el,id){if(!el)return;const r=getStoredRotation(id);const flip=fxFlipStr(id);const filt=fxFilterStr(id);el.style.transform=(r||flip!==' scaleX(1) scaleY(1)')?`rotate(${r}deg)`+flip:'';el.style.filter=filt;}
+function _applyFxAll(id){
+  if(id===selectedId)_applyFxToImg($('detailImg'),id);
+  if(_lbCurrentId===id){ if(typeof _lbApplyTransform==='function')_lbApplyTransform(); const li=document.getElementById('lbImg'); if(li)li.style.filter=fxFilterStr(id)||'none'; }
+  const card=document.querySelector(`[data-id="${id}"]`); const t=card&&card.querySelector('img.photo-thumb'); if(t)_applyFxToImg(t,id);
 }
 function rotatePhoto(delta){
-  // v1.5.448 — act on the photo you're actually looking at: the lightbox photo
-  // when the lightbox is open, otherwise the selected/detail photo. Apply the
-  // new rotation everywhere it shows (detail pane, lightbox, gallery grid) so it
-  // looks consistent immediately.
   const id=(_lbCurrentId||selectedId);
   if(!id){toast('Select a photo first','warn');return;}
   setStoredRotation(id,getStoredRotation(id)+delta);
-  if(id===selectedId) applyStoredRotation(id);
-  if(_lbCurrentId) _lbApplyTransform();
-  const card=document.querySelector(`[data-id="${id}"]`);
-  const t=card&&card.querySelector('img.photo-thumb');
-  if(t){const d=getStoredRotation(id);t.style.transform=d?`rotate(${d}deg)`:'';}
+  _applyFxAll(id);
+}
+function flipPhoto(axis){
+  const id=(_lbCurrentId||selectedId);
+  if(!id){toast('Select a photo first','warn');return;}
+  const f=getFx(id); if(axis==='v')f.fv=f.fv?0:1; else f.fh=f.fh?0:1; setFx(id,f);
+  _applyFxAll(id);
+}
+function adjustPhoto(key,val){
+  const id=(_lbCurrentId||selectedId); if(!id)return;
+  const f=getFx(id); f[key]=val; setFx(id,f); _applyFxAll(id);
+}
+function resetPhotoFx(){
+  const id=(_lbCurrentId||selectedId); if(!id)return;
+  localStorage.removeItem(_fxKey(id)); setStoredRotation(id,0); _applyFxAll(id); _syncAdjSliders(id);
+}
+function _syncAdjSliders(id){
+  const f=getFx(id);
+  const b=$('adjBr'),c=$('adjCo'),s=$('adjSa');
+  if(b)b.value=f.br; if(c)c.value=f.co; if(s)s.value=f.sa;
+}
+function toggleAdjPanel(){
+  const p=$('lbAdjPanel'); if(!p)return;
+  const show=p.style.display==='none'||!p.style.display;
+  p.style.display=show?'flex':'none';
+  if(show&&_lbCurrentId)_syncAdjSliders(_lbCurrentId);
 }
 
 async function deleteCurrentPhoto(){
@@ -19626,8 +19670,11 @@ function _lbApplyTransform() {
   const img = document.getElementById('lbImg');
   if (!img) return;
   const rot = _lbCurrentId ? getStoredRotation(_lbCurrentId) : 0;
-  const tf = `scale(${_lbZoom}) translate(${_lbPanX}px, ${_lbPanY}px) rotate(${rot}deg)`;
+  const tf = `scale(${_lbZoom}) translate(${_lbPanX}px, ${_lbPanY}px) rotate(${rot}deg)` + (_lbCurrentId ? fxFlipStr(_lbCurrentId) : '');
   img.style.transform = tf;
+  // v1.5.449 — brightness/contrast/saturation live in `filter`, independent of
+  // the transform (zoom/pan/rotate/flip), so it composes without interfering.
+  img.style.filter = _lbCurrentId ? (fxFilterStr(_lbCurrentId) || 'none') : 'none';
   // v1.5.30 — Mirror the transform onto the face-box SVG overlay so the
   // bounding boxes stay glued to the faces during zoom/pan/rotate. Same
   // transform-origin (center) as lbImg.
