@@ -2991,6 +2991,10 @@ pub async fn export_collection_as_folder(
         out
     };
 
+    // v1.5.432 — the copy loop std::fs::copy's the whole collection (can be many
+    // GB) on the tokio runtime → a 30–60 s UI freeze on a large export. Run it on
+    // a blocking thread. (The DB lock was already released above.)
+    tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
     let total = photo_paths.len();
     let mut copied = 0usize;
     let mut skipped = 0usize;
@@ -3052,6 +3056,9 @@ pub async fn export_collection_as_folder(
         "errors": errors.into_iter().take(20).collect::<Vec<_>>(),
         "dest_dir": dest_dir,
     }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 2b. Metadata snapshot (backup / restore) ────────────────────────────────
@@ -3070,7 +3077,13 @@ pub async fn export_metadata_snapshot(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     use std::io::Write;
-    let conn = state.db.lock().map_err(|_| "db lock")?;
+    // v1.5.432 — held the DB lock across the full per-photo query loop AND the
+    // file write, all on the tokio runtime → a multi-second UI freeze (every
+    // other DB command blocked too) on a large library. Run it on a blocking
+    // thread.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+    let conn = db.lock().map_err(|_| "db lock")?;
 
     // Pull all photos with at least one piece of user data attached — skip
     // completely un-annotated rows to keep the snapshot compact.
@@ -3184,6 +3197,9 @@ pub async fn export_metadata_snapshot(
         "descriptions": desc_count,
         "bytes": bytes,
     }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Read a snapshot file and apply it to the DB. Matches rows by hash so the
