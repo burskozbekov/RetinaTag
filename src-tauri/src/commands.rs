@@ -9217,7 +9217,9 @@ pub async fn scan_and_cluster_faces(
         move || -> Result<Vec<(i64, String)>, String> {
             let conn = db_for_pull.lock().map_err(|_| "db lock".to_string())?;
             if folder_for_pull.is_empty() {
-                let mut stmt = conn.prepare("SELECT id, path FROM photos")
+                // v1.5.437 — exclude vaulted photos: their faces must not be
+                // detected + clustered into the (non-vault) Identify-Faces review.
+                let mut stmt = conn.prepare("SELECT id, path FROM photos WHERE private = 0")
                     .map_err(|e| e.to_string())?;
                 let rows: Vec<(i64, String)> = stmt
                     .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
@@ -9230,7 +9232,8 @@ pub async fn scan_and_cluster_faces(
                 // must not be treated as LIKE wildcards.
                 let mut stmt = conn.prepare(
                     "SELECT id, path FROM photos
-                     WHERE folder = ?1 OR substr(path, 1, length(?1)) = ?1"
+                     WHERE (folder = ?1 OR substr(path, 1, length(?1)) = ?1)
+                       AND private = 0"
                 ).map_err(|e| e.to_string())?;
                 let rows: Vec<(i64, String)> = stmt
                     .query_map(rusqlite::params![&folder_for_pull], |r| {

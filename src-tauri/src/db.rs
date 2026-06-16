@@ -2170,8 +2170,14 @@ pub fn get_folders_with_status(conn: &Connection) -> Result<Vec<(String, i64, i6
 }
 
 pub fn get_pending_photos(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    // v1.5.437 — exclude VAULTED photos. This feeds the AI tagger (tagger.rs),
+    // which uploads each pending photo's image to an external tagging provider.
+    // A pending private photo would therefore have its CONTENT sent off the
+    // machine — the worst kind of vault leak. Vault photos are never
+    // auto-tagged; an explicit vault-unlocked flow can tag them if the user
+    // wants. (A photo un-vaulted later is still 'pending', so it tags then.)
     let mut stmt =
-        conn.prepare("SELECT id, path FROM photos WHERE status = 'pending' ORDER BY id")?;
+        conn.prepare("SELECT id, path FROM photos WHERE status = 'pending' AND private = 0 ORDER BY id")?;
     let rows = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .filter_map(|r| r.ok())
