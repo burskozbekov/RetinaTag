@@ -4270,7 +4270,13 @@ $('btnNewCollection').onclick=async()=>{
 };
 
 // ── Load photos ───────────────────────────────────────────────────────────────
+let _loadGen = 0; // v1.5.439 — generation token: a newer loadPhotos() supersedes older in-flight calls
 async function loadPhotos(preserveScroll=false){
+  // v1.5.439 — capture this call's generation. After each awaited query we
+  // bail if a newer loadPhotos() has started, so a slow earlier query (e.g. a
+  // big folder) can't resolve LAST and clobber the grid with stale photos the
+  // user already filtered away (rapid folder/filter/search switching).
+  const _myGen = ++_loadGen;
   // v1.5.391 — optional preserveScroll. Background refreshes (loadPhotosBg,
   // fired by tag-progress every 30 photos and by watch-new-files) pass true
   // so the grid does NOT jump to the top while the user is scrolled down
@@ -4295,15 +4301,18 @@ async function loadPhotos(preserveScroll=false){
     // face_regions join directly.
     if(_currentPersonFilter){
       resp = await invoke('find_photos_by_person', { name: _currentPersonFilter.name });
+      if(_myGen !== _loadGen) return; // v1.5.439 — superseded by a newer load; drop stale result
       photos = Array.isArray(resp) ? resp : (resp.photos || []);
       totalPhotos = photos.length;
     }else if(curSearch){
       resp=await invoke('search_photos',{query:curSearch});
+      if(_myGen !== _loadGen) return; // v1.5.439 — superseded by a newer load; drop stale result
       if(Array.isArray(resp)){photos=resp;totalPhotos=resp.length}
       else{photos=resp.photos;totalPhotos=resp.total}
     }else{
       resp=await invoke('get_photos',{offset:0,limit:100000,
         folder:curFolder||null,tagFilter:null,statusFilter:curStatus||null});
+      if(_myGen !== _loadGen) return; // v1.5.439 — superseded by a newer load; drop stale result
       photos=resp.photos;totalPhotos=resp.total;
     }
     // Compute rating/favorite breakdown BEFORE applying the rating filter, so
