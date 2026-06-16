@@ -1123,9 +1123,30 @@ pub fn insert_photo(conn: &Connection, p: &NewPhoto<'_>) -> Result<i64> {
         stmt.execute(params![p.path, p.filename, p.folder, p.hash, p.size, p.width, p.height, now, p.media_type, p.date_taken, p.duration_secs])?
     };
     if rows_affected == 0 {
-        // Row already exists (UNIQUE conflict on path) — fetch existing ID
-        let mut stmt = conn.prepare_cached("SELECT id FROM photos WHERE path = ?1")?;
-        let id: i64 = stmt.query_row(params![p.path], |r| r.get(0))?;
+        // Row already exists (UNIQUE conflict on path) — fetch existing ID + hash.
+        let mut stmt = conn.prepare_cached("SELECT id, hash FROM photos WHERE path = ?1")?;
+        let (id, existing_hash): (i64, Option<String>) =
+            stmt.query_row(params![p.path], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        // v1.5.429 — the file at this path now has DIFFERENT bytes than the row
+        // records (hash mismatch), e.g. the user re-exported/edited over it. The
+        // old INSERT OR IGNORE silently kept the STALE hash/size/dimensions/
+        // date_taken, so dedup compared against an outdated fingerprint and the
+        // gallery reported wrong dimensions. Refresh the file-DERIVED columns.
+        //
+        // Deliberately NOT touched: status, faces_scanned, tags, private/vault,
+        // rating, favorite, description. RetinaTag itself rewrites a photo's
+        // bytes (→ new hash) every time it embeds XMP tags, so resetting those
+        // would re-tag + re-face-scan EVERY photo on EVERY tag edit. date_taken
+        // is COALESCE'd so a metadata-only rewrite — or a replacement that lost
+        // its EXIF — can NEVER blank an existing capture date.
+        if existing_hash.as_deref() != Some(p.hash) {
+            conn.execute(
+                "UPDATE photos SET hash = ?1, size = ?2, width = ?3, height = ?4, \
+                 media_type = ?5, date_taken = COALESCE(?6, date_taken), duration_secs = ?7 \
+                 WHERE id = ?8",
+                params![p.hash, p.size, p.width, p.height, p.media_type, p.date_taken, p.duration_secs, id],
+            )?;
+        }
         Ok(id)
     } else {
         Ok(conn.last_insert_rowid())
