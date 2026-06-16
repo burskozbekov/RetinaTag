@@ -4284,7 +4284,9 @@ pub fn get_photos_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<super::mo
     // the filter on its FTS rowid query.
     let sql = format!(
         "SELECT p.id, p.path, p.filename, p.status, p.provider_used,
-                GROUP_CONCAT(t.tag, ',') as tags, COUNT(t.id) as tag_count
+                GROUP_CONCAT(t.tag, ',') as tags, COUNT(t.id) as tag_count,
+                p.media_type, p.date_taken, p.duration_secs,
+                COALESCE(p.rating,0), COALESCE(p.favorite,0)
          FROM photos p
          LEFT JOIN tags t ON t.photo_id = p.id
          WHERE p.id IN ({}) AND p.private = 0
@@ -4311,11 +4313,16 @@ pub fn get_photos_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<super::mo
                 provider_used: r.get(4)?,
                 tags,
                 tag_count: r.get(6)?,
-                media_type: "image".to_string(),
-                date_taken: None,
-                duration_secs: None,
-                rating: 0,
-                favorite: false,
+                // v1.5.442 — hydrate from the row instead of hardcoding. These
+                // were stubbed, so manual-collection AND path/description/CLIP
+                // search results (which all funnel through here) showed videos
+                // as images, blank capture dates, no durations, and rating/
+                // favorite always 0/false.
+                media_type: r.get::<_, Option<String>>(7)?.unwrap_or_else(|| "image".to_string()),
+                date_taken: r.get(8)?,
+                duration_secs: r.get(9)?,
+                rating: r.get(10)?,
+                favorite: { let f: i32 = r.get(11)?; f != 0 },
             })
         })?
         .filter_map(|r| r.ok())
