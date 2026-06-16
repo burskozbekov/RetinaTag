@@ -1546,6 +1546,9 @@ select.tb-select:focus{border-color:var(--red-dark)}
     <button id="lbFaceRescan" onclick="_lbFaceScanCurrent()" title="Scan / re-scan faces in this photo" style="display:none;width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:16px;cursor:pointer;line-height:1">&#x21BB;</button>
     <button id="lbFindSim" onclick="findSimilarForCurrent()" title="Find visually similar photos" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:17px;cursor:pointer;line-height:1">&#128270;</button>
     <button id="lbCrop" onclick="openCropEditor()" title="Crop (C)" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:17px;cursor:pointer;line-height:1">&#9986;</button>
+    <!-- v1.5.448 — discoverable rotate controls (also: R / Shift+R). -->
+    <button onclick="rotatePhoto(-90)" title="Rotate left (R)" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:19px;cursor:pointer;line-height:1">&#8634;</button>
+    <button onclick="rotatePhoto(90)" title="Rotate right (Shift+R)" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:19px;cursor:pointer;line-height:1">&#8635;</button>
   </div>
   <!-- Compact face-count status pill, anchored under the rescan button. -->
   <div id="lbFaceStatusBadge" style="display:none;position:absolute;top:248px;right:14px;width:40px;text-align:center;font-size:9.5px;color:rgba(255,255,255,.78);font-weight:600;letter-spacing:.3px;pointer-events:none;z-index:5;text-shadow:0 1px 3px rgba(0,0,0,.6)"></div>
@@ -4648,6 +4651,11 @@ function applyThumb(card,id){
   const img=document.createElement('img');img.className='photo-thumb';
   img.decoding='async';img.loading='lazy';
   img.src=u;img.alt='';
+  // v1.5.448 — reflect the saved rotation in the gallery grid too. Previously
+  // rotation only applied to the detail/lightbox image, so a rotated photo
+  // still looked sideways in the grid and the feature felt broken.
+  const _rot=getStoredRotation(id);
+  if(_rot) img.style.transform=`rotate(${_rot}deg)`;
   ph.replaceWith(img);
 }
 function drainThumbs(){
@@ -5839,10 +5847,18 @@ function applyStoredRotation(id){
   img.style.transform=`rotate(${deg}deg)`;
 }
 function rotatePhoto(delta){
-  if(!selectedId){toast('Select a photo first','warn');return;}
-  const cur=getStoredRotation(selectedId);
-  setStoredRotation(selectedId,cur+delta);
-  applyStoredRotation(selectedId);
+  // v1.5.448 — act on the photo you're actually looking at: the lightbox photo
+  // when the lightbox is open, otherwise the selected/detail photo. Apply the
+  // new rotation everywhere it shows (detail pane, lightbox, gallery grid) so it
+  // looks consistent immediately.
+  const id=(_lbCurrentId||selectedId);
+  if(!id){toast('Select a photo first','warn');return;}
+  setStoredRotation(id,getStoredRotation(id)+delta);
+  if(id===selectedId) applyStoredRotation(id);
+  if(_lbCurrentId) _lbApplyTransform();
+  const card=document.querySelector(`[data-id="${id}"]`);
+  const t=card&&card.querySelector('img.photo-thumb');
+  if(t){const d=getStoredRotation(id);t.style.transform=d?`rotate(${d}deg)`:'';}
 }
 
 async function deleteCurrentPhoto(){
