@@ -2779,9 +2779,16 @@ pub async fn write_xmp_all(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<usize, String> {
+    // v1.5.430 — the whole job — the DB pass that holds the lock while it walks
+    // every photo (+ its tags + faces), then the loop that writes/embeds XMP into
+    // up to tens of thousands of files — used to run on the tokio runtime,
+    // freezing the UI for 10–30 s on a large library. Move it ALL onto a blocking
+    // thread so the async runtime (and the rest of the UI) stays responsive.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<usize, String> {
     // Collect all photo data needed for XMP in one pass (no N+1 — joins do it)
     let all_xmp: Vec<xmp::XmpData> = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let conn = db.lock().map_err(|_| "db lock")?;
 
         // ── All tagged photos ────────────────────────────────────────────────
         let photo_rows: Vec<(i64, String, u32, u32, i32, bool, Option<String>, Option<String>, Option<String>, bool, Option<String>)> = {
@@ -2878,7 +2885,7 @@ pub async fn write_xmp_all(
 
     // v1.5.58/59 — Honour both embed and skip_sidecar settings.
     let (embed_into_jpeg, skip_sidecar) = {
-        let conn = state.db.lock().map_err(|_| "db lock")?;
+        let conn = db.lock().map_err(|_| "db lock")?;
         let e = db::get_setting(&conn, "embed_xmp_in_jpeg").ok().flatten()
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1" || v.eq_ignore_ascii_case("on"))
             .unwrap_or(false);
@@ -2904,6 +2911,9 @@ pub async fn write_xmp_all(
         }
     }
     Ok(success)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 2. Export ───────────────────────────────────────────────────────────────
