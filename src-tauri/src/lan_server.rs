@@ -376,8 +376,23 @@ async fn list_photos(
     // Run the actual query off the axum runtime thread.  db::get_photos
     // on a 66 k library is 50-200 ms cold.
     let db = state.db.clone();
+    // v1.5.446 — close a vault-leak race. The gate above checks vault-unlock on
+    // the handler thread, but the query runs later inside spawn_blocking; if a
+    // peer locks the vault in that window, a vault_only request would still
+    // execute and leak vault photo metadata (filenames/tags/dates/count).
+    // Re-check the unlock state inside the closure, immediately before the query.
+    let app_handle = state.app_handle.clone();
     let result: Result<(Vec<crate::models::PhotoSummary>, i64), String> =
         tokio::task::spawn_blocking(move || -> Result<(Vec<crate::models::PhotoSummary>, i64), String> {
+            if vault_only {
+                let still_unlocked = if let Some(ref handle) = app_handle {
+                    use tauri::Manager;
+                    handle.state::<crate::AppState>().vault_is_unlocked()
+                } else { false };
+                if !still_unlocked {
+                    return Err("vault locked".to_string());
+                }
+            }
             let conn = db.lock().map_err(|_| "db lock".to_string())?;
             crate::db::get_photos(
                 &conn, offset, limit, None, None, None, Some(vault_only),
