@@ -3224,7 +3224,7 @@ let photos=[],totalPhotos=0,selectedId=null,selectedPath='';
 //   curSearch       → search_photos(query=...) — user-typed only
 let curFolder='',curSearch='',curStatus='',curView='gallery',curRating='';
 let curMonth='',curMediaType='';
-let selectedIds=new Set(),lastClickedIdx=-1;
+let selectedIds=new Set(),lastClickedId=null; // v1.5.440 — shift-range anchor stored as a photo ID (survives grid re-renders), not a stale array index
 let _savedPhotos=null;
 let _slideshowActive=false,_slideshowTimer=null;
 // Undo stack for lightweight reversible actions (rating, favorite, tag add/remove).
@@ -4594,14 +4594,19 @@ function updateCards(cols){
     if(selectedIds.has(p.id))card.classList.add('multi-selected');
     card.onclick=(e)=>{
       const idx=parseInt(card.dataset.idx);
+      // v1.5.440 — resolve the shift-range anchor from its photo ID against the
+      // CURRENT photos[] (it may have re-rendered since the anchor click). If the
+      // anchored photo is gone (filtered out), anchorIdx is -1 and we fall back
+      // to single-select instead of selecting a stale, wrong range.
+      const anchorIdx = lastClickedId!=null ? photos.findIndex(x=>x.id===lastClickedId) : -1;
       if(e.ctrlKey||e.metaKey){
         if(selectedIds.has(p.id))selectedIds.delete(p.id);else selectedIds.add(p.id);
-        lastClickedIdx=idx;
-      }else if(e.shiftKey&&lastClickedIdx>=0){
-        const from=Math.min(lastClickedIdx,idx),to=Math.max(lastClickedIdx,idx);
+        lastClickedId=p.id;
+      }else if(e.shiftKey&&anchorIdx>=0){
+        const from=Math.min(anchorIdx,idx),to=Math.max(anchorIdx,idx);
         for(let si=from;si<=to;si++){if(photos[si])selectedIds.add(photos[si].id);}
       }else{
-        selectedIds.clear();selectedIds.add(p.id);lastClickedIdx=idx;
+        selectedIds.clear();selectedIds.add(p.id);lastClickedId=p.id;
         selectPhoto(p.id,p.path);
       }
       updateSelectionUI();
@@ -21269,7 +21274,7 @@ function navPhoto(dir){
   const next=idx+dir;
   if(next>=0&&next<photos.length){
     selectPhoto(photos[next].id,photos[next].path);
-    selectedIds.clear();selectedIds.add(photos[next].id);lastClickedIdx=next;
+    selectedIds.clear();selectedIds.add(photos[next].id);lastClickedId=photos[next].id;
     updateSelectionUI();
     scrollCardIntoView(next);
   }
@@ -21290,7 +21295,7 @@ function _navNeedsTagging(dir){
   for(let i=start; i>=0 && i<photos.length; i+=step){
     if(needsTagging(photos[i])){
       selectPhoto(photos[i].id, photos[i].path);
-      selectedIds.clear();selectedIds.add(photos[i].id);lastClickedIdx=i;
+      selectedIds.clear();selectedIds.add(photos[i].id);lastClickedId=photos[i].id;
       updateSelectionUI();
       scrollCardIntoView(i);
       return;
