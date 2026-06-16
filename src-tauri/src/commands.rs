@@ -15713,8 +15713,22 @@ pub async fn save_gps_cluster_as_collection(
         if photo_ids.is_empty() {
             return Err("Cluster has no photos".into());
         }
-        let coll_id = db::create_collection(&conn, &name, "manual", None)
-            .map_err(|e| e.to_string())?;
+        // v1.5.444 — collections.name is not UNIQUE, so create_collection always
+        // inserts a new row. Re-saving the same GPS cluster (same name) would pile
+        // up duplicate collections. Reuse an existing manual collection of that
+        // name if one exists; add_photo_to_collection is INSERT OR IGNORE, so
+        // re-adding the cluster's photos is idempotent.
+        let coll_id = match conn
+            .query_row(
+                "SELECT id FROM collections WHERE name = ?1 AND collection_type = 'manual' ORDER BY id LIMIT 1",
+                rusqlite::params![&name],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok()
+        {
+            Some(id) => id,
+            None => db::create_collection(&conn, &name, "manual", None).map_err(|e| e.to_string())?,
+        };
         for pid in &photo_ids {
             let _ = db::add_photo_to_collection(&conn, coll_id, *pid);
         }
@@ -15978,7 +15992,7 @@ pub async fn save_all_folders_as_collections(
 
         // Pre-fetch existing collection names so we can skip duplicates with one
         // lookup instead of a SELECT per folder.
-        let existing_names: std::collections::HashSet<String> = {
+        let mut existing_names: std::collections::HashSet<String> = {
             let mut stmt = conn
                 .prepare("SELECT name FROM collections")
                 .map_err(|e| e.to_string())?;
@@ -16029,6 +16043,12 @@ pub async fn save_all_folders_as_collections(
                     continue;
                 }
             };
+            // v1.5.444 — existing_names was seeded once from the DB but never
+            // updated as we created collections in this loop. Two folders that
+            // disambiguate to the same name would therefore both pass the
+            // "contains" check and create duplicate collections. Record the name
+            // we just created so the next folder sees it.
+            existing_names.insert(name);
 
             // Fetch photo ids for this folder and add to the new collection.
             let photo_ids: Vec<i64> = {
