@@ -145,6 +145,9 @@ fn build_session_with_directml(model_path: &Path) -> Result<Session> {
         let gpu_result = (|| -> std::result::Result<Session, Box<dyn std::error::Error>> {
             let builder = Session::builder()?;
             let builder = builder.with_execution_providers([DirectMLExecutionProvider::default().build()])?;
+            // v1.5.450 (Mac v1.5.296 parity) — cap intra-op threads so a CPU
+            // fallback during indexing can't pin every core (~895% CPU, fans max).
+            let builder = builder.with_intra_threads((std::thread::available_parallelism().map(|p| p.get() / 2).unwrap_or(2)).clamp(2, 6))?;
             let mut builder = builder.with_optimization_level(GraphOptimizationLevel::Level3)?;
             Ok(builder.commit_from_file(model_path)?)
         })();
@@ -157,6 +160,8 @@ fn build_session_with_directml(model_path: &Path) -> Result<Session> {
     // Fallback: CPU-only
     let session = Session::builder()
         .map_err(|e| anyhow::anyhow!("ONNX builder: {e}"))?
+        .with_intra_threads((std::thread::available_parallelism().map(|p| p.get() / 2).unwrap_or(2)).clamp(2, 6))
+        .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("opt level: {e}"))?
         .commit_from_file(model_path)

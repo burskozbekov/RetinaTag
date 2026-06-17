@@ -95,11 +95,26 @@ impl SmartRouter {
             .copied()
             .collect();
 
-        // Sort by cost ascending
+        // v1.5.450 (Mac v1.5.300 parity) — never let the circuit breaker drop
+        // the LAST provider. On a local-only run, 5 transient Ollama errors
+        // would otherwise empty this list → next_route() returns None → every
+        // remaining photo fails instantly. If keys exist but all are circuit-
+        // broken, keep the least-errored one so tagging can still recover.
+        if providers.is_empty() && !self.keys.is_empty() {
+            if let Some(least) = self
+                .keys
+                .keys()
+                .min_by_key(|p| self.error_streak.get(p).copied().unwrap_or(0))
+            {
+                providers.push(*least);
+            }
+        }
+
+        // Sort by cost ascending (NaN-safe: a NaN cost must not panic the sort).
         providers.sort_by(|a, b| {
             a.cost_per_image()
                 .partial_cmp(&b.cost_per_image())
-                .unwrap()
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         providers

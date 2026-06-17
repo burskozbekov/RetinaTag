@@ -123,7 +123,12 @@ pub async fn run_tagging(
                 let route = match route {
                     Some(r) => r,
                     None => {
+                        // v1.5.450 (Mac v1.5.300 parity) — no provider available:
+                        // mark the photo 'error' instead of leaving it 'pending'
+                        // forever (otherwise pending/tagged counts drift).
                         fail.fetch_add(1, Ordering::Relaxed);
+                        let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+                        db::update_photo_status(&conn, photo_id, "error").ok();
                         return;
                     }
                 };
@@ -173,7 +178,9 @@ pub async fn run_tagging(
                 let mut current_key = route.api_key;
                 let mut current_model = route.model;
                 let mut attempt = 0;
+                let mut rate_limit_retries = 0; // v1.5.450 — cap RateLimit retries
                 const MAX_ATTEMPTS: usize = 4;
+                const MAX_RATE_LIMIT_RETRIES: usize = 6;
 
                 loop {
                     // v1.5.443 — bail promptly once the run has been stopped (e.g.
@@ -318,7 +325,15 @@ pub async fn run_tagging(
                                     }
                                 }
                                 ApiErrorKind::RateLimit { retry_after_secs } => {
-                                    // Rate limit — wait and retry with the same provider
+                                    // Rate limit — wait and retry with the same provider.
+                                    // v1.5.450 (Mac v1.5.300 parity) — cap the retries.
+                                    // This arm does `attempt -= 1` so it never counted
+                                    // toward MAX_ATTEMPTS → a provider stuck returning 429
+                                    // (e.g. Gemini free tier exhausted) would retry forever.
+                                    rate_limit_retries += 1;
+                                    if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
+                                        let conn=db.lock().unwrap_or_else(|e| e.into_inner()); db::update_photo_status(&conn,photo_id,"error").ok(); fail.fetch_add(1,Ordering::Relaxed); break;
+                                    }
                                     ah.emit("tag-rate-limit", serde_json::json!({
                                         "provider": current_provider.name(),
                                         "wait_secs": retry_after_secs

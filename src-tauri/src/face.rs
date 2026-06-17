@@ -67,6 +67,10 @@ pub fn load_models(models_dir: &Path) -> Result<FaceModels> {
 
     let detector = Session::builder()
         .map_err(|e| anyhow::anyhow!("ort session builder: {}", e))?
+        // v1.5.450 (Mac v1.5.296 parity) — cap intra-op threads (face models run
+        // on CPU here) so a scan can't pin every core at ~895% CPU.
+        .with_intra_threads((std::thread::available_parallelism().map(|p| p.get() / 2).unwrap_or(2)).clamp(2, 6))
+        .map_err(|e| anyhow::anyhow!("ort intra threads: {}", e))?
 .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("ort opt level: {}", e))?
         .commit_from_file(&det_path)
@@ -74,6 +78,10 @@ pub fn load_models(models_dir: &Path) -> Result<FaceModels> {
 
     let embedder = Session::builder()
         .map_err(|e| anyhow::anyhow!("ort session builder: {}", e))?
+        // v1.5.450 (Mac v1.5.296 parity) — cap intra-op threads (CPU) so a scan
+        // can't pin every core.
+        .with_intra_threads((std::thread::available_parallelism().map(|p| p.get() / 2).unwrap_or(2)).clamp(2, 6))
+        .map_err(|e| anyhow::anyhow!("ort intra threads: {}", e))?
 .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("ort opt level: {}", e))?
         .commit_from_file(&emb_path)

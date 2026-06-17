@@ -95,6 +95,36 @@ pub struct PairingComplete {
     pub bearer_token: String,
 }
 
+// v1.5.450 (Mac v1.5.300 parity) — brute-force guard for the 6-digit pairing
+// code. /api/pair/complete had NO attempt cap, so a LAN attacker could hammer
+// guesses within the 5-min code TTL. Process-wide tiered lockout, mirroring the
+// vault-PIN policy: 3 wrong -> 30s, 5 -> 5m, 10 -> 30m. Only a wrong/expired
+// CODE counts (a malformed-format reject can't help an attacker and would let
+// anyone trivially self-lock the endpoint). A correct code resets it.
+static PAIRING_CODE_GUARD: std::sync::Mutex<(u32, Option<Instant>)> =
+    std::sync::Mutex::new((0, None));
+const PAIRING_FAILS_1: u32 = 3;
+const PAIRING_FAILS_2: u32 = 5;
+const PAIRING_FAILS_3: u32 = 10;
+
+/// Record a failed pairing attempt and arm the tiered lockout.
+fn pairing_note_failure() {
+    let mut g = PAIRING_CODE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    g.0 = g.0.saturating_add(1);
+    let lock = if g.0 >= PAIRING_FAILS_3 {
+        Some(Duration::from_secs(30 * 60))
+    } else if g.0 >= PAIRING_FAILS_2 {
+        Some(Duration::from_secs(5 * 60))
+    } else if g.0 >= PAIRING_FAILS_1 {
+        Some(Duration::from_secs(30))
+    } else {
+        None
+    };
+    if let Some(d) = lock {
+        g.1 = Some(Instant::now() + d);
+    }
+}
+
 /// iOS app submits (code, device_name). On success we issue + persist
 /// a token and return the plaintext bearer once.
 pub fn complete_pairing(
@@ -106,13 +136,34 @@ pub fn complete_pairing(
     if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
         return Err("Code must be 6 digits.".into());
     }
+    // v1.5.450 — reject while locked out from prior wrong codes (checked AFTER
+    // the format gate so a malformed request can't trip / extend the lockout).
+    {
+        let mut g = PAIRING_CODE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        match g.1 {
+            Some(until) if Instant::now() < until => {
+                let remaining = (until - Instant::now()).as_secs();
+                return Err(format!("Too many failed pairing attempts — locked out for {remaining}s."));
+            }
+            Some(_) => { g.0 = 0; g.1 = None; } // lockout window elapsed — reset
+            None => {}
+        }
+    }
     // Consume the pending entry under lock so a replayed code is rejected.
     {
         let mut map = pending().lock().map_err(|_| "pending mutex poisoned")?;
         sweep_expired(&mut map);
         match map.remove(code) {
-            Some(_) => {} // valid, consumed
-            None    => return Err("Code not found or expired.".into()),
+            Some(_) => {
+                // valid, consumed — clear the brute-force counter
+                let mut g = PAIRING_CODE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+                g.0 = 0;
+                g.1 = None;
+            }
+            None => {
+                pairing_note_failure();
+                return Err("Code not found or expired.".into());
+            }
         }
     }
     let device_name = device_name.trim();

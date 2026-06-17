@@ -33,6 +33,12 @@ use tokio::task::JoinHandle;
 /// so the iOS client doesn't have to hard-code it.
 pub const PORT: u16 = 9876;
 
+/// v1.5.450 (Mac v1.5.300 parity) — cap a single /api/photo Range response so a
+/// LAN peer can't force a multi-GB allocation by requesting a huge byte range on
+/// a large video (clones the slice into RAM). The client just re-requests the
+/// next chunk; HTML5 <video> does this automatically.
+const MAX_RANGE_CHUNK: u64 = 10 * 1024 * 1024; // 10 MB
+
 /// 2 GB max body. Matches Mac. Plenty for a single ProRAW frame or
 /// short 4K clip; an iOS app uploading a longer movie should chunk.
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024 * 1024;
@@ -679,8 +685,12 @@ async fn photo_for_id(
             let total = bytes.len() as u64;
             let range_hdr = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
             if let Some((start, end)) = range_hdr.and_then(|h| parse_range_header(h, total)) {
-                let slice = bytes[start as usize ..= end as usize].to_vec();
-                let content_range = format!("bytes {start}-{end}/{total}");
+                // v1.5.450 — cap the returned slice to MAX_RANGE_CHUNK (Content-Range
+                // reflects what we actually send, per RFC 7233; the client asks for
+                // the rest in a follow-up request).
+                let clamped_end = (start + MAX_RANGE_CHUNK - 1).min(end).min(total.saturating_sub(1));
+                let slice = bytes[start as usize ..= clamped_end as usize].to_vec();
+                let content_range = format!("bytes {start}-{clamped_end}/{total}");
                 return Response::builder()
                     .status(StatusCode::PARTIAL_CONTENT)
                     .header(header::CONTENT_TYPE, mime)

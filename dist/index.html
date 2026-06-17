@@ -15504,7 +15504,7 @@ function openAssignModal(face, photoId) {
         btn.innerHTML = `
           <div class="person-avatar">${full && full.thumbnail ? `<img src="data:image/jpeg;base64,${full.thumbnail}" style="width:100%;height:100%;object-fit:cover">` : '👤'}</div>
           <div style="flex:1">
-            <div style="font-size:12px;font-weight:700;color:var(--cream2)">${s.name}</div>
+            <div style="font-size:12px;font-weight:700;color:var(--cream2)">${_esc(s.name)}</div>
             <div style="font-size:10px;color:var(--amber)">${pct}% match${full ? ` · ${full.face_count} faces` : ''}</div>
           </div>`;
         btn.onclick = async () => {
@@ -16161,7 +16161,7 @@ function showFacePopup(faces, idx){
         // Show the numeric hotkey (1/2/3) as a monospace badge so keyboard
         // users discover it immediately. Mouse users ignore it.
         const hotkey = i < 9 ? `<span style="font-family:monospace;font-size:10px;color:var(--text3);background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:1px 5px">${i+1}</span>` : '';
-        chip.innerHTML = `${hotkey}<span style="font-weight:700;color:var(--cream)">${s.name}</span><span style="color:var(--text3);font-size:10px">${pct}%</span>`;
+        chip.innerHTML = `${hotkey}<span style="font-weight:700;color:var(--cream)">${_esc(s.name)}</span><span style="color:var(--text3);font-size:10px">${pct}%</span>`;
         chip.title = `Press ${i+1} or click — assigns this face (and its cluster) to ${s.name} (${pct}% cosine similarity)`;
         chip.onclick = () => {
           inp.value = s.name;
